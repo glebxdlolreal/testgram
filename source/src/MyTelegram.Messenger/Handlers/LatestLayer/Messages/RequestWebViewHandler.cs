@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Bots;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Open a <a href="https://corefork.telegram.org/bots/webapps">bot mini app</a>, sending over user information after user confirmation.After calling this method, until the user closes the webview, <a href="https://corefork.telegram.org/method/messages.prolongWebView">messages.prolongWebView</a> must be called every 60 seconds.
@@ -19,15 +21,62 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class RequestWebViewHandler(ILayeredService<IWebViewResultUrlResponseConverter> webViewResultsLayeredService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestRequestWebView, MyTelegram.Schema.IWebViewResult>
+internal sealed class RequestWebViewHandler(
+    IQueryProcessor queryProcessor,
+    IPeerHelper peerHelper,
+    IAccessHashHelper accessHashHelper,
+    IWebViewSessionStore webViewSessionStore,
+    ILayeredService<IWebViewResultUrlResponseConverter> webViewResultsLayeredService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestRequestWebView, MyTelegram.Schema.IWebViewResult>
 {
-    protected override Task<MyTelegram.Schema.IWebViewResult> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestRequestWebView obj)
+    protected override async Task<MyTelegram.Schema.IWebViewResult> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestRequestWebView obj)
     {
-        var r = new TWebViewResultUrl
+        if (obj.Bot is not TInputUser inputBot)
         {
-            Url = obj.Url,
-            QueryId = input.ReqMsgId
+            RpcErrors.RpcErrors400.BotInvalid.ThrowRpcError();
+            return null!;
+        }
+
+        await accessHashHelper.CheckAccessHashAsync(input, inputBot.UserId, inputBot.AccessHash);
+
+        var botReadModel = await queryProcessor.ProcessAsync(new GetUserByIdQuery(inputBot.UserId));
+        if (botReadModel == null || !botReadModel.Bot)
+        {
+            RpcErrors.RpcErrors400.BotInvalid.ThrowRpcError();
+        }
+
+        var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
+
+        // from_bot_menu and an explicit url are only meaningful in the chat with the bot itself.
+        if ((obj.FromBotMenu || !string.IsNullOrEmpty(obj.Url)) &&
+            !(peer.PeerType == PeerType.User && peer.PeerId == inputBot.UserId))
+        {
+            RpcErrors.RpcErrors400.BotWebviewDisabled.ThrowRpcError();
+        }
+
+        if (!string.IsNullOrEmpty(obj.Url) && !IsValidWebViewUrl(obj.Url))
+        {
+            RpcErrors.RpcErrors400.UrlInvalid.ThrowRpcError();
+        }
+
+        var url = await webViewSessionStore.ResolveBotUrlAsync(inputBot.UserId, obj.Url);
+        var queryId = await webViewSessionStore.CreateSessionAsync(inputBot.UserId, input.UserId, peer, url);
+
+        var result = new TWebViewResultUrl
+        {
+            QueryId = queryId,
+            Url = url,
+            Fullscreen = obj.Fullscreen
         };
-        return Task.FromResult<MyTelegram.Schema.IWebViewResult>(webViewResultsLayeredService.GetConverter(input.Layer).ToLayeredData(r));
+
+        return webViewResultsLayeredService.GetConverter(input.Layer).ToLayeredData(result);
+    }
+
+    /// <summary>
+    /// Clients refuse to load a mini app over anything but HTTPS, so reject other schemes here
+    /// rather than handing back a URL that cannot open.
+    /// </summary>
+    private static bool IsValidWebViewUrl(string url)
+    {
+        return Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps;
     }
 }

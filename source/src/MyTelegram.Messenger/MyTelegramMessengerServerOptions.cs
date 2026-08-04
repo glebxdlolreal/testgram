@@ -54,6 +54,28 @@ public class MyTelegramMessengerServerOptions
     public StatsConfig Stats { get; set; } = new();
     public RatesConfig Rates { get; set; } = new();
     public CallsConfig Calls { get; set; } = new();
+    public WebAppsConfig WebApps { get; set; } = new();
+}
+
+/// <summary>
+/// Mini app (<c>bots/webapps</c>) configuration. Mini apps are ordinary web pages served over
+/// HTTPS from outside this server; these settings only decide which URL clients are pointed at.
+/// See https://corefork.telegram.org/api/bots/webapps .
+/// </summary>
+public class WebAppsConfig
+{
+    /// <summary>
+    /// Base URL used when a bot has no explicit mini app URL configured. Must be HTTPS: clients
+    /// refuse to open a webview over plain HTTP.
+    /// </summary>
+    public string BaseUrl { get; set; } = "https://testgram.xie.su";
+
+    /// <summary>
+    /// Seconds a webview session stays valid without a <c>messages.prolongWebView</c> call. Clients
+    /// are expected to prolong every 60 seconds, so this allows a couple of missed beats.
+    /// </summary>
+    [Range(60, int.MaxValue)]
+    public int SessionTimeoutSeconds { get; set; } = 180;
 }
 
 /// <summary>

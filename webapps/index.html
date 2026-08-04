@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Testgram Mini App</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0;
+            padding: 24px;
+            background: var(--tg-theme-bg-color, #fff);
+            color: var(--tg-theme-text-color, #000);
+        }
+        h1 { font-size: 20px; margin: 0 0 16px; }
+        dl { margin: 0 0 24px; font-size: 14px; }
+        dt { font-weight: 600; margin-top: 12px; }
+        dd { margin: 4px 0 0; opacity: .8; word-break: break-all; }
+        button {
+            width: 100%;
+            padding: 14px;
+            font-size: 15px;
+            border: 0;
+            border-radius: 10px;
+            background: var(--tg-theme-button-color, #2481cc);
+            color: var(--tg-theme-button-text-color, #fff);
+        }
+        input {
+            width: 100%;
+            box-sizing: border-box;
+            padding: 12px;
+            margin-bottom: 12px;
+            font-size: 15px;
+            border: 1px solid rgba(128, 128, 128, .4);
+            border-radius: 10px;
+            background: transparent;
+            color: inherit;
+        }
+    </style>
+</head>
+<body>
+<h1>Testgram Mini App</h1>
+
+<!--
+  Minimal mini app used to exercise the server end to end:
+  messages.requestWebView / requestSimpleWebView hand the client this page's URL,
+  and pressing Send calls Telegram.WebApp.sendData, which the client turns into
+  messages.sendWebViewData so the bot receives messageActionWebViewDataSentMe.
+-->
+
+<dl>
+    <dt>Platform</dt>
+    <dd id="platform">-</dd>
+    <dt>Version</dt>
+    <dd id="version">-</dd>
+    <dt>Query ID</dt>
+    <dd id="query-id">-</dd>
+    <dt>User</dt>
+    <dd id="user">-</dd>
+    <dt>Start param</dt>
+    <dd id="start-param">-</dd>
+</dl>
+
+<input id="payload" value="hello from mini app" aria-label="Payload to send">
+<button id="send">Send data to bot</button>
+
+<script>
+    var webApp = window.Telegram && window.Telegram.WebApp;
+
+    function text(id, value) {
+        document.getElementById(id).textContent = value || '-';
+    }
+
+    if (webApp) {
+        webApp.ready();
+        webApp.expand();
+
+        var data = webApp.initDataUnsafe || {};
+        text('platform', webApp.platform);
+        text('version', webApp.version);
+        text('query-id', data.query_id);
+        text('start-param', data.start_param);
+        text('user', data.user ? (data.user.username || data.user.id) : null);
+    } else {
+        text('platform', 'not running inside Telegram');
+    }
+
+    document.getElementById('send').addEventListener('click', function () {
+        var payload = document.getElementById('payload').value;
+        if (webApp) {
+            // The client relays this through messages.sendWebViewData and closes the view.
+            webApp.sendData(payload);
+        } else {
+            alert('Open this page from a Telegram bot to send data.');
+        }
+    });
+</script>
+</body>
+</html>
