@@ -111,5 +111,10 @@ public class MongoDbIndexesCreator(
         await CreateIndexAsync<MongoDbSnapshotDataModel>(p => p.AggregateId, snapShotCollectionName);
         await CreateIndexAsync<MongoDbSnapshotDataModel>(p => p.AggregateName, snapShotCollectionName);
         await CreateIndexAsync<MongoDbSnapshotDataModel>(p => p.AggregateSequenceNumber, snapShotCollectionName);
+
+        // The four messages.getEmoji*Groups methods each filter emoji_groups on For and sort by
+        // Order, Title. The collection is seeded outside EventFlow, so it only had the default
+        // _id_ index and every category lookup was a collection scan.
+        await CreateRawIndexAsync("emoji_groups", "For", "Order", "Title");
     }
 }

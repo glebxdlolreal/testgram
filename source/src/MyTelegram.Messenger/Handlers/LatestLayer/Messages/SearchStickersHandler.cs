@@ -1,5 +1,6 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
+using MyTelegram.Messenger.Helpers;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
@@ -11,11 +12,24 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// </remarks>
 internal sealed class SearchStickersHandler(IMongoDatabase mongoDatabase) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSearchStickers, MyTelegram.Schema.Messages.IFoundStickers>
 {
+    /// <summary>
+    /// TDLib asks for the <a href="https://corefork.telegram.org/api/emoji-categories">emojiGroupPremium</a>
+    /// category by searching for this sentinel emoji pair rather than by a flag
+    /// (StickersManager::do_get_premium_stickers). It normalises emoji modifiers away first, so the
+    /// variation selector may or may not survive - accept both forms.
+    /// </summary>
+    private static readonly string[] PremiumMagicEmoticons = ["\U0001F4C2⭐️", "\U0001F4C2⭐"];
+
     protected override async Task<MyTelegram.Schema.Messages.IFoundStickers> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestSearchStickers obj)
     {
         var emoticon = obj.Emoticon?.Trim() ?? string.Empty;
         var query = obj.Q?.Trim().ToLowerInvariant() ?? string.Empty;
         var limit = obj.Limit > 0 ? Math.Min(obj.Limit, 100) : 20;
+
+        if (PremiumMagicEmoticons.Contains(emoticon, StringComparer.Ordinal))
+        {
+            return await SearchPremiumAsync(obj, limit);
+        }
 
         if (string.IsNullOrEmpty(emoticon) && string.IsNullOrEmpty(query))
         {
@@ -96,6 +110,45 @@ internal sealed class SearchStickersHandler(IMongoDatabase mongoDatabase) : RpcR
             Stickers = new TVector<IDocument>(stickers),
             Hash = 0,
             NextOffset = documentIds.Distinct().Count() > obj.Offset + stickers.Count ? obj.Offset + stickers.Count : null
+        };
+    }
+
+    /// <summary>
+    /// Serves the emojiGroupPremium category: Premium-only custom emojis are those whose
+    /// documentAttributeCustomEmoji.free flag is NOT set, and Premium-only stickers are those
+    /// carrying a Premium effect, which clients detect via a video thumbnail of type "f"
+    /// (MessageObject.isPremiumSticker on Android).
+    /// </summary>
+    private async Task<MyTelegram.Schema.Messages.IFoundStickers> SearchPremiumAsync(
+        MyTelegram.Schema.Messages.RequestSearchStickers obj, int limit)
+    {
+        var docCol = mongoDatabase.GetCollection<BsonDocument>("eventflow-documentreadmodel");
+        var filter = obj.Emojis
+            ? Builders<BsonDocument>.Filter.Eq("Attributes2.Free", false)
+            : Builders<BsonDocument>.Filter.Eq("VideoThumbs.Type", "f");
+
+        var candidates = await docCol.Find(filter)
+            .Sort(Builders<BsonDocument>.Sort.Ascending("DocumentId"))
+            .ToListAsync();
+
+        // The Free filter above matches on the attribute array, so re-check that the document
+        // really carries a custom-emoji attribute with free unset before returning it.
+        if (obj.Emojis)
+        {
+            candidates = candidates
+                .Where(x => CustomEmojiAttributeHelper.TryGetCustomEmojiAttribute(x, out var attribute) && !attribute.Free)
+                .ToList();
+        }
+
+        var total = candidates.Count;
+        var page = candidates.Skip(obj.Offset).Take(limit).ToList();
+        var stickers = page.Select(BuildDocument).ToList();
+
+        return new TFoundStickers
+        {
+            Stickers = new TVector<IDocument>(stickers),
+            Hash = 0,
+            NextOffset = total > obj.Offset + stickers.Count ? obj.Offset + stickers.Count : null
         };
     }
 

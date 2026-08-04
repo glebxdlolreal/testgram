@@ -562,91 +562,252 @@ def build_emoji_keyword_docs(entries: List[Dict[str, Any]]) -> List[Dict[str, An
     return docs
 
 
-def build_emoji_group_docs(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    custom_entries = [entry for entry in entries if entry.get("is_custom_emoji")]
-    all_emoticons = []
-    status_emoticons = []
-    for entry in custom_entries:
+"""
+Emoji category definitions, modelled on the categories the official clients show in the
+sticker/emoji/GIF search bar. Each entry is (title, icon emoji, member emojis): the icon is
+resolved to a real custom-emoji document id at seed time, because TDLib discards any category
+whose icon cannot be resolved (EmojiGroupList::get_emoji_categories_object), which would
+otherwise leave iOS/Desktop/tdweb with an empty category bar.
+"""
+EMOJI_CATEGORY_DEFINITIONS = [
+    ("Smileys & People", "😀", [
+        "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🙂", "😉", "😊", "😍", "😘", "😗", "😙",
+        "🤗", "🤔", "😐", "😑", "😶", "🙄", "😏", "😣", "😥", "😮", "😯", "😪", "😫", "😴",
+        "😌", "😛", "😜", "😝", "🤤", "😒", "😓", "😔", "😕", "🙃", "🤑", "😲", "😖", "😞",
+        "😟", "😤", "😢", "😭", "😦", "😧", "😨", "😩", "😬", "😰", "😱", "😳", "🤪", "😵",
+        "😡", "😠", "😷", "🤒", "🤕", "🤢", "🤧", "😇", "🤠", "🤡", "🤥", "🤓", "😈", "👶",
+        "🧘", "🕺", "💃", "👀", "🗣", "👑", "🙋", "🤝", "👋", "👣", "💅", "🧠",
+    ]),
+    ("Animals & Nature", "🐈", [
+        "🐈", "🦮", "🦄", "🐟", "🦠", "🐶", "🐱", "🐭", "🐹", "🐰", "🦊", "🐻", "🐼", "🐨",
+        "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🙈", "🐔", "🐧", "🐦", "🐤", "🦆", "🦅", "🦉",
+        "🐺", "🐗", "🐴", "🦋", "🐌", "🐞", "🐜", "🕷", "🐢", "🐍", "🦎", "🐙", "🦀", "🐠",
+        "🐬", "🐳", "🐆", "🦓", "🦍", "🐘", "🐫", "🦒", "🐃", "🐑", "🐐", "🌵", "🌲", "🌳",
+        "🌴", "🌱", "🌿", "🍀", "🍁", "🍄", "🌷", "🌹", "🌺", "🌸", "🌼", "🌻", "⭐", "⚡",
+        "⛅", "🔥", "❄", "🌈",
+    ]),
+    ("Food & Drink", "🍔", [
+        "🍔", "🍕", "🍣", "🍹", "🎂", "☕", "🍓", "🍽", "🍴", "🍏", "🍎", "🍐", "🍊", "🍋",
+        "🍌", "🍉", "🍇", "🫐", "🍒", "🍑", "🥭", "🍍", "🥥", "🥝", "🍅", "🥑", "🍆", "🥔",
+        "🥕", "🌽", "🌶", "🥒", "🥬", "🧄", "🧅", "🍞", "🥐", "🥖", "🧀", "🥚", "🍳", "🥞",
+        "🥓", "🍗", "🍖", "🌭", "🥪", "🌮", "🌯", "🥗", "🍝", "🍜", "🍲", "🍛", "🍤", "🍚",
+        "🍦", "🍰", "🍫", "🍬", "🍭", "🍩", "🍪", "🥛", "🍵", "🍺", "🍻", "🥂", "🍷", "🥃",
+    ]),
+    ("Activity & Sport", "⚽", [
+        "⚽", "🏀", "🏆", "🏁", "🎮", "🎬", "🎵", "🎶", "🎤", "🎙", "🎨", "🎭", "🎩", "🎰",
+        "🎳", "🎯", "🎲", "🏈", "⚾", "🎾", "🏐", "🏉", "🥏", "🎱", "🏓", "🏸", "🥊", "🥋",
+        "⛳", "🏹", "🎣", "🤿", "🎿", "🛷", "🥌", "🏂", "🏄", "🚴", "🏊", "🤸", "🤼", "🤾",
+        "🏋", "🚵", "🤺", "🏇", "🎪", "🎟", "🎫", "🎖", "🏅", "🥇", "🥈", "🥉", "🎓", "🪩",
+    ]),
+    ("Travel & Places", "✈", [
+        "✈", "🚗", "🏠", "🏖", "🧳", "🏔", "🏕", "🚂", "🛥", "🚕", "🚙", "🚌", "🚎", "🏎",
+        "🚓", "🚑", "🚒", "🚐", "🚚", "🚛", "🚜", "🛴", "🚲", "🛵", "🏍", "🚨", "🚔", "🚍",
+        "🚝", "🚄", "🚅", "🚈", "🚂", "🚆", "🚇", "🚊", "🚉", "🛫", "🛬", "🛩", "💺", "🚁",
+        "🛰", "🚀", "🛸", "🛶", "⛵", "🚤", "🛳", "⛴", "🚢", "⚓", "🗺", "🗿", "🗽", "🗼",
+        "🏰", "🏯", "🎡", "🎢", "⛲", "⛱", "🏝", "🏜", "🌋", "⛰", "🏛", "🏗", "🌁", "🌃",
+    ]),
+    ("Objects", "💡", [
+        "💡", "💻", "📱", "📰", "📝", "📆", "📁", "🔎", "📣", "📈", "📉", "💎", "💰", "💸",
+        "🪙", "💱", "💼", "🧪", "🧮", "🖨", "🩺", "💊", "💉", "🧼", "🪪", "🛃", "🔮", "🎄",
+        "🎃", "🎉", "🎁", "🛍", "👜", "🛒", "👠", "💄", "📚", "📺", "📞", "🕓", "⌚", "📷",
+        "📹", "🎥", "📽", "🔍", "🔬", "🔭", "📡", "🔋", "🔌", "💾", "💿", "📀", "🖥", "⌨",
+        "🖱", "🖲", "🕹", "🗜", "💣", "🔧", "🔨", "🪓", "🔪", "🗝", "🔒", "🔓", "✍", "📌",
+    ]),
+    ("Symbols & Flags", "❤", [
+        "❤", "❗", "❓", "‼", "⁉", "🆒", "🔝", "✅", "⛔", "🔞", "💘", "💤", "💬", "🤖",
+        "🗳", "🏴‍☠", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣", "💕", "💞",
+        "💓", "💗", "💖", "💟", "☮", "✝", "☪", "🕉", "☸", "✡", "🔱", "⚛", "♻", "✳",
+        "❇", "™", "©", "®", "〰", "➰", "➿", "🔚", "🔙", "🔛", "🔜", "🔃", "🔄", "🔀",
+        "🇺🇸", "🇬🇧", "🇷🇺", "🇩🇪", "🇫🇷", "🇮🇹", "🇪🇸", "🇯🇵", "🇨🇳", "🇰🇷", "🇧🇷", "🇨🇦", "🇦🇺", "🇮🇳",
+    ]),
+]
+
+"""
+Categories offered when picking a custom emoji status; the official clients show a smaller,
+status-oriented set here rather than the full emoji taxonomy.
+"""
+STATUS_CATEGORY_DEFINITIONS = [
+    ("Busy", "💼", ["💼", "🕓", "⛔", "🧠", "💻", "📝", "📈", "🔥"]),
+    ("Away", "💤", ["💤", "🏝", "🧘", "✈", "🧳", "🏖", "⛅", "🌴"]),
+    ("Greeting", "👋", ["👋", "🤝", "❤", "🎉", "🙋", "💘", "😊", "🤗"]),
+    ("Eating", "🍴", ["🍴", "☕", "🍕", "🍔", "🍣", "🍰", "🍹", "🍺"]),
+    ("On the move", "👣", ["👣", "🚗", "🚂", "🛥", "🏔", "🏕", "🚴", "🏃"]),
+    ("Calling", "📞", ["📞", "📱", "💬", "🗣", "🎙", "🎤", "📣", "💻"]),
+]
+
+"""
+Categories offered when picking a custom emoji as a profile picture.
+"""
+PROFILE_PHOTO_CATEGORY_DEFINITIONS = [
+    ("Faces", "😀", ["😀", "😊", "😍", "🤔", "😎", "🤠", "🤓", "😇", "🙃", "😉"]),
+    ("Animals", "🐈", ["🐈", "🦮", "🦄", "🐶", "🐱", "🦊", "🐻", "🐼", "🐯", "🦁"]),
+    ("Love", "❤", ["❤", "💘", "💕", "💖", "💝", "🧡", "💛", "💚", "💙", "💜"]),
+    ("Nature", "🌸", ["🌸", "🌹", "🌺", "🌻", "🌷", "🍀", "🌲", "🌴", "⭐", "🌈"]),
+    ("Hobbies", "🎮", ["🎮", "🎨", "🎵", "🎬", "⚽", "🏀", "📚", "🎯", "🎸", "📷"]),
+]
+
+"""
+Emojis for the greeting category (emojiGroupGreeting), which clients sort to the top when
+choosing a sticker for a business introduction.
+"""
+GREETING_EMOTICONS = ["👋", "🤝", "❤", "🎉", "😊", "🤗", "🙋", "💘", "☺", "🥳"]
+
+
+def build_emoticon_icon_map(entries: List[Dict[str, Any]]) -> Dict[str, int]:
+    """
+    Maps a UTF-8 emoji to the id of a custom-emoji document representing it, so categories can
+    carry a real icon_emoji_id. Later sets do not override earlier ones, so the preference order
+    of the manifest is respected.
+    """
+    icon_map: Dict[str, int] = {}
+    for entry in entries:
+        if not entry.get("is_custom_emoji"):
+            continue
         for pack in entry.get("packs", []):
             emoticon = (pack.get("emoticon") or "").strip()
             if not emoticon:
                 continue
-            all_emoticons.append(emoticon)
-            if entry.get("channel_emoji_status") or entry.get("input_stickerset_type") == "inputStickerSetEmojiDefaultStatuses":
-                status_emoticons.append(emoticon)
+            for raw_doc_id in pack.get("documents", []):
+                doc_id = to_int64(raw_doc_id) & 0x7FFFFFFFFFFFFFFF
+                if doc_id and emoticon not in icon_map:
+                    icon_map[emoticon] = doc_id
+                break
+    return icon_map
 
-    def unique(values: List[str]) -> List[str]:
-        result = []
-        seen = set()
-        for value in values:
-            if value not in seen:
-                seen.add(value)
-                result.append(value)
-        return result
 
-    all_emoticons = unique(all_emoticons)
-    status_emoticons = unique(status_emoticons)
+def resolve_icon_emoji_id(icon_map: Dict[str, int], preferred: str, members: List[str]) -> int:
+    """
+    Picks an icon document for a category: the preferred emoji if a custom emoji exists for it,
+    else the first member emoji that has one. Returns 0 only when the seeded sets cover none of
+    them, which the caller reports rather than silently writing an icon-less category.
+    """
+    for candidate in [preferred, *members]:
+        # Emoji in the manifest may lack the variation selector present in our definitions.
+        for variant in (candidate, candidate.replace("️", ""), candidate + "️"):
+            if variant in icon_map:
+                return icon_map[variant]
+    return 0
+
+
+def build_category_docs(
+    definitions: List[Any],
+    icon_map: Dict[str, int],
+    known_emoticons: set,
+    group_for: str,
+    id_prefix: str,
+    start_order: int = 1,
+) -> List[Dict[str, Any]]:
+    """
+    Builds category documents, keeping only member emojis that some seeded custom-emoji set
+    actually covers - a category whose emojis match nothing would open an empty grid.
+    """
     docs = []
-    if all_emoticons:
-        docs.extend([
-            {
-                "_id": "emoji-group-default-trending",
-                "For": "default",
-                "Kind": "default",
-                "Title": "Trending",
-                "IconEmojiId": 0,
-                "Emoticons": all_emoticons[:64],
-                "Order": 1,
-                "Version": 1,
-            },
-            {
-                "_id": "emoji-group-stickers-trending",
-                "For": "stickers",
-                "Kind": "default",
-                "Title": "Trending",
-                "IconEmojiId": 0,
-                "Emoticons": all_emoticons[:64],
-                "Order": 1,
-                "Version": 1,
-            },
-            {
-                "_id": "emoji-group-profile-photo-default",
-                "For": "profile_photo",
-                "Kind": "default",
-                "Title": "Profile",
-                "IconEmojiId": 0,
-                "Emoticons": all_emoticons[:64],
-                "Order": 1,
-                "Version": 1,
-            },
-        ])
-    if status_emoticons:
+    order = start_order
+    for title, icon_emoji, members in definitions:
+        available = [emoticon for emoticon in members if emoticon in known_emoticons]
+        if not available:
+            continue
+        icon_emoji_id = resolve_icon_emoji_id(icon_map, icon_emoji, available)
+        if not icon_emoji_id:
+            print(f"  WARNING: no custom emoji icon for category '{title}' ({group_for}); skipping")
+            continue
+        slug = title.lower().replace(" & ", "-").replace(" ", "-")
         docs.append({
-            "_id": "emoji-group-status-default",
-            "For": "status",
+            "_id": f"{id_prefix}-{slug}",
+            "For": group_for,
             "Kind": "default",
-            "Title": "Status",
-            "IconEmojiId": 0,
-            "Emoticons": status_emoticons[:64],
+            "Title": title,
+            "IconEmojiId": icon_emoji_id,
+            "Emoticons": available[:64],
+            "Order": order,
+            "Version": 1,
+        })
+        order += 1
+    return docs
+
+
+def build_emoji_group_docs(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    custom_entries = [entry for entry in entries if entry.get("is_custom_emoji")]
+    icon_map = build_emoticon_icon_map(entries)
+    known_emoticons = set(icon_map)
+
+    docs: List[Dict[str, Any]] = []
+
+    # messages.getEmojiGroups - emojis, custom emojis and GIFs.
+    docs.extend(build_category_docs(
+        EMOJI_CATEGORY_DEFINITIONS, icon_map, known_emoticons, "default", "emoji-group-default"))
+
+    # messages.getEmojiStickerGroups - choosing a sticker. The greeting category goes first so
+    # clients sorting greetings to the top for business introductions have one to find.
+    greeting_available = [e for e in GREETING_EMOTICONS if e in known_emoticons]
+    greeting_icon_id = resolve_icon_emoji_id(icon_map, "👋", greeting_available)
+    sticker_start_order = 1
+    if greeting_available and greeting_icon_id:
+        docs.append({
+            "_id": "emoji-group-stickers-greeting",
+            "For": "stickers",
+            "Kind": "greeting",
+            "Title": "Greeting",
+            "IconEmojiId": greeting_icon_id,
+            "Emoticons": greeting_available[:64],
             "Order": 1,
             "Version": 1,
         })
-    premium_emoticons = unique([
-        pack.get("emoticon") or ""
-        for entry in custom_entries if not entry.get("free", False)
-        for pack in entry.get("packs", [])
-        if (pack.get("emoticon") or "").strip()
-    ])
-    if premium_emoticons:
-        docs.append({
-            "_id": "emoji-group-default-premium",
-            "For": "default",
-            "Kind": "premium",
-            "Title": "Premium",
-            "IconEmojiId": 0,
-            "Order": 2,
-            "Version": 1,
-        })
+        sticker_start_order = 2
+    else:
+        print("  WARNING: no greeting category seeded (no custom emoji icon available)")
+
+    docs.extend(build_category_docs(
+        EMOJI_CATEGORY_DEFINITIONS, icon_map, known_emoticons, "stickers", "emoji-group-stickers",
+        start_order=sticker_start_order))
+
+    # messages.getEmojiStatusGroups - choosing a custom emoji status.
+    docs.extend(build_category_docs(
+        STATUS_CATEGORY_DEFINITIONS, icon_map, known_emoticons, "status", "emoji-group-status"))
+
+    # messages.getEmojiProfilePhotoGroups - choosing a profile picture.
+    docs.extend(build_category_docs(
+        PROFILE_PHOTO_CATEGORY_DEFINITIONS, icon_map, known_emoticons, "profile_photo",
+        "emoji-group-profile-photo"))
+
+    # emojiGroupPremium carries no emoticons: clients select all Premium-only content instead,
+    # which the server answers via the magic emoticon in messages.searchStickers. Premium-only
+    # custom emojis are those with free unset; Premium-only stickers are a separate population
+    # (those carrying a Premium effect), so each category is only offered where content exists -
+    # otherwise the category opens an empty grid.
+    has_premium_emoji = any(
+        not entry.get("free", False) and entry.get("packs")
+        for entry in custom_entries
+    )
+    has_premium_stickers = any(
+        not entry.get("is_custom_emoji") and entry.get("premium_effect")
+        for entry in entries
+    )
+    premium_targets = []
+    if has_premium_emoji:
+        premium_targets.append("default")
+    if has_premium_stickers:
+        premium_targets.append("stickers")
+    else:
+        print("  NOTE: no Premium-effect stickers in the manifest; skipping the sticker Premium category")
+
+    if premium_targets:
+        premium_icon_id = resolve_icon_emoji_id(icon_map, "⭐", ["💎", "👑", "🏆", "🔝"])
+        if premium_icon_id:
+            for group_for in premium_targets:
+                docs.append({
+                    "_id": f"emoji-group-{group_for.replace('_', '-')}-premium",
+                    "For": group_for,
+                    "Kind": "premium",
+                    "Title": "Premium",
+                    "IconEmojiId": premium_icon_id,
+                    # Placed last so it does not displace the content categories.
+                    "Order": 100,
+                    "Version": 1,
+                })
+        else:
+            print("  WARNING: no premium category seeded (no custom emoji icon available)")
+
     return docs
 
 

@@ -1,6 +1,7 @@
 ﻿using EventFlow.MongoDB.EventStore;
 using EventFlow.MongoDB.ReadStores;
 using EventFlow.MongoDB.ValueObjects;
+using MongoDB.Bson;
 using MongoDB.Driver;
 using System.Linq.Expressions;
 
@@ -57,5 +58,19 @@ public abstract class MongoDbIndexesCreatorBase(
         var indexDefine = Builders<TSnapshot>.IndexKeys.Ascending(field);
         await database.GetCollection<TSnapshot>(collectionName).Indexes
             .CreateOneAsync(new CreateIndexModel<TSnapshot>(indexDefine));
+    }
+
+    /// <summary>
+    /// Creates an ascending index on a plain BsonDocument collection - those seeded outside of
+    /// EventFlow (emoji_groups, emoji_keywords and friends) have no read model type, so the
+    /// typed overloads above cannot reach them.
+    /// </summary>
+    protected async Task CreateRawIndexAsync(string collectionName, params string[] fieldNames)
+    {
+        var indexDefine = Builders<BsonDocument>.IndexKeys.Combine(
+            fieldNames.Select(name => Builders<BsonDocument>.IndexKeys.Ascending(new StringFieldDefinition<BsonDocument, BsonValue>(name))));
+        await database.GetCollection<BsonDocument>(collectionName).Indexes
+            .CreateOneAsync(new CreateIndexModel<BsonDocument>(indexDefine,
+                new CreateIndexOptions { Name = $"idx_{collectionName}_{string.Join("_", fieldNames).ToLowerInvariant()}" }));
     }
 }
