@@ -28,6 +28,7 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     IApply<ChannelParticipantCountChangedEvent>,
     IApply<ChannelTopMessageIdUpdatedEvent>,
     IApply<ChannelParticipantsHiddenUpdatedEvent>,
+    IApply<ChannelAvailableReactionsChangedEvent>,
     IApply<ChannelJoinRequestUpdatedEvent>,
     IApply<ChannelAdminRemovedEvent>,
     IApply<MonoforumEnabledEvent>
@@ -78,6 +79,10 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     public EmojiStatus? EmojiStatus { get; private set; }
     public bool Verified { get; private set; }
     public bool ParticipantsHidden { get; private set; }
+    public ReactionType ReactionType { get; private set; }
+    public List<string>? AvailableReactions { get; private set; }
+    public bool AllowCustomReaction { get; private set; }
+    public bool PaidReactionsEnabled { get; private set; }
     public bool JoinRequest { get; private set; }
     public bool IsMonoforum { get; private set; }
     public bool BroadcastMessagesAllowed { get; private set; }
@@ -339,6 +344,13 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     public void Apply(ChannelParticipantsHiddenUpdatedEvent aggregateEvent)
     {
         ParticipantsHidden = aggregateEvent.Enabled;
+    }
+    public void Apply(ChannelAvailableReactionsChangedEvent aggregateEvent)
+    {
+        ReactionType = aggregateEvent.ReactionType;
+        AvailableReactions = aggregateEvent.AvailableReactions;
+        AllowCustomReaction = aggregateEvent.AllowCustom;
+        PaidReactionsEnabled = aggregateEvent.PaidEnabled;
     }
     public void Apply(ChannelJoinRequestUpdatedEvent aggregateEvent)
     {

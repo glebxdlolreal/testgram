@@ -98,6 +98,28 @@ public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, 
         Emit(new DialogUnreadMarkChangedEvent(unreadMark));
     }
 
+    /// <summary>
+    /// Increments the unread reaction counter shown as a badge in the dialog list.
+    /// See https://corefork.telegram.org/api/reactions#notifications-about-reactions
+    /// </summary>
+    public void CreateUnreadReaction(int messageId)
+    {
+        var unreadReactionsCount = _state.UnreadReactionsCount + 1;
+        var ownerUserId = _state.OwnerId;
+        Emit(new UnreadReactionCreatedEvent(ownerUserId, _state.ToPeer, messageId, unreadReactionsCount));
+    }
+
+    /// <summary>
+    /// Clears the unread reaction counter, called from messages.readReactions.
+    /// </summary>
+    public void ReadUnreadReactions()
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        var ownerUserId = _state.OwnerId;
+        var unreadReactionsCount = 0;
+        Emit(new UnreadReactionsReadEvent(ownerUserId, _state.ToPeer, unreadReactionsCount));
+    }
+
     public void OutboxMessageHasRead(RequestInfo requestInfo,
         int maxMessageId,
         long ownerPeerId,
@@ -300,7 +322,8 @@ public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, 
             _state.ChannelHistoryMinId,
             _state.Draft,
             _state.UnreadMentionsCount,
-            _state.FolderId
+            _state.FolderId,
+            _state.UnreadReactionsCount
         ));
     }
 

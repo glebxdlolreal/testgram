@@ -1,30 +1,27 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
+using MyTelegram.Messenger.Helpers;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
-internal sealed class GetTopReactionsHandler(IMongoDatabase database)
+/// <summary>
+/// Get most used message reactions.
+/// <para><c>See <a href="https://corefork.telegram.org/method/messages.getTopReactions"/> </c></para>
+/// </summary>
+internal sealed class GetTopReactionsHandler(IReactionListAppService reactionListAppService)
     : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetTopReactions, MyTelegram.Schema.Messages.IReactions>
 {
     protected override async Task<MyTelegram.Schema.Messages.IReactions> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetTopReactions obj)
     {
-        // Load top reactions from MongoDB
-        var collection = database.GetCollection<BsonDocument>("reactions");
-        var filter = Builders<BsonDocument>.Filter.And(
-            Builders<BsonDocument>.Filter.Eq("Inactive", false),
-            Builders<BsonDocument>.Filter.Eq("Premium", false)
-        );
-        var sort = Builders<BsonDocument>.Sort.Ascending("Order");
-
         var limit = obj.Limit > 0 ? obj.Limit : 100;
-        var reactionDocs = await collection.Find(filter).Sort(sort).Limit(limit).ToListAsync();
+        var reactions = await reactionListAppService.GetActiveEmojiReactionsAsync(limit);
+        var hash = TelegramHashHelper.GetVectorHash(reactions.Select(r => r.GetReactionId()));
 
-        var reactions = reactionDocs
-            .Select(doc => (IReaction)new TReactionEmoji { Emoticon = doc["Reaction"].AsString })
-            .ToList();
+        if (obj.Hash != 0 && obj.Hash == hash)
+        {
+            return new TReactionsNotModified();
+        }
 
         return new TReactions
         {
-            Hash = 0,
+            Hash = hash,
             Reactions = new TVector<IReaction>(reactions)
         };
     }

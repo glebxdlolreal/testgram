@@ -30,7 +30,9 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
     public void UpdateMessageReactions(RequestInfo requestInfo, List<Reaction> reactions)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
-        Emit(new MessageReactionsUpdatedEvent(requestInfo, _state.MessageItem, reactions));
+        // The previous set is carried in the event so subscribers can report old_reactions to bots.
+        var oldReactions = _state.RecentReactions.ToList();
+        Emit(new MessageReactionsUpdatedEvent(requestInfo, _state.MessageItem, reactions, oldReactions));
     }
 
     public void AddInboxItemsToOutboxMessage(List<InboxItem> inboxItems)

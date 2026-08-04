@@ -56,16 +56,17 @@ internal sealed class ChannelFullMapper
                 };
                 break;
             case ReactionType.ReactionSome:
-                if (source.AvailableReactions?.Count > 0)
-                {
-                    destination.AvailableReactions = new TChatReactionsSome
+                // An empty whitelist means reactions are disabled entirely (chatReactionsNone).
+                // Leaving the field null would be read by clients as "no restriction".
+                destination.AvailableReactions = source.AvailableReactions?.Count > 0
+                    ? new TChatReactionsSome
                     {
                         Reactions = new TVector<IReaction>(source.AvailableReactions.Select(p => new TReactionEmoji
                         {
                             Emoticon = p
                         }))
-                    };
-                }
+                    }
+                    : new TChatReactionsNone();
 
                 break;
             default:

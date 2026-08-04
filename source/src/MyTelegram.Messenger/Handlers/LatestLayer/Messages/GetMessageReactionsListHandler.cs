@@ -15,6 +15,10 @@ internal sealed class GetMessageReactionsListHandler(
 
         var reactions = msg?.RecentReactions2 ?? [];
 
+        // Paid reactions are exposed through top_reactors only: including them here would reveal a
+        // sender who chose to donate anonymously.
+        reactions = reactions.Where(r => r.Reaction is not TReactionPaid).ToList();
+
         if (obj.Reaction != null)
             reactions = reactions.Where(r =>
                 obj.Reaction is TReactionEmoji emoji && r.Reaction is TReactionEmoji re && re.Emoticon == emoji.Emoticon ||

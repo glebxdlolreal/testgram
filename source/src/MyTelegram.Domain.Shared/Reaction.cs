@@ -8,7 +8,9 @@ public record Reaction(
     long? CustomEmojiDocumentId,
     int? Date = 0,
     bool Big = false,
-    bool IsPaid = false)
+    bool IsPaid = false,
+    bool Anonymous = false,
+    long AnonymousPeerId = 0)
 {
     public long UserId { get; set; } = UserId;
     public string? Emoticon { get; set; } = Emoticon;
@@ -17,6 +19,17 @@ public record Reaction(
     public int? Date { get; set; } = Date;
     public bool Big { get; set; } = Big;
     public bool IsPaid { get; set; } = IsPaid;
+
+    /// <summary>
+    /// Paid reactions only: hide the sender in the top reactors leaderboard.
+    /// See https://corefork.telegram.org/api/reactions#paid-reactions
+    /// </summary>
+    public bool Anonymous { get; set; } = Anonymous;
+
+    /// <summary>
+    /// Paid reactions only: attribute the reaction to this peer instead of the sender.
+    /// </summary>
+    public long AnonymousPeerId { get; set; } = AnonymousPeerId;
 
     public long GetReactionId()
     {

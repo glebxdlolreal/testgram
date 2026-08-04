@@ -9,6 +9,12 @@ public class MessageReactor
     public bool Anonymous { get; set; }
     public Peer? PeerId { get; set; }
     public int Count { get; set; }
+
+    /// <summary>
+    /// Who sent these paid reactions. Server-side only: it must never reach clients for anonymous
+    /// reactors, and is used to decide which leaderboard entry to flag as "my" per viewer.
+    /// </summary>
+    public long SenderUserId { get; set; }
 }
 
 public class MessagePeerReaction

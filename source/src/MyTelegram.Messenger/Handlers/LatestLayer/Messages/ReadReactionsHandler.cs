@@ -1,6 +1,8 @@
-namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 using System.Globalization;
+using EventFlow.Exceptions;
 using MyTelegram.Domain.Aggregates.UserConfig;
+
+namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Mark <a href="https://corefork.telegram.org/api/reactions">message reactions »</a> as read
 /// Possible errors
@@ -29,10 +31,26 @@ internal sealed class ReadReactionsHandler(
             CurrentDate.ToString(CultureInfo.InvariantCulture));
         await commandBus.PublishAsync(command);
 
+        // Clear the dialog badge. A per-topic or per-saved-dialog read still clears the whole dialog
+        // counter, because the counter itself is not tracked per topic.
+        try
+        {
+            await commandBus.PublishAsync(new ReadUnreadReactionsCommand(DialogId.Create(input.UserId, peer)));
+        }
+        catch (DomainError)
+        {
+            // No dialog aggregate (for example a legacy chat): nothing to clear.
+        }
+
+        // Advance pts so the client's difference loop notices the read state on other sessions.
+        var ownerPeerId = peer.PeerType == PeerType.Channel ? peer.PeerId : input.UserId;
+        var currentPts = ptsHelper.GetCachedPts(ownerPeerId);
+        var pts = await ptsHelper.IncrementPtsAsync(ownerPeerId, currentPts, 1, input.PermAuthKeyId);
+
         return new TAffectedHistory
         {
-            Pts = ptsHelper.GetCachedPts(peer.PeerId),
-            PtsCount = 0
+            Pts = pts,
+            PtsCount = 1
         };
     }
 }

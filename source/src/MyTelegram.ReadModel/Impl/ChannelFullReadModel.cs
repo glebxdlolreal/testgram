@@ -13,7 +13,8 @@ public class ChannelFullReadModel : IChannelFullReadModel,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAdminRightsEditedEvent>,
     //IAmReadModelFor<ChannelAggregate, ChannelId, ChatJoinRequestHiddenEvent>,
     //IAmReadModelFor<ChannelAggregate,ChannelId,ChatInviteRequestPendingUpdatedEvent>,
-    IAmReadModelFor<ChannelAggregate,ChannelId, LinkedChannelChangedEvent>
+    IAmReadModelFor<ChannelAggregate,ChannelId, LinkedChannelChangedEvent>,
+    IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAvailableReactionsChangedEvent>
 {
     public virtual string? About { get; private set; }
     public virtual int AdminsCount { get; private set; }
@@ -59,6 +60,16 @@ public class ChannelFullReadModel : IChannelFullReadModel,
         CancellationToken cancellationToken)
     {
         About = domainEvent.AggregateEvent.About;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<ChannelAggregate, ChannelId, ChannelAvailableReactionsChangedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        ReactionType = domainEvent.AggregateEvent.ReactionType;
+        AvailableReactions = domainEvent.AggregateEvent.AvailableReactions;
+        AllowCustomReaction = domainEvent.AggregateEvent.AllowCustom;
         return Task.CompletedTask;
     }
 

@@ -12,7 +12,8 @@ public class DialogSnapshot(
     int channelHistoryMinId,
     Draft? draft,
     int unreadMentionsCount,
-    int? folderId
+    int? folderId,
+    int unreadReactionsCount = 0
     )
     : ISnapshot
 {
@@ -20,6 +21,7 @@ public class DialogSnapshot(
 
     public Draft? Draft { get; } = draft;
     public int UnreadMentionsCount { get; } = unreadMentionsCount;
+    public int UnreadReactionsCount { get; } = unreadReactionsCount;
     public int? FolderId { get; } = folderId;
 
     public long OwnerId { get; } = ownerId;

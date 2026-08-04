@@ -32,6 +32,7 @@ public class ChannelReadModel : IChannelReadModel,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelTopMessageIdUpdatedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, PreHistoryHiddenChangedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelParticipantsHiddenUpdatedEvent>,
+    IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAvailableReactionsChangedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelJoinRequestUpdatedEvent>,
 	    IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAdminRemovedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, MonoforumEnabledEvent>
@@ -435,6 +436,12 @@ public class ChannelReadModel : IChannelReadModel,
     public Task ApplyAsync(IReadModelContext context, IDomainEvent<ChannelAggregate, ChannelId, ChannelParticipantsHiddenUpdatedEvent> domainEvent, CancellationToken cancellationToken)
     {
         ParticipantsHidden = domainEvent.AggregateEvent.Enabled;
+
+        return Task.CompletedTask;
+    }
+    public Task ApplyAsync(IReadModelContext context, IDomainEvent<ChannelAggregate, ChannelId, ChannelAvailableReactionsChangedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        PaidReactionsEnabled = domainEvent.AggregateEvent.PaidEnabled;
 
         return Task.CompletedTask;
     }

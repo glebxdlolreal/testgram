@@ -1,7 +1,15 @@
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
+/// <summary>
+/// Get unread reactions to messages you sent.
+/// <para><c>See <a href="https://corefork.telegram.org/method/messages.getUnreadReactions"/> </c></para>
+/// </summary>
 internal sealed class GetUnreadReactionsHandler(
     IQueryProcessor queryProcessor,
-    IPeerHelper peerHelper)
+    IPeerHelper peerHelper,
+    IMessageAppService messageAppService,
+    IMessageConverterService messageConverterService,
+    IChatConverterService chatConverterService,
+    IUserConverterService userConverterService)
     : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetUnreadReactions, MyTelegram.Schema.Messages.IMessages>
 {
     protected override async Task<MyTelegram.Schema.Messages.IMessages> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetUnreadReactions obj)
@@ -14,7 +22,7 @@ internal sealed class GetUnreadReactionsHandler(
         var readDate = ReactionReadState.ParseReadDate(readState?.Value);
 
         var limit = obj.Limit > 0 && obj.Limit <= 100 ? obj.Limit : 20;
-        var messages = await queryProcessor.ProcessAsync(
+        var messageReadModels = await queryProcessor.ProcessAsync(
             new GetMessagesWithUnreadReactionsQuery(
                 ownerPeerId,
                 input.UserId,
@@ -26,44 +34,21 @@ internal sealed class GetUnreadReactionsHandler(
                 obj.TopMsgId,
                 savedPeer));
 
-        var msgList = messages.Select(m =>
-        {
-            var recentReactions2 = (m as MessageReadModel)?.RecentReactions2 ?? [];
-            var reactionCounts = ((m as MessageReadModel)?.Reactions ?? []).Select(r => (IReactionCount)new TReactionCount
-            {
-                Reaction = r.Reaction,
-                Count = r.Count
-            }).ToList();
-            var recentReactions = recentReactions2.Select(r => (IMessagePeerReaction)new TMessagePeerReaction
-            {
-                PeerId = new TPeerUser { UserId = r.SenderUserId },
-                Date = r.Date,
-                My = r.SenderUserId == input.UserId,
-                Unread = ReactionReadState.IsUnread(r, input.UserId, readDate),
-                Reaction = r.Reaction
-            }).ToList();
+        // Build the real messages: returning stubs would leave the client with blank rows.
+        var messages = messageConverterService.ToMessageList(input.UserId, messageReadModels, [], [], [], input.Layer);
 
-            return (IMessage)new TMessage
-            {
-                Id = m.MessageId,
-                PeerId = peer.ToPeer(),
-                SavedPeerId = savedPeer?.ToPeer(),
-                Date = m.Date,
-                Message = "",
-                Reactions = new TMessageReactions
-                {
-                    Results = new TVector<IReactionCount>(reactionCounts),
-                    RecentReactions = recentReactions.Count > 0 ? new TVector<IMessagePeerReaction>(recentReactions) : null,
-                    CanSeeList = true
-                }
-            };
-        }).ToList();
+        var (userIds, channelIds) = messageAppService.GetExtraPeerIds(messageReadModels);
+        var channelIdList = channelIds.ToList();
+        var channelMemberReadModels = await queryProcessor.ProcessAsync(
+            new GetChannelMemberListByChannelIdListQuery(input.UserId, channelIdList));
+        var channels = await chatConverterService.GetChannelListAsync(input, channelIdList, channelMemberReadModels, input.Layer);
+        var users = await userConverterService.GetUserListAsync(input, userIds.ToList(), false, false, input.Layer);
 
         return new TMessages
         {
-            Messages = new TVector<IMessage>(msgList),
-            Chats = new TVector<IChat>(),
-            Users = new TVector<IUser>(),
+            Messages = [.. messages],
+            Chats = [.. channels],
+            Users = [.. users],
             Topics = new TVector<IForumTopic>()
         };
     }

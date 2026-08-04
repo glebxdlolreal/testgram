@@ -207,6 +207,28 @@ public class MessageConverterService(
                                     rr.My = true;
                             }
                         }
+
+                        // Mark my entry in the paid reaction leaderboard. Anonymous entries carry no
+                        // peer in the response, so match them by the server-side sender id.
+                        if (mr.TopReactors != null && readModel.TopReactors != null)
+                        {
+                            var myIndexes = readModel.TopReactors
+                                .Select((r, i) => (r, i))
+                                .Where(x => x.r.SenderUserId == selfUserId)
+                                .Select(x => x.i)
+                                .ToHashSet();
+
+                            var index = 0;
+                            foreach (var reactor in mr.TopReactors.OfType<TMessageReactor>())
+                            {
+                                if (myIndexes.Contains(index))
+                                {
+                                    reactor.My = true;
+                                }
+
+                                index++;
+                            }
+                        }
                     }
 
                     return m;

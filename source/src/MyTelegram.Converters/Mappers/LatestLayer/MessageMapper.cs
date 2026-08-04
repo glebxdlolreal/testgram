@@ -75,13 +75,22 @@ internal sealed class MessageMapper
                     Count = r.Count
                 }).ToList()),
                 RecentReactions = source.RecentReactions2 != null
-                    ? new TVector<IMessagePeerReaction>(source.RecentReactions2.Select(r => (IMessagePeerReaction)new TMessagePeerReaction
-                    {
-                        PeerId = new TPeerUser { UserId = r.SenderUserId },
-                        Date = r.Date,
-                        Reaction = r.Reaction
-                    }).ToList())
+                    // Paid reactions live in top_reactors only: listing them here would expose the
+                    // sender of a reaction they may have sent anonymously.
+                    ? new TVector<IMessagePeerReaction>(source.RecentReactions2
+                        .Where(r => r.Reaction is not TReactionPaid)
+                        .Select(r => (IMessagePeerReaction)new TMessagePeerReaction
+                        {
+                            PeerId = new TPeerUser { UserId = r.SenderUserId },
+                            Date = r.Date,
+                            Reaction = r.Reaction
+                        }).ToList())
                     : new TVector<IMessagePeerReaction>(),
+                TopReactors = ToTopReactors(source.TopReactors),
+                // Reactions on your own Saved Messages double as tags.
+                ReactionsAsTags = source.OwnerPeerId == source.SenderUserId
+                                  && source.ToPeerType == PeerType.User
+                                  && source.ToPeerId == source.OwnerPeerId,
                 CanSeeList = true
             };
         }
@@ -157,5 +166,26 @@ internal sealed class MessageMapper
         //destination.ReportDeliveryUntilDate = source.ReportDeliveryUntilDate;
 
         return destination;
+    }
+
+    /// <summary>
+    /// Converts the stored paid reaction leaderboard into its TL form. Anonymous reactors carry no
+    /// peer_id so clients render them as "Anonymous".
+    /// </summary>
+    private static TVector<IMessageReactor>? ToTopReactors(List<MessageReactor>? topReactors)
+    {
+        if (topReactors == null || topReactors.Count == 0)
+        {
+            return null;
+        }
+
+        return new TVector<IMessageReactor>(topReactors.Select(r => (IMessageReactor)new TMessageReactor
+        {
+            Top = r.Top,
+            My = r.My,
+            Anonymous = r.Anonymous,
+            PeerId = r.Anonymous || r.PeerId == null ? null : r.PeerId.ToPeer(),
+            Count = r.Count
+        }));
     }
 }

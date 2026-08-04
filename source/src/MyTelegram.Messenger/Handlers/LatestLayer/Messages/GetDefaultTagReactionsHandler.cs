@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Helpers;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Fetch a default recommended list of <a href="https://corefork.telegram.org/api/saved-messages#tags">saved message tag reactions</a>.
@@ -6,10 +8,25 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetDefaultTagReactionsHandler : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetDefaultTagReactions, MyTelegram.Schema.Messages.IReactions>
+internal sealed class GetDefaultTagReactionsHandler(IReactionListAppService reactionListAppService)
+    : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetDefaultTagReactions, MyTelegram.Schema.Messages.IReactions>
 {
-    protected override Task<MyTelegram.Schema.Messages.IReactions> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetDefaultTagReactions obj)
+    private const int DefaultTagReactionsLimit = 12;
+
+    protected override async Task<MyTelegram.Schema.Messages.IReactions> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetDefaultTagReactions obj)
     {
-        return Task.FromResult<MyTelegram.Schema.Messages.IReactions>(new TReactions { Reactions = [] });
+        var reactions = await reactionListAppService.GetActiveEmojiReactionsAsync(DefaultTagReactionsLimit);
+        var hash = TelegramHashHelper.GetVectorHash(reactions.Select(r => r.GetReactionId()));
+
+        if (obj.Hash != 0 && obj.Hash == hash)
+        {
+            return new TReactionsNotModified();
+        }
+
+        return new TReactions
+        {
+            Hash = hash,
+            Reactions = new TVector<IReaction>(reactions)
+        };
     }
 }

@@ -44,6 +44,9 @@ public class MessageReadModel : IMessageReadModel,
     public MessageActionType MessageActionType { get; private set; }
     public MessageType MessageType { get; private set; }
     public List<MessageReactor>? TopReactors { get; private set; }
+
+    /// <summary>Number of paid reaction senders the client renders as "top" donors.</summary>
+    private const int TopReactorsCount = 3;
     public int MessageId { get; private set; }
     public bool Out { get; private set; }
     public bool NoForwards { get; private set; }
@@ -469,6 +472,51 @@ public class MessageReadModel : IMessageReadModel,
                 : (IReaction)new TReactionEmoji { Emoticon = r.Emoticon }
         }).ToList();
 
+        TopReactors = BuildTopReactors(reactions);
+
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Builds the paid reaction leaderboard shown under a post: senders ranked by how many stars
+    /// they spent, with the top three flagged.
+    /// See https://corefork.telegram.org/api/reactions#paid-reactions
+    /// </summary>
+    private static List<MessageReactor>? BuildTopReactors(List<Reaction> reactions)
+    {
+        var paidReactions = reactions.Where(r => r.IsPaid).ToList();
+        if (paidReactions.Count == 0)
+        {
+            return null;
+        }
+
+        var reactors = paidReactions
+            .GroupBy(r => r.UserId)
+            .Select(g =>
+            {
+                var anonymous = g.Any(r => r.Anonymous);
+                var peerId = g.Select(r => r.AnonymousPeerId).FirstOrDefault(id => id != 0);
+                return new MessageReactor
+                {
+                    // An anonymous reactor exposes no peer at all.
+                    PeerId = anonymous
+                        ? null
+                        : peerId != 0
+                            ? new Peer(PeerType.Channel, peerId)
+                            : new Peer(PeerType.User, g.Key),
+                    Anonymous = anonymous,
+                    SenderUserId = g.Key,
+                    Count = g.Count()
+                };
+            })
+            .OrderByDescending(r => r.Count)
+            .ToList();
+
+        for (var i = 0; i < reactors.Count && i < TopReactorsCount; i++)
+        {
+            reactors[i].Top = true;
+        }
+
+        return reactors;
     }
 }

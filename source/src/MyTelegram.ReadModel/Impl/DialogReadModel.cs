@@ -23,7 +23,9 @@ public class DialogReadModel : IDialogReadModel,
     IAmReadModelFor<DialogAggregate, DialogId, ReadOutboxMaxIdUpdatedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, TopMessageIdUpdatedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, UpdateReadChannelInboxEvent>,
-    IAmReadModelFor<DialogAggregate, DialogId, DialogFolderUpdatedEvent>
+    IAmReadModelFor<DialogAggregate, DialogId, DialogFolderUpdatedEvent>,
+    IAmReadModelFor<DialogAggregate, DialogId, UnreadReactionCreatedEvent>,
+    IAmReadModelFor<DialogAggregate, DialogId, UnreadReactionsReadEvent>
 {
     public virtual int ChannelHistoryMinId { get; private set; }
     public virtual DateTime CreationTime { get; private set; }
@@ -96,6 +98,22 @@ public class DialogReadModel : IDialogReadModel,
         CancellationToken cancellationToken)
     {
         Pinned = domainEvent.AggregateEvent.Pinned;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<DialogAggregate, DialogId, UnreadReactionCreatedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        UnreadReactionsCount = domainEvent.AggregateEvent.UnreadReactionsCount;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<DialogAggregate, DialogId, UnreadReactionsReadEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        UnreadReactionsCount = domainEvent.AggregateEvent.UnreadReactionsCount;
         return Task.CompletedTask;
     }
 

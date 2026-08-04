@@ -1,4 +1,10 @@
+using MyTelegram.Messenger.Helpers;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
+/// <summary>
+/// Get message reactions.
+/// <para><c>See <a href="https://corefork.telegram.org/method/messages.getMessagesReactions"/> </c></para>
+/// </summary>
 internal sealed class GetMessagesReactionsHandler(
     IQueryProcessor queryProcessor,
     IPeerHelper peerHelper,
@@ -51,7 +57,11 @@ internal sealed class GetMessagesReactionsHandler(
 
             var isChannel = isBroadcast;
 
-            var recentReactions = isChannel ? [] : recentReactions2.Select(r => (IMessagePeerReaction)new TMessagePeerReaction
+            // Paid reactions are surfaced through top_reactors only: listing them here would expose
+            // the sender of a reaction they may have sent anonymously.
+            var nonPaidReactions = recentReactions2.Where(r => r.Reaction is not TReactionPaid).ToList();
+
+            var recentReactions = isChannel ? [] : nonPaidReactions.Select(r => (IMessagePeerReaction)new TMessagePeerReaction
             {
                 PeerId = new TPeerUser { UserId = r.SenderUserId },
                 Date = r.Date,
@@ -62,7 +72,7 @@ internal sealed class GetMessagesReactionsHandler(
             }).ToList();
 
             if (!isChannel)
-                allUserIds.AddRange(recentReactions2.Select(r => r.SenderUserId));
+                allUserIds.AddRange(nonPaidReactions.Select(r => r.SenderUserId));
 
             updates.Add(new TUpdateMessageReactions
             {
@@ -72,6 +82,9 @@ internal sealed class GetMessagesReactionsHandler(
                 {
                     Results = new TVector<IReactionCount>(reactionCounts),
                     RecentReactions = recentReactions.Count > 0 ? new TVector<IMessagePeerReaction>(recentReactions) : null,
+                    TopReactors = TopReactorsConverter.ToTl(msg.TopReactors, input.UserId),
+                    // Reactions on your own Saved Messages double as tags.
+                    ReactionsAsTags = peer.PeerType == PeerType.User && peer.PeerId == input.UserId,
                     CanSeeList = !isChannel
                 }
             });

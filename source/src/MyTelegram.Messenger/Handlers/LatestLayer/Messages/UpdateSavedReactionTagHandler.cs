@@ -10,10 +10,59 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class UpdateSavedReactionTagHandler : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestUpdateSavedReactionTag, IBool>
+internal sealed class UpdateSavedReactionTagHandler(
+    IUserAppService userAppService,
+    ISavedReactionTagAppService savedReactionTagAppService,
+    IObjectMessageSender objectMessageSender)
+    : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestUpdateSavedReactionTag, IBool>
 {
-    protected override Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestUpdateSavedReactionTag obj)
+    private const int TagTitleMaxLength = 12;
+
+    protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestUpdateSavedReactionTag obj)
     {
-        return Task.FromResult<IBool>(new TBoolTrue());
+        if (obj.Reaction is not (TReactionEmoji or TReactionCustomEmoji))
+        {
+            RpcErrors.RpcErrors400.ReactionInvalid.ThrowRpcError();
+        }
+
+        if (obj.Reaction is TReactionEmoji { Emoticon: null or "" })
+        {
+            RpcErrors.RpcErrors400.ReactionInvalid.ThrowRpcError();
+        }
+
+        // Naming a tag is a Premium-only feature.
+        var user = await userAppService.GetAsync(input.UserId);
+        if (user == null)
+        {
+            RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
+        }
+
+        if (!user!.Premium)
+        {
+            RpcErrors.RpcErrors403.PremiumAccountRequired.ThrowRpcError();
+        }
+
+        var title = obj.Title;
+        if (title != null && title.Length > TagTitleMaxLength)
+        {
+            RpcErrors.RpcErrors400.ReactionInvalid.ThrowRpcError();
+        }
+
+        // An absent or empty title clears the tag name.
+        await savedReactionTagAppService.SetTitleAsync(input.UserId, obj.Reaction, title);
+
+        // Tell the user's other sessions to refetch the tag list.
+        var updates = new TUpdates
+        {
+            Updates = new TVector<IUpdate>(new TUpdateSavedReactionTags()),
+            Users = new TVector<IUser>(),
+            Chats = new TVector<IChat>(),
+            Date = CurrentDate,
+            Seq = 0
+        };
+        await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, input.UserId), updates,
+            excludeAuthKeyId: input.PermAuthKeyId);
+
+        return new TBoolTrue();
     }
 }

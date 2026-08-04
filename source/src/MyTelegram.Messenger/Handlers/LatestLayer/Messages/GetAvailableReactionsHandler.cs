@@ -2,6 +2,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 
 using MongoDB.Bson;
 using MongoDB.Driver;
+using MyTelegram.Messenger.Helpers;
 
 /// <summary>
 /// Get available message reactions
@@ -63,8 +64,10 @@ internal sealed class GetAvailableReactionsHandler : RpcResultObjectHandler<MyTe
             reactions.Add(reaction);
         }
 
-        // Calculate hash
-        var hash = reactions.Aggregate(0, (h, r) => h * 31 + ((TAvailableReaction)r).Reaction.GetHashCode()) & int.MaxValue;
+        // Calculate hash. Must be reproducible across processes, so string.GetHashCode() (randomized
+        // per process in .NET) cannot be used here.
+        var hash = TelegramHashHelper.GetInt32Hash(
+            reactions.Select(r => TelegramHashHelper.GetStringNumber(((TAvailableReaction)r).Reaction)));
 
         // Check if client has same hash
         if (obj.Hash != 0 && obj.Hash == hash)

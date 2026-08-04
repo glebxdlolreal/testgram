@@ -25,6 +25,14 @@ public interface IBotUpdatesSender
     Task PushUpdateToBotAsync(long botId, IUpdate update, IList<IUser>? users = null, IList<IChat>? chats = null);
 
     /// <summary>
+    /// Same as <see cref="PushUpdateToBotAsync(long, IUpdate, IList{IUser}, IList{IChat})"/>, but the
+    /// update is built from the allocated qts. Use this for updates that carry a qts field of their
+    /// own, such as updateBotMessageReaction.
+    /// </summary>
+    Task PushUpdateToBotAsync(long botId, Func<int, IUpdate> updateFactory, IList<IUser>? users = null,
+        IList<IChat>? chats = null);
+
+    /// <summary>
     /// Allocates the next qts value for <paramref name="botId"/>. Bot updates are qts sequenced
     /// so the bot can recover missed ones via updates.getDifference.
     /// </summary>
@@ -73,7 +81,18 @@ public class BotUpdatesSender(
         IList<IChat>? chats = null)
     {
         var qts = await NextQtsAsync(botId);
+        await PushAsync(botId, update, qts, users, chats);
+    }
 
+    public async Task PushUpdateToBotAsync(long botId, Func<int, IUpdate> updateFactory, IList<IUser>? users = null,
+        IList<IChat>? chats = null)
+    {
+        var qts = await NextQtsAsync(botId);
+        await PushAsync(botId, updateFactory(qts), qts, users, chats);
+    }
+
+    private async Task PushAsync(long botId, IUpdate update, int qts, IList<IUser>? users, IList<IChat>? chats)
+    {
         var updates = new TUpdates
         {
             Updates = new TVector<IUpdate>(update),

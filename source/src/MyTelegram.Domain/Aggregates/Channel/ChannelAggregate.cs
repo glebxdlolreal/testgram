@@ -41,6 +41,22 @@ public class ChannelAggregate : MyInMemorySnapshotAggregateRoot<ChannelAggregate
         Emit(new ChannelParticipantsHiddenUpdatedEvent(requestInfo, _state.ChannelId, enabled));
     }
 
+    /// <summary>
+    /// Sets the reactions that are allowed in this channel/supergroup.
+    /// See https://corefork.telegram.org/method/messages.setChatAvailableReactions
+    /// </summary>
+    public void SetAvailableReactions(RequestInfo requestInfo,
+        ReactionType reactionType,
+        List<string>? availableReactions,
+        bool allowCustom,
+        bool paidEnabled)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        CheckAdminRights(requestInfo, r => r.ChangeInfo);
+        Emit(new ChannelAvailableReactionsChangedEvent(requestInfo, _state.ChannelId, reactionType,
+            availableReactions, allowCustom, paidEnabled));
+    }
+
     public void UpdateParticipantCount(int updatedCount)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
