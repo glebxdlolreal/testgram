@@ -1,26 +1,32 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Bots;
+using MyTelegram.Messenger.Services.Phone;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 
+/// <summary>
+/// Press an inline callback button and get a callback answer from the bot.
+/// See https://corefork.telegram.org/method/messages.getBotCallbackAnswer
+/// </summary>
 internal sealed class GetBotCallbackAnswerHandler(
     IBotFatherBotService botFatherBotService,
     IPeerHelper peerHelper,
     IMongoDatabase database,
-    IMessageAppService messageAppService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetBotCallbackAnswer, MyTelegram.Schema.Messages.IBotCallbackAnswer>
+    IMessageAppService messageAppService,
+    IQueryProcessor queryProcessor,
+    IBotUpdatesSender botUpdatesSender,
+    ILogger<GetBotCallbackAnswerHandler> logger) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetBotCallbackAnswer, MyTelegram.Schema.Messages.IBotCallbackAnswer>
 {
+    private const string PendingCollection = "pending_callback_queries";
+
     protected override async Task<MyTelegram.Schema.Messages.IBotCallbackAnswer> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetBotCallbackAnswer obj)
     {
-        Console.WriteLine($"[GetBotCallbackAnswer] Called: userId={input.UserId}, msgId={obj.MsgId}, hasData={obj.Data.HasValue}");
-
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
-        Console.WriteLine($"[GetBotCallbackAnswer] Peer: peerId={peer.PeerId}, peerType={peer.PeerType}");
 
         if (obj.Data.HasValue)
         {
             var data = System.Text.Encoding.UTF8.GetString(obj.Data.Value.Span);
-            Console.WriteLine($"[GetBotCallbackAnswer] Callback data: {data}");
 
             // Handle channel transfer rejection
             if (data.StartsWith("reject_channel_transfer:"))
@@ -36,12 +42,128 @@ internal sealed class GetBotCallbackAnswerHandler(
             // Handle BotFather bot callbacks
             if (peer.PeerId == BotFatherBotService.BotUserId)
             {
-                Console.WriteLine($"[GetBotCallbackAnswer] BotFather callback data: {data}");
                 _ = Task.Run(() => botFatherBotService.HandleCallbackAsync(input, input.UserId, obj.MsgId, data));
+                return new MyTelegram.Schema.Messages.TBotCallbackAnswer { CacheTime = 0 };
             }
         }
 
-        return new MyTelegram.Schema.Messages.TBotCallbackAnswer { CacheTime = 0 };
+        var botId = await ResolveBotIdAsync(peer, input.UserId, obj.MsgId);
+        if (botId == null)
+        {
+            RpcErrors.RpcErrors400.BotInvalid.ThrowRpcError();
+        }
+
+        return await ForwardCallbackToBotAsync(input, obj, peer, botId!.Value);
+    }
+
+    /// <summary>
+    /// Pushes updateBotCallbackQuery (or the inline variant) to the bot and waits for its
+    /// messages.setBotCallbackAnswer reply.
+    /// </summary>
+    private async Task<MyTelegram.Schema.Messages.IBotCallbackAnswer> ForwardCallbackToBotAsync(
+        IRequestInput input,
+        MyTelegram.Schema.Messages.RequestGetBotCallbackAnswer obj,
+        Peer peer,
+        long botId)
+    {
+        var queryId = Random.Shared.NextInt64();
+
+        // chat_instance identifies the chat the button lives in; it must stay stable per chat+user
+        // so bots can group presses coming from the same conversation.
+        var chatInstance = HashCode.Combine(peer.PeerId, input.UserId);
+
+        var update = new TUpdateBotCallbackQuery
+        {
+            QueryId = queryId,
+            UserId = input.UserId,
+            Peer = GroupCallStateHelper.ToPeer(peer.PeerType, peer.PeerId),
+            MsgId = obj.MsgId,
+            ChatInstance = chatInstance,
+            Data = obj.Data
+        };
+
+        var extraFields = new BsonDocument
+        {
+            ["user_id"] = input.UserId,
+            ["peer_id"] = peer.PeerId,
+            ["msg_id"] = obj.MsgId,
+            ["alert"] = false,
+            ["message"] = string.Empty,
+            ["url"] = string.Empty,
+            ["cache_time"] = 0
+        };
+
+        var result = await botUpdatesSender.SendQueryAndWaitAsync(
+            PendingCollection, queryId, botId, update, extraFields);
+
+        if (!result.Success || result.Document == null)
+        {
+            logger.LogWarning("Bot did not answer callback query: botId={BotId} queryId={QueryId}", botId, queryId);
+            throw new RpcException(new RpcError(400,
+                result.Error ?? RpcErrors.RpcErrors400.BotResponseTimeout.Message));
+        }
+
+        var doc = result.Document;
+        var message = GetString(doc, "message");
+        var url = GetString(doc, "url");
+
+        return new MyTelegram.Schema.Messages.TBotCallbackAnswer
+        {
+            Alert = doc.TryGetValue("alert", out var alertValue) && alertValue.IsBoolean && alertValue.AsBoolean,
+            Message = string.IsNullOrEmpty(message) ? null : message,
+            Url = string.IsNullOrEmpty(url) ? null : url,
+            HasUrl = !string.IsNullOrEmpty(url),
+            CacheTime = GetInt32(doc, "cache_time")
+        };
+    }
+
+    /// <summary>
+    /// Determines which bot owns the message carrying the pressed button. In a private chat with a
+    /// bot that is the peer itself; elsewhere it is the message sender.
+    /// </summary>
+    private async Task<long?> ResolveBotIdAsync(Peer peer, long userId, int msgId)
+    {
+        if (peer.PeerType == PeerType.User)
+        {
+            var peerUser = await queryProcessor.ProcessAsync(new GetUserByIdQuery(peer.PeerId));
+            if (peerUser is { Bot: true })
+            {
+                return peer.PeerId;
+            }
+        }
+
+        var ownerPeerId = peer.PeerType == PeerType.Channel ? peer.PeerId : userId;
+        var messageReadModel =
+            await queryProcessor.ProcessAsync(new GetMessageByIdQuery(MessageId.Create(ownerPeerId, msgId).Value));
+
+        if (messageReadModel == null)
+        {
+            return null;
+        }
+
+        var sender = await queryProcessor.ProcessAsync(new GetUserByIdQuery(messageReadModel.SenderUserId));
+        return sender is { Bot: true } ? messageReadModel.SenderUserId : null;
+    }
+
+    private static string GetString(BsonDocument doc, string name)
+    {
+        return doc.TryGetValue(name, out var value) && value.IsString ? value.AsString : string.Empty;
+    }
+
+    private static int GetInt32(BsonDocument doc, string name)
+    {
+        if (!doc.TryGetValue(name, out var value))
+        {
+            return 0;
+        }
+
+        return value.BsonType switch
+        {
+            BsonType.Int32 => value.AsInt32,
+            BsonType.Int64 => (int)value.AsInt64,
+            BsonType.Double => (int)value.AsDouble,
+            _ => 0
+        };
     }
 
     private async Task HandleRejectChannelTransferAsync(IRequestInput input, string callbackData)
@@ -122,6 +244,8 @@ internal sealed class GetBotCallbackAnswerHandler(
 
         await messageAppService.SendMessageAsync([sendInput]);
 
-        Console.WriteLine($"[GetBotCallbackAnswer] Channel transfer rejected: channelId={channelId}, fromUserId={fromUserId}, toUserId={input.UserId}");
+        logger.LogInformation(
+            "Channel transfer rejected: channelId={ChannelId} fromUserId={FromUserId} toUserId={ToUserId}",
+            channelId, fromUserId, input.UserId);
     }
 }

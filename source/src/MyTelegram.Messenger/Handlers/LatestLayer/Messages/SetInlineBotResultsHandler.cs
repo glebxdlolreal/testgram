@@ -1,58 +1,152 @@
+using MongoDB.Bson;
+using MongoDB.Driver;
+using MyTelegram.Messenger.Services.Bots;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Answer an inline query, for bots only
 /// Possible errors
 /// Code Type Description
-/// 400 ARTICLE_TITLE_EMPTY The title of the article is empty.
-/// 400 AUDIO_CONTENT_URL_EMPTY The remote URL specified in the content field is empty.
-/// 400 AUDIO_TITLE_EMPTY An empty audio title was provided.
-/// 400 BUTTON_DATA_INVALID The data of one or more of the buttons you provided is invalid.
-/// 400 BUTTON_TYPE_INVALID The type of one or more of the buttons you provided is invalid.
-/// 400 BUTTON_URL_INVALID Button URL invalid.
-/// 400 DOCUMENT_INVALID The specified document is invalid.
-/// 400 FILE_CONTENT_TYPE_INVALID File content-type is invalid.
-/// 400 FILE_TITLE_EMPTY An empty file title was specified.
-/// 400 GIF_CONTENT_TYPE_INVALID GIF content-type invalid.
-/// 400 MEDIA_CAPTION_TOO_LONG The caption is too long.
-/// 400 MESSAGE_EMPTY The provided message is empty.
-/// 400 MESSAGE_TOO_LONG The provided message is too long.
 /// 400 NEXT_OFFSET_INVALID The specified offset is longer than 64 bytes.
-/// 400 PEER_TYPES_INVALID The passed <a href="https://corefork.telegram.org/constructor/keyboardButtonSwitchInline">keyboardButtonSwitchInline</a>.<code>peer_types</code> field is invalid.
-/// 400 PHOTO_CONTENT_TYPE_INVALID Photo mime-type invalid.
-/// 400 PHOTO_CONTENT_URL_EMPTY Photo URL invalid.
-/// 400 PHOTO_INVALID Photo invalid.
-/// 400 PHOTO_THUMB_URL_EMPTY Photo thumbnail URL is empty.
 /// 400 QUERY_ID_INVALID The query ID is invalid.
-/// 400 REPLY_MARKUP_INVALID The provided reply markup is invalid.
 /// 400 RESULTS_TOO_MUCH Too many results were provided.
 /// 400 RESULT_ID_DUPLICATE You provided a duplicate result ID.
-/// 400 RESULT_ID_INVALID One of the specified result IDs is invalid.
-/// 400 RESULT_TYPE_INVALID Result type invalid.
-/// 400 SEND_MESSAGE_MEDIA_INVALID Invalid media provided.
-/// 400 SEND_MESSAGE_TYPE_INVALID The message type is invalid.
-/// 400 START_PARAM_EMPTY The start parameter is empty.
-/// 400 START_PARAM_INVALID Start parameter invalid.
-/// 400 STICKER_DOCUMENT_INVALID The specified sticker document is invalid.
 /// 400 SWITCH_PM_TEXT_EMPTY The switch_pm.text field was empty.
 /// 400 SWITCH_WEBVIEW_URL_INVALID The URL specified in switch_webview.url is invalid!
-/// 400 URL_INVALID Invalid URL provided.
 /// 400 USER_BOT_REQUIRED This method can only be called by a bot.
-/// 400 VIDEO_CONTENT_TYPE_INVALID The video's content type is invalid.
-/// 400 VIDEO_TITLE_EMPTY The specified video title is empty.
-/// 400 WEBDOCUMENT_INVALID Invalid webdocument URL provided.
-/// 400 WEBDOCUMENT_MIME_INVALID Invalid webdocument mime type provided.
-/// 400 WEBDOCUMENT_SIZE_TOO_BIG Webdocument is too big!
-/// 400 WEBDOCUMENT_URL_EMPTY The passed web document URL is empty.
-/// 400 WEBDOCUMENT_URL_INVALID The specified webdocument URL is invalid.
 /// <para><c>See <a href="https://corefork.telegram.org/method/messages.setInlineBotResults"/> </c></para>
 /// </summary>
 /// <remarks>
 /// Access: [User ✖] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class SetInlineBotResultsHandler : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSetInlineBotResults, IBool>
+internal sealed class SetInlineBotResultsHandler(
+    IMongoDatabase mongoDatabase,
+    IQueryProcessor queryProcessor,
+    ILogger<SetInlineBotResultsHandler> logger) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSetInlineBotResults, IBool>
 {
-    protected override Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestSetInlineBotResults obj)
+    private const string PendingCollection = "pending_inline_queries";
+    private const string ResultsCollection = "inline_bot_results";
+
+    /// <summary>Upstream caps a single answer at 50 results.</summary>
+    private const int MaxResults = 50;
+
+    /// <summary>next_offset is limited to 64 bytes by the API.</summary>
+    private const int MaxNextOffsetLength = 64;
+
+    /// <summary>How long a stored answer stays available for messages.sendInlineBotResult.</summary>
+    private static readonly TimeSpan ResultsRetention = TimeSpan.FromHours(1);
+
+    protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestSetInlineBotResults obj)
     {
-        throw new NotImplementedException();
+        var botReadModel = await queryProcessor.ProcessAsync(new GetUserByIdQuery(input.UserId));
+        if (botReadModel == null || !botReadModel.Bot)
+        {
+            RpcErrors.RpcErrors400.UserBotRequired.ThrowRpcError();
+        }
+
+        if (obj.Results.Count > MaxResults)
+        {
+            RpcErrors.RpcErrors400.ResultsTooMuch.ThrowRpcError();
+        }
+
+        if (obj.NextOffset is { Length: > MaxNextOffsetLength })
+        {
+            RpcErrors.RpcErrors400.NextOffsetInvalid.ThrowRpcError();
+        }
+
+        if (obj.SwitchPm is TInlineBotSwitchPM switchPm && string.IsNullOrEmpty(switchPm.Text))
+        {
+            RpcErrors.RpcErrors400.SwitchPmTextEmpty.ThrowRpcError();
+        }
+
+        if (obj.SwitchWebview is TInlineBotWebView switchWebview &&
+            !Uri.TryCreate(switchWebview.Url, UriKind.Absolute, out _))
+        {
+            RpcErrors.RpcErrors400.SwitchWebviewUrlInvalid.ThrowRpcError();
+        }
+
+        var pendingCollection = mongoDatabase.GetCollection<BsonDocument>(PendingCollection);
+        var pendingFilter = Builders<BsonDocument>.Filter.And(
+            Builders<BsonDocument>.Filter.Eq("query_id", obj.QueryId),
+            Builders<BsonDocument>.Filter.Eq("bot_id", input.UserId));
+
+        var pending = await pendingCollection.Find(pendingFilter).FirstOrDefaultAsync();
+        if (pending == null)
+        {
+            // The user already timed out, or this query id was never issued to this bot.
+            logger.LogWarning("Inline query not found: queryId={QueryId} botId={BotId}", obj.QueryId, input.UserId);
+            RpcErrors.RpcErrors400.QueryIdInvalid.ThrowRpcError();
+        }
+
+        var converted = ConvertResults(obj.Results);
+
+        await mongoDatabase.GetCollection<BsonDocument>(ResultsCollection).ReplaceOneAsync(
+            Builders<BsonDocument>.Filter.Eq("_id", $"inline-results-{obj.QueryId}"),
+            new BsonDocument
+            {
+                ["_id"] = $"inline-results-{obj.QueryId}",
+                ["query_id"] = obj.QueryId,
+                ["bot_id"] = input.UserId,
+                ["user_id"] = pending!.TryGetValue("user_id", out var userIdValue) ? userIdValue : BsonNull.Value,
+                ["query"] = pending.TryGetValue("query", out var queryValue) ? queryValue : string.Empty,
+                ["gallery"] = obj.Gallery,
+                ["private"] = obj.Private,
+                ["cache_time"] = obj.CacheTime,
+                ["next_offset"] = obj.NextOffset ?? string.Empty,
+                ["switch_pm"] = obj.SwitchPm?.ToBytes() ?? Array.Empty<byte>(),
+                ["switch_webview"] = obj.SwitchWebview?.ToBytes() ?? Array.Empty<byte>(),
+                ["results"] = converted.ToBytes(),
+                // Raw input results are kept so sendInlineBotResult can rebuild the outgoing message.
+                ["input_results"] = obj.Results.ToBytes(),
+                ["expires_at"] = DateTime.UtcNow.Add(ResultsRetention).ToTimestamp()
+            },
+            new ReplaceOptions { IsUpsert = true });
+
+        await pendingCollection.UpdateOneAsync(pendingFilter, Builders<BsonDocument>.Update
+            .Set("success", true)
+            .Set("error", string.Empty)
+            .Set("responded_at", DateTime.UtcNow.ToTimestamp()));
+
+        return new TBoolTrue();
+    }
+
+    /// <summary>
+    /// Maps the bot's input results to their client-facing shape. Results whose type is not
+    /// recognised are dropped rather than aborting the whole answer.
+    /// </summary>
+    private static TVector<IBotInlineResult> ConvertResults(TVector<IInputBotInlineResult> results)
+    {
+        var converted = new TVector<IBotInlineResult>();
+        var seenIds = new HashSet<string>(StringComparer.Ordinal);
+
+        foreach (var result in results)
+        {
+            var botInlineResult = InlineResultConverter.ToBotInlineResult(result);
+            if (botInlineResult == null)
+            {
+                continue;
+            }
+
+            var id = botInlineResult switch
+            {
+                TBotInlineResult r => r.Id,
+                TBotInlineMediaResult r => r.Id,
+                _ => null
+            };
+
+            if (id == null)
+            {
+                continue;
+            }
+
+            if (!seenIds.Add(id))
+            {
+                RpcErrors.RpcErrors400.ResultIdDuplicate.ThrowRpcError();
+            }
+
+            converted.Add(botInlineResult);
+        }
+
+        return converted;
     }
 }
