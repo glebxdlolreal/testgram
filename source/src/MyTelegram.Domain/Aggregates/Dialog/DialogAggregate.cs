@@ -91,6 +91,27 @@ public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, 
         Emit(new MentionCreatedEvent(ownerUserId, _state.ToPeer, messageId, unreadMentionsCount));
     }
 
+    /// <summary>
+    /// Bumps <c>unread_poll_votes_count</c> after someone votes on a poll the dialog owner
+    /// created. Only fired for non-anonymous polls.
+    /// </summary>
+    public void CreatePollVote(int messageId)
+    {
+        var unreadPollVotesCount = _state.UnreadPollVotesCount + 1;
+        var ownerUserId = _state.OwnerId;
+        Emit(new PollVoteCreatedEvent(ownerUserId, _state.ToPeer, messageId, unreadPollVotesCount));
+    }
+
+    /// <summary>
+    /// Clears <c>unread_poll_votes_count</c> when the owner reads the votes.
+    /// </summary>
+    public void ReadPollVotes()
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        var ownerUserId = _state.OwnerId;
+        Emit(new PollVotesReadEvent(ownerUserId, _state.ToPeer));
+    }
+
     public void MarkDialogAsUnread(bool unread)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
@@ -300,7 +321,8 @@ public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, 
             _state.ChannelHistoryMinId,
             _state.Draft,
             _state.UnreadMentionsCount,
-            _state.FolderId
+            _state.FolderId,
+            _state.UnreadPollVotesCount
         ));
     }
 

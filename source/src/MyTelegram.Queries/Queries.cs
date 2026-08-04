@@ -250,6 +250,35 @@ public record GetPollQuery(/*long ToPeerId,*/ long PollId) : IQuery<IPollReadMod
 
 public record GetPollsQuery(List<long> PollIds) : IQuery<IReadOnlyCollection<IPollReadModel>>;
 
+/// <summary>Open polls that have a close deadline, for the auto-close background service.</summary>
+public record GetActivePollsWithCloseDateQuery(int MaxCloseDate)
+    : IQuery<IReadOnlyCollection<IPollReadModel>>;
+
+/// <summary>Total number of votes cast for a poll, optionally narrowed to one option.</summary>
+public record GetPollVotesCountQuery(long PollId, string? Option) : IQuery<long>;
+
+/// <summary>Most recent voters of a poll, newest first, for <c>pollResults.recent_voters</c>.</summary>
+public record GetRecentPollVotersQuery(long PollId, int Limit)
+    : IQuery<IReadOnlyCollection<IPollAnswerVoterReadModel>>;
+
+/// <summary>All votes cast by one peer across several polls, keyed by poll.</summary>
+public record GetPollVotesByPollIdsQuery(List<long> PollIds, int MinDate)
+    : IQuery<IReadOnlyCollection<IPollAnswerVoterReadModel>>;
+
+/// <summary>Resolves the message carrying a poll, so updates can include peer/msg_id.</summary>
+public record GetMessageIdByPollIdQuery(long OwnerPeerId, long PollId) : IQuery<int?>;
+
+/// <summary>Own poll messages in a peer, for <c>messages.getUnreadPollVotes</c>.</summary>
+public record GetPollMessagesQuery(
+    long OwnerPeerId,
+    long SenderUserId,
+    int OffsetId,
+    int AddOffset,
+    int Limit,
+    int MaxId,
+    int MinId,
+    int? TopMsgId) : IQuery<IReadOnlyCollection<IMessageReadModel>>;
+
 public record GetPrivacyListQuery(
     IReadOnlyList<long> UserIdList,
     IReadOnlyList<PrivacyType> PrivacyTypes)

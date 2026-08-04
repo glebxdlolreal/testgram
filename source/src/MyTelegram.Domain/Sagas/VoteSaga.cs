@@ -15,7 +15,8 @@ public class VoteSaga : MyInMemoryAggregateSaga<VoteSaga, VoteSagaId, VoteSagaLo
         ISagaContext sagaContext,
         CancellationToken cancellationToken)
     {
-        foreach (var option in domainEvent.AggregateEvent.Options)
+        var options = domainEvent.AggregateEvent.Options;
+        foreach (var option in options)
         {
             var correct = domainEvent.AggregateEvent.CorrectAnswers?.Contains(option);
             var command = new CreateVoteAnswerCommand(domainEvent.AggregateIdentity,
@@ -26,21 +27,26 @@ public class VoteSaga : MyInMemoryAggregateSaga<VoteSaga, VoteSagaId, VoteSagaLo
             Publish(command);
         }
 
-        // Item 23: only fire DeleteVoteAnswerCommand for a true retraction (Options
-        // empty). Re-votes also carry RetractVoteOptions to undo the previous
-        // selection's tally, but the user still has an active vote afterwards, so
-        // deleting their answer records here would yank them out of VotedPeerIds and
-        // break subsequent re-vote tallies.
-        if (domainEvent.AggregateEvent.Options.Count == 0)
+        // Each voter+option pair is its own read model document, so every retracted
+        // option needs its own delete command carrying that option. This covers both a
+        // full retraction (Options empty) and a re-vote, where the previous picks that
+        // aren't part of the new selection must stop showing up in messages.getPollVotes.
+        // Options still selected are skipped: their document is simply rewritten above.
+        // PollState only drops the voter from VotedPeerIds once no picks remain, so a
+        // re-vote keeps them counted as a voter.
+        foreach (var retractedOption in domainEvent.AggregateEvent.RetractVoteOptions ?? [])
         {
-            foreach (var _ in domainEvent.AggregateEvent.RetractVoteOptions ?? [])
+            if (options.Contains(retractedOption))
             {
-                var command = new DeleteVoteAnswerCommand(
-                    domainEvent.AggregateIdentity,
-                    domainEvent.AggregateEvent.PollId,
-                    domainEvent.AggregateEvent.VoteUserPeerId);
-                Publish(command);
+                continue;
             }
+
+            var command = new DeleteVoteAnswerCommand(
+                domainEvent.AggregateIdentity,
+                domainEvent.AggregateEvent.PollId,
+                domainEvent.AggregateEvent.VoteUserPeerId,
+                retractedOption);
+            Publish(command);
         }
 
         Emit(new VoteSagaCompletedSagaEvent(domainEvent.AggregateEvent.RequestInfo,

@@ -266,6 +266,14 @@ public class MessageAppService(
             RpcErrors.RpcErrors403.ChatWriteForbidden.ThrowRpcError();
         }
 
+        // send_polls is a right of its own: a group can allow messages and media while
+        // still forbidding polls. Checked for everyone via the chat default, and again
+        // per-member below.
+        if (bannedDefaultRights.SendPolls && IsPoll(input))
+        {
+            RpcErrors.RpcErrors403.ChatSendPollForbidden.ThrowRpcError();
+        }
+
         var channelMemberReadModel =
             await queryProcessor.ProcessAsync(new GetChannelMemberByUserIdQuery(channelReadModel.ChannelId,
                 input.SenderUserId));
@@ -323,6 +331,11 @@ public class MessageAppService(
                     RpcErrors.RpcErrors400.UserBannedInChannel.ThrowRpcError();
                 }
             }
+
+            if (memberBannedRights.SendPolls && IsPoll(input))
+            {
+                RpcErrors.RpcErrors403.ChatSendPollForbidden.ThrowRpcError();
+            }
         }
 
         //if (channelReadModel.SlowModeEnabled)
@@ -331,6 +344,18 @@ public class MessageAppService(
         //}
 
         return channelReadModel;
+    }
+
+    /// <summary>
+    /// True when the message being sent is a poll, so the <c>send_polls</c> banned right
+    /// applies. Covers both freshly created polls and forwarded ones.
+    /// </summary>
+    private static bool IsPoll(SendMessageInput input)
+    {
+        return input.MessageType == MessageType.Poll
+               || input.PollId != null
+               || input.Media is TMessageMediaPoll
+               || input.InputMedia is TInputMediaPoll;
     }
 
     /// <summary>

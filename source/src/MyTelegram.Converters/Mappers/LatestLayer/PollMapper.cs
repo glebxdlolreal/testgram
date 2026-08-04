@@ -37,10 +37,19 @@ internal sealed class PollMapper
             {
                 Text = p.Text,
                 Entities = p.Entities.ToTObject<TVector<IMessageEntity>>() ?? []
-            }
+            },
+            // Only answers contributed to an open poll carry these; both live behind the
+            // same flag bit, so they're set together or not at all.
+            AddedBy = p.AddedByPeerId == null ? null : new TPeerUser { UserId = p.AddedByPeerId.Value },
+            Date = p.AddedByPeerId == null ? null : p.Date ?? 0
         }));
         destination.ClosePeriod = source.ClosePeriod;
         destination.CloseDate = source.CloseDate;
+        destination.OpenAnswers = source.OpenAnswers;
+        destination.RevotingDisabled = source.RevotingDisabled;
+        destination.ShuffleAnswers = source.ShuffleAnswers;
+        destination.HideResultsUntilClose = source.HideResultsUntilClose;
+        destination.Hash = PollHashHelper.ComputeHash(source);
 
         return destination;
     }

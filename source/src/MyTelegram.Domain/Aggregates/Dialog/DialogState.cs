@@ -19,6 +19,8 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     //IApply<DeleteUserMessagesStartedEvent>,
     IApply<MentionCreatedEvent>,
     IApply<MentionReadEvent>,
+    IApply<PollVoteCreatedEvent>,
+    IApply<PollVotesReadEvent>,
     IApply<UpdateReadChannelOutboxEvent>,
     IApply<UpdateReadChannelInboxEvent>,
     IApply<ReadInboxMaxIdUpdatedEvent>,
@@ -39,6 +41,7 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     public int UnreadCount { get; private set; }
     public bool UnreadMark { get; private set; }
     public int UnreadMentionsCount { get; private set; }
+    public int UnreadPollVotesCount { get; private set; }
 
     public void Apply(ChannelHistoryClearedEvent aggregateEvent)
     {
@@ -110,6 +113,16 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     public void Apply(MentionReadEvent aggregateEvent)
     {
         UnreadMentionsCount = aggregateEvent.UnreadMentionsCount;
+    }
+
+    public void Apply(PollVoteCreatedEvent aggregateEvent)
+    {
+        UnreadPollVotesCount = aggregateEvent.UnreadPollVotesCount;
+    }
+
+    public void Apply(PollVotesReadEvent aggregateEvent)
+    {
+        UnreadPollVotesCount = 0;
     }
 
     //public void Apply(OutboxAlreadyReadEvent aggregateEvent)
@@ -199,6 +212,7 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
         ChannelHistoryMinId = snapshot.ChannelHistoryMinId;
         Draft = snapshot.Draft;
         UnreadMentionsCount = snapshot.UnreadMentionsCount;
+        UnreadPollVotesCount = snapshot.UnreadPollVotesCount;
         FolderId = snapshot.FolderId;
     }
 }

@@ -82,6 +82,13 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
             {
                 media = new TMessageMediaEmpty();
             }
+            else if (obj.Media is TInputMediaPoll)
+            {
+                // Handled after the message is loaded: closing a poll is a domain
+                // operation on the poll aggregate, not a media replacement. Leaving media
+                // null keeps EditOutboxMessageCommand from overwriting the stored media —
+                // renderers always read the live poll state from the read model anyway.
+            }
             else
             {
                 media = await mediaHelper.SaveMediaAsync(obj.Media);
@@ -105,6 +112,28 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
                 default:
                     RpcErrors.RpcErrors400.MessageIdInvalid.ThrowRpcError();
                     break;
+            }
+        }
+
+        // Clients stop a poll by editing the message with poll.closed = true; there is no
+        // dedicated messages.closePoll method. Authorization was handled just above: either
+        // the sender edits their own message, or a channel admin with EditMessages does.
+        if (obj.Media is TInputMediaPoll editPoll)
+        {
+            if (messageReadModel!.PollId == null)
+            {
+                RpcErrors.RpcErrors400.MediaInvalid.ThrowRpcError();
+            }
+
+            if (editPoll.Poll.Closed)
+            {
+                await commandBus.PublishAsync(
+                    new ClosePollCommand(PollId.Create(messageReadModel.PollId!.Value), CurrentDate));
+
+                if (peer.PeerType == PeerType.Channel)
+                {
+                    await CreateStopPollAdminLogAsync(input, peer, messageReadModel);
+                }
             }
         }
 
@@ -333,6 +362,64 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
         };
 
         await adminLogCol.InsertOneAsync(logEntry);
-        Console.WriteLine($"[AdminLog] Created edit message log for message {oldMessage.MessageId} in channel {peer.PeerId}");
+    }
+
+    /// <summary>
+    /// Records a <c>channelAdminLogEventActionStopPoll</c> entry when a poll is stopped in a channel.
+    /// </summary>
+    private async Task CreateStopPollAdminLogAsync(IRequestInput input, Peer peer, IMessageReadModel pollMessage)
+    {
+        var adminLogCol = mongoDatabase.GetCollection<BsonDocument>("channel_admin_log");
+
+        var messageText = pollMessage.Message ?? string.Empty;
+        if (string.IsNullOrEmpty(messageText) && pollMessage.EncryptedData is { Length: > 0 })
+        {
+            messageText = messageConverterService.DecryptMessage(peer.PeerId, pollMessage.MessageId,
+                pollMessage.EncryptedData.Value);
+        }
+
+        var message = new TMessage
+        {
+            Id = pollMessage.MessageId,
+            PeerId = new TPeerChannel { ChannelId = peer.PeerId },
+            Message = messageText,
+            Date = pollMessage.Date,
+            Out = pollMessage.Out,
+            Post = pollMessage.Post,
+            Media = new TMessageMediaEmpty(),
+            ReplyTo = null,
+            Entities = new TVector<IMessageEntity>()
+        };
+
+        if (pollMessage.SenderUserId > 0)
+        {
+            message.FromId = new TPeerUser { UserId = pollMessage.SenderUserId };
+        }
+
+        if (!string.IsNullOrEmpty(pollMessage.PostAuthor))
+        {
+            message.PostAuthor = pollMessage.PostAuthor;
+        }
+
+        var action = new TChannelAdminLogEventActionStopPoll { Message = message };
+
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+        action.Serialize(buffer);
+        var actionData = buffer.WrittenSpan.ToArray();
+
+        var eventId = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        await adminLogCol.InsertOneAsync(new BsonDocument
+        {
+            ["_id"] = $"adminlog-{peer.PeerId}-{eventId}",
+            ["channel_id"] = peer.PeerId,
+            ["event_id"] = eventId,
+            ["user_id"] = input.UserId,
+            ["date"] = DateTime.UtcNow,
+            ["action"] = new BsonDocument
+            {
+                ["type"] = "TChannelAdminLogEventActionStopPoll",
+                ["data"] = actionData
+            }
+        });
     }
 }

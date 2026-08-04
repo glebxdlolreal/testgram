@@ -70,6 +70,7 @@ internal sealed class DialogMapper
         destination.TtlPeriod = source.TtlPeriod;
         destination.UnreadMentionsCount = source.UnreadMentionsCount;
         destination.UnreadReactionsCount = source.UnreadReactionsCount;
+        destination.UnreadPollVotesCount = source.UnreadPollVotesCount;
         destination.FolderId = source.FolderId;
         destination.ViewForumAsMessages = source.ViewForumAsMessages;
 

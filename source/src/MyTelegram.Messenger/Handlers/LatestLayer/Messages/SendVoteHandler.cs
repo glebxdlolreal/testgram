@@ -1,4 +1,5 @@
 using MyTelegram.Domain.Aggregates.Poll;
+using MyTelegram.Domain.Aggregates.UserConfig;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
@@ -19,7 +20,11 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class SendVoteHandler(ICommandBus commandBus, IQueryProcessor queryProcessor, IPeerHelper peerHelper) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendVote, MyTelegram.Schema.IUpdates>
+internal sealed class SendVoteHandler(
+    ICommandBus commandBus,
+    IQueryProcessor queryProcessor,
+    IPeerHelper peerHelper,
+    IMessageAppService messageAppService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendVote, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestSendVote obj)
     {
@@ -41,8 +46,38 @@ internal sealed class SendVoteHandler(ICommandBus commandBus, IQueryProcessor qu
             RpcErrors.RpcErrors400.MessagePollClosed.ThrowRpcError();
         }
 
-        var command = new VoteCommand(PollId.With(pollReadModel.Id), input.ToRequestInfo(), input.UserId, obj.Options.Select(p => p).ToList());
+        var voterPeerId = await GetVoterPeerIdAsync(input, peer);
+
+        var command = new VoteCommand(PollId.With(pollReadModel.Id), input.ToRequestInfo(), voterPeerId, obj.Options.Select(p => p).ToList());
         await commandBus.PublishAsync(command, default);
         return null!;
+    }
+
+    /// <summary>
+    /// Resolves who the vote is cast as. Since layer 159 a vote in a group follows the peer
+    /// picked with <c>messages.saveDefaultSendAs</c>, so a user voting as a channel is recorded
+    /// under that channel. Falls back to the user when nothing valid is configured.
+    /// </summary>
+    private async Task<long> GetVoterPeerIdAsync(IRequestInput input, Peer toPeer)
+    {
+        if (toPeer.PeerType != PeerType.Channel)
+        {
+            return input.UserId;
+        }
+
+        var userConfigReadModel = await queryProcessor.ProcessAsync(
+            new GetUserConfigByKeyQuery(input.UserId, ((int)UserConfigType.SendAsPeer).ToString()));
+        if (userConfigReadModel == null || !long.TryParse(userConfigReadModel.Value, out var sendAsPeerId))
+        {
+            return input.UserId;
+        }
+
+        var sendAsPeer = peerHelper.GetPeer(sendAsPeerId);
+
+        // The stored peer may have gone stale (rights revoked, channel left), so it is
+        // re-validated on every vote rather than trusted outright.
+        return await messageAppService.IsValidSendAsPeerAsync(input.UserId, toPeer, sendAsPeer)
+            ? sendAsPeer.PeerId
+            : input.UserId;
     }
 }

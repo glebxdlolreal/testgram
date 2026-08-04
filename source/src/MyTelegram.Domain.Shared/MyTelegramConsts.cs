@@ -35,6 +35,15 @@ public class MyTelegramConsts
     public const int UsernameMaxLength = 32;
     public const int MaxRecentRepliersCount = 3;
     public const int MaxVoteOptions = 10;
+
+    /// <summary>Minimum <c>close_period</c> accepted for a poll, in seconds.</summary>
+    public const int MinPollClosePeriod = 5;
+
+    /// <summary>Maximum <c>close_period</c> accepted for a poll, in seconds.</summary>
+    public const int MaxPollClosePeriod = 600;
+
+    /// <summary>How many recent voters are exposed in <c>pollResults.recent_voters</c>.</summary>
+    public const int MaxPollRecentVoters = 3;
     public const int ChatMemberMaxCount = 50;
     public const int ChannelBotMaxCount = 20;
 

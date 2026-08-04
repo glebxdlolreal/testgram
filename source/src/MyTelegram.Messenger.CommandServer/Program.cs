@@ -125,6 +125,7 @@ builder.ConfigureServices((ctx,
     services.AddHostedService<GiveawayProcessorBackgroundService>();
     services.AddHostedService<ChannelViewsBackgroundService>();
     services.AddHostedService<StoryArchiveBackgroundService>();
+    services.AddHostedService<PollAutoCloseBackgroundService>();
     services.AddHostedService<SuggestedPostSettlementBackgroundService>();
     services.AddSingleton<MyTelegram.Messenger.Services.Phone.CallSessionExpiryService>();
     services.AddHostedService<CallSessionExpiryBackgroundService>();

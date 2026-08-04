@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Get poll results for non-anonymous polls
@@ -32,47 +34,80 @@ internal sealed class GetPollVotesHandler(IQueryProcessor queryProcessor, IChatC
             RpcErrors.RpcErrors400.MessageIdInvalid.ThrowRpcError();
         }
 
+        var pollId = messageReadModel!.PollId!.Value;
+        var pollReadModel = await queryProcessor.ProcessAsync(new GetPollQuery(pollId));
+        if (pollReadModel == null)
+        {
+            RpcErrors.RpcErrors400.MessageIdInvalid.ThrowRpcError();
+        }
+
+        // You have to participate before you get to see who voted for what. The poll's own
+        // creator is exempt, since they need the breakdown regardless.
+        if (pollReadModel!.CreatorUserId != input.UserId)
+        {
+            var ownVotes = await queryProcessor.ProcessAsync(new GetPollAnswerVotersQuery(pollId, input.UserId));
+            if (ownVotes.Count == 0)
+            {
+                RpcErrors.RpcErrors403.PollVoteRequired.ThrowRpcError();
+            }
+        }
+
         var limit = obj.Limit;
-        if (limit < 0 || limit > 500)
+        if (limit <= 0 || limit > 500)
         {
             limit = 100;
         }
 
         int.TryParse(obj.Offset, out var offset);
-        var pollVoterReadModels = await queryProcessor.ProcessAsync(new GetPollVotesQuery(messageReadModel!.PollId!.Value, obj.Option, offset, limit));
+        var pollVoterReadModels = await queryProcessor.ProcessAsync(new GetPollVotesQuery(pollId, obj.Option, offset, limit));
+
+        // Offsets count vote documents, not voters: with multiple_choice one voter can own
+        // several, so paging by voter would need a full scan to stay stable.
         string? nextOffset = null;
         if (pollVoterReadModels.Count == limit)
         {
             nextOffset = (offset + pollVoterReadModels.Count).ToString();
         }
 
+        var totalCount = await queryProcessor.ProcessAsync(new GetPollVotesCountQuery(pollId, obj.Option));
+
         var result = new TVotesList
         {
-            Count = pollVoterReadModels.Count,
+            // Total across the whole poll, not just this page — clients render it as
+            // "N votes" next to the option.
+            Count = (int)totalCount,
             NextOffset = nextOffset,
             Chats = new TVector<IChat>(),
             Users = new TVector<IUser>(),
             Votes = []
         };
-        var userIds = new List<long>();
-        foreach (var item in pollVoterReadModels)
+
+        // One entry per voter: several options collapse into messagePeerVoteMultiple.
+        foreach (var group in pollVoterReadModels.GroupBy(p => p.VoterPeerId))
         {
-            var messagePeerVote = new TMessagePeerVote
+            var votes = group.ToList();
+            var date = votes.Max(p => p.Date);
+            if (date == 0)
             {
-                Date = item.Date,
-                Option = item.Option,
-                Peer = new TPeerUser
-                {
-                    UserId = item.VoterPeerId
-                }
-            };
-            if (messagePeerVote.Date == 0)
-            {
-                messagePeerVote.Date = DateTime.UtcNow.ToTimestamp();
+                date = DateTime.UtcNow.ToTimestamp();
             }
 
-            userIds.Add(item.VoterPeerId);
-            result.Votes.Add(messagePeerVote);
+            var voterPeer = new TPeerUser { UserId = group.Key };
+
+            result.Votes.Add(votes.Count == 1
+                ? new TMessagePeerVote
+                {
+                    Date = date,
+                    Option = votes[0].Option,
+                    Peer = voterPeer
+                }
+                : new TMessagePeerVoteMultiple
+                {
+                    Date = date,
+                    Options = new TVector<ReadOnlyMemory<byte>>(
+                        votes.Select(p => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes(p.Option))),
+                    Peer = voterPeer
+                });
         }
 
         if (peer.PeerType == PeerType.Channel)
@@ -81,6 +116,7 @@ internal sealed class GetPollVotesHandler(IQueryProcessor queryProcessor, IChatC
             result.Chats.Add(channel);
         }
 
+        var userIds = pollVoterReadModels.Select(p => p.VoterPeerId).Distinct().ToList();
         var users = await userConverterService.GetUserListAsync(input, userIds, false, false, input.Layer);
         result.Users.AddRange(users);
         return result;

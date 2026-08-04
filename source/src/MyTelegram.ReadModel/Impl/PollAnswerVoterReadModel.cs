@@ -16,7 +16,10 @@ public class PollAnswerVoterReadModel : IPollAnswerVoterReadModel,
     {
         if (string.IsNullOrEmpty(Id))
         {
-            Id = $"{domainEvent.AggregateIdentity}_{domainEvent.AggregateEvent.VoterPeerId}";
+            // One document per (voter, option) pair: a multiple-choice voter picking two
+            // options must produce two records, otherwise the second pick overwrites the
+            // first and messages.getPollVotes only ever reports one option per person.
+            Id = $"{domainEvent.AggregateIdentity}_{domainEvent.AggregateEvent.VoterPeerId}_{domainEvent.AggregateEvent.Option}";
         }
 
         PollId = domainEvent.AggregateEvent.PollId;

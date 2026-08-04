@@ -36,6 +36,7 @@ public interface IDialogReadModel : IReadModel
     int? TtlPeriod { get; set; }
     int UnreadMentionsCount { get; }
     int UnreadReactionsCount { get; }
+    int UnreadPollVotesCount { get; }
     int? FolderId { get; }
     bool ViewForumAsMessages { get; }
 }

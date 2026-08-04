@@ -340,7 +340,21 @@ internal sealed class SendMediaHandler(IMediaHelper mediaHelper, IMessageAppServ
             solutionEntities = [];
         }
 
-        var command = new CreatePollCommand(PollId.Create(poll.Id), toPeer, poll.Id, poll.MultipleChoice, poll.Quiz, inputMediaPoll.Poll.PublicVoters, poll.Question.Text, poll.Answers.Select((p, index) => new PollAnswer(p.Text.Text, index.ToString(), p.Text.Entities.ToBytes())).ToList(), inputMediaPoll.CorrectAnswers?.Select(p => p.ToString()).ToList(), inputMediaPoll.Solution, solutionEntities, poll.Question.Entities, creatorUserId);
+        // close_period is relative ("close 30s from now"), close_date is absolute. Store an
+        // absolute deadline either way so the auto-close service has a single field to scan.
+        var closeDate = poll.CloseDate;
+        if (poll.ClosePeriod.HasValue && closeDate == null)
+        {
+            closeDate = CurrentDate + poll.ClosePeriod.Value;
+        }
+
+        var command = new CreatePollCommand(PollId.Create(poll.Id), toPeer, poll.Id, poll.MultipleChoice, poll.Quiz, inputMediaPoll.Poll.PublicVoters, poll.Question.Text, poll.Answers.Select((p, index) => new PollAnswer(p.Text.Text, index.ToString(), p.Text.Entities.ToBytes())).ToList(), inputMediaPoll.CorrectAnswers?.Select(p => p.ToString()).ToList(), inputMediaPoll.Solution, solutionEntities, poll.Question.Entities, creatorUserId,
+            poll.ClosePeriod,
+            closeDate,
+            poll.OpenAnswers,
+            poll.RevotingDisabled,
+            poll.ShuffleAnswers,
+            poll.HideResultsUntilClose);
         await commandBus.PublishAsync(command);
     }
 

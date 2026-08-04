@@ -22,4 +22,8 @@ public interface IPollReadModel : IReadModel
     byte[]? QuestionEntities { get; }
     IList<IMessageEntity>? QuestionEntities2 { get; }
     long? CreatorUserId { get; }
+    bool OpenAnswers { get; }
+    bool RevotingDisabled { get; }
+    bool ShuffleAnswers { get; }
+    bool HideResultsUntilClose { get; }
 }
