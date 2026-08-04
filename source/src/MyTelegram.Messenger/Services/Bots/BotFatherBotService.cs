@@ -31,7 +31,13 @@ public class BotFatherBotService(
         "/setabouttext - change bot about info\n" +
         "/setuserpic - change bot profile photo\n" +
         "/setcommands - change the list of commands\n" +
-        "/setinline - toggle inline mode\n" +
+        "/setinline - toggle inline mode\n\n" +
+        "Web Apps\n" +
+        "/myapps - edit your web apps\n" +
+        "/newapp - create a new web app\n" +
+        "/listapps - get a list of your web apps\n" +
+        "/editapp - edit a web app\n" +
+        "/deleteapp - delete an existing web app\n" +
         "/deletebot - delete a bot\n\n" +
         "Bot Settings\n" +
         "/token - get authorization token\n" +
@@ -129,6 +135,32 @@ public class BotFatherBotService(
                 await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to change inline settings.", "setinline");
                 break;
+            case "/newapp":
+                await ClearStateAsync(fromUserId);
+                await SendBotPickerAsync(input, fromUserId,
+                    "Alright, a new web app. Which bot will be offering the web app?", "newapp");
+                break;
+            case "/myapps":
+                await ClearStateAsync(fromUserId);
+                await SendMyAppsAsync(input, fromUserId);
+                break;
+            case "/listapps":
+                await ClearStateAsync(fromUserId);
+                await SendBotPickerAsync(input, fromUserId,
+                    "Please choose a bot to get a list of its web apps.", "listapps");
+                break;
+            case "/editapp":
+                await ClearStateAsync(fromUserId);
+                await SetStateAsync(fromUserId, "editapp:link");
+                await SendAsync(input, fromUserId,
+                    "Editing web apps. Please send me a web app link (e.g., t.me/bot/app).");
+                break;
+            case "/deleteapp":
+                await ClearStateAsync(fromUserId);
+                await SetStateAsync(fromUserId, "deleteapp:link");
+                await SendAsync(input, fromUserId,
+                    "To delete a web app, please send me the web app link (e.g., t.me/bot/app)");
+                break;
         }
     }
 
@@ -193,6 +225,16 @@ public class BotFatherBotService(
                 break;
             case "inline_mode":
                 await SendInlineModeMenuAsync(input, fromUserId, msgId, username);
+                break;
+            case "configure_mini_app":
+                await SendMainAppMenuAsync(input, fromUserId, msgId, username);
+                break;
+            case "app_select":
+                await SendAppMenuAsync(input, fromUserId, msgId, username, parts.Length > 2 ? parts[2] : string.Empty);
+                break;
+            case "back_to_bots":
+                await ClearStateAsync(fromUserId);
+                await SendMyBotsAsync(input, fromUserId);
                 break;
             case "inline_enable":
                 await SetBotInlineModeAsync(fromUserId, username, true);
@@ -302,6 +344,28 @@ public class BotFatherBotService(
             case "setinline":
                 if (step == "pick")
                     await HandleBotPickAsync(input, fromUserId, text, SendBotMenuTextAsync);
+                break;
+
+            case "newapp":
+                await HandleNewAppStateAsync(input, fromUserId, step, extra, text, parts);
+                break;
+
+            case "listapps":
+                if (step == "pick")
+                    await HandleBotPickAsync(input, fromUserId, text, SendAppListTextAsync);
+                break;
+
+            case "editapp":
+                await HandleEditAppStateAsync(input, fromUserId, step, extra, text, parts);
+                break;
+
+            case "deleteapp":
+                await HandleDeleteAppStateAsync(input, fromUserId, step, extra, text);
+                break;
+
+            case "mainapp":
+                if (step == "url")
+                    await HandleMainAppUrlAsync(input, fromUserId, extra, text);
                 break;
         }
     }
@@ -457,7 +521,7 @@ public class BotFatherBotService(
                 InlineRow(Btn("Allow Groups?", $"soon:{username}"), Btn("Group Privacy", $"soon:{username}")),
                 InlineRow(Btn("Group Admin Rights", $"soon:{username}"), Btn("Channel Admin Rights", $"soon:{username}")),
                 InlineRow(Btn("Payments", $"soon:{username}"), Btn("Domain", $"soon:{username}")),
-                InlineRow(Btn("Menu Button", $"soon:{username}"), Btn("Configure Mini App", $"soon:{username}")),
+                InlineRow(Btn("Menu Button", $"soon:{username}"), Btn("Configure Mini App", $"configure_mini_app:{username}")),
                 InlineRow(Btn("Paid Broadcast", $"soon:{username}")),
                 InlineRow(Btn("« Back to Bot", $"bot_select:{username}"))
             ));
@@ -915,5 +979,515 @@ public class BotFatherBotService(
         // Disconnect all business connections for this bot
         var connectionsCollection = mongoDatabase.GetCollection<BsonDocument>("connected_business_bots");
         await connectionsCollection.DeleteManyAsync(new BsonDocument("BotId", botUserId));
+    }
+
+    // --- Web apps (mini apps) ---
+    //
+    // A mini app is an ordinary HTTPS page hosted by the bot's developer, so the URL can only come
+    // from the bot's owner. These flows are what let them set it; the server never invents one.
+    // See https://corefork.telegram.org/api/bots/webapps .
+
+    private const string AppCollection = "bot_apps";
+
+    /// <summary>Short name rules from BotFather: 3-30 chars, a-zA-Z0-9_.</summary>
+    private static readonly Regex AppShortNameRegex = new("^[a-zA-Z0-9_]{3,30}$", RegexOptions.Compiled);
+
+    private async Task HandleNewAppStateAsync(IRequestInput input, long fromUserId, string step, string extra,
+        string text, string[] stateParts)
+    {
+        switch (step)
+        {
+            case "pick":
+            {
+                var username = text.Trim().TrimStart('@').ToLowerInvariant();
+                var bot = await GetBotAsync(fromUserId, username);
+                if (bot == null)
+                {
+                    await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.",
+                        new TReplyKeyboardHide());
+                    return;
+                }
+
+                await SetStateAsync(fromUserId, $"newapp:title:{username}");
+                await SendAsync(input, fromUserId,
+                    $"Creating a new web app for @{username}. Please enter a title for the web app.",
+                    new TReplyKeyboardHide());
+                break;
+            }
+
+            case "title":
+                await SetStateAsync(fromUserId, $"newapp:description:{extra}:{text}");
+                await SendAsync(input, fromUserId, "Please enter a short description of the web app.");
+                break;
+
+            case "description":
+            {
+                // State carries username:title, and the title may itself contain ':'.
+                var username = extra;
+                var title = string.Join(':', stateParts.Skip(3));
+                await SetStateAsync(fromUserId, $"newapp:url:{username}:{title}:{text}");
+                await SendAsync(input, fromUserId,
+                    "Now please send me the Web App URL that will be opened when users follow a web app direct link.\n\n" +
+                    "Photos and demo GIFs are not supported here yet.");
+                break;
+            }
+
+            case "url":
+            {
+                if (!IsHttpsUrl(text))
+                {
+                    await SendAsync(input, fromUserId, "Please send me a valid URL. https is required.");
+                    return;
+                }
+
+                var username = extra;
+                var title = stateParts.Length > 3 ? stateParts[3] : string.Empty;
+                var description = stateParts.Length > 4 ? string.Join(':', stateParts.Skip(4)) : string.Empty;
+
+                await SetStateAsync(fromUserId, $"newapp:shortname:{username}:{title}:{description}:{text}");
+                await SendAsync(input, fromUserId,
+                    "Good! Now please choose a short name for your web app: 3-30 characters, a-zA-Z0-9_. " +
+                    $"This short name will be used in URLs like t.me/{username}/myapp and serve as a unique " +
+                    "identifier for your web app.");
+                break;
+            }
+
+            case "shortname":
+            {
+                var shortName = text.Trim();
+                if (!AppShortNameRegex.IsMatch(shortName))
+                {
+                    await SendAsync(input, fromUserId,
+                        "Sorry, this short name is invalid. It must be 3-30 characters long and contain only a-zA-Z0-9_.");
+                    return;
+                }
+
+                var username = extra;
+                var title = stateParts.Length > 3 ? stateParts[3] : string.Empty;
+                var description = stateParts.Length > 4 ? stateParts[4] : string.Empty;
+                var url = stateParts.Length > 5 ? string.Join(':', stateParts.Skip(5)) : string.Empty;
+
+                var bot = await GetBotAsync(fromUserId, username);
+                if (bot == null)
+                {
+                    await ClearStateAsync(fromUserId);
+                    await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.");
+                    return;
+                }
+
+                var botUserId = bot["BotUserId"].AsInt64;
+                var existing = await GetAppAsync(botUserId, shortName);
+                if (existing != null)
+                {
+                    await SendAsync(input, fromUserId,
+                        "Sorry, this short name is already taken. Please choose a different one.");
+                    return;
+                }
+
+                await CreateAppAsync(botUserId, shortName, title, description, url);
+                await ClearStateAsync(fromUserId);
+                await SendAsync(input, fromUserId,
+                    $"You can now use {shortName} as the short_name parameter value in Bot API. " +
+                    $"Your web app link is t.me/{username}/{shortName}. Open it to start developing your web app!");
+                break;
+            }
+        }
+    }
+
+    private async Task HandleEditAppStateAsync(IRequestInput input, long fromUserId, string step, string extra,
+        string text, string[] stateParts)
+    {
+        switch (step)
+        {
+            case "link":
+            {
+                var app = await ResolveAppLinkAsync(fromUserId, text);
+                if (app == null)
+                {
+                    await SendAsync(input, fromUserId, "Invalid web app link.");
+                    return;
+                }
+
+                await SetStateAsync(fromUserId, $"editapp:title:{app.Value.Username}:{app.Value.ShortName}");
+                await SendAsync(input, fromUserId,
+                    $"Ok. Please enter the new title. Current title: {GetString(app.Value.Document, "title")}. " +
+                    "Use /skip to leave the title as is.");
+                break;
+            }
+
+            case "title":
+            {
+                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
+                if (!IsSkip(text))
+                {
+                    await UpdateAppFieldAsync(fromUserId, extra, shortName, "title", text);
+                }
+
+                await SetStateAsync(fromUserId, $"editapp:description:{extra}:{shortName}");
+                var app = await ResolveAppAsync(fromUserId, extra, shortName);
+                await SendAsync(input, fromUserId,
+                    $"Please enter the new description. Current description: {GetString(app, "description")}. " +
+                    "Use /skip to leave the description as is.");
+                break;
+            }
+
+            case "description":
+            {
+                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
+                if (!IsSkip(text))
+                {
+                    await UpdateAppFieldAsync(fromUserId, extra, shortName, "description", text);
+                }
+
+                await SetStateAsync(fromUserId, $"editapp:url:{extra}:{shortName}");
+                await SendAsync(input, fromUserId,
+                    "Please send a new web app URL. Use /skip to leave the URL as is.");
+                break;
+            }
+
+            case "url":
+            {
+                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
+                await ClearStateAsync(fromUserId);
+
+                if (IsSkip(text))
+                {
+                    await SendAsync(input, fromUserId, "No changes were made.");
+                    return;
+                }
+
+                if (!IsHttpsUrl(text))
+                {
+                    await SendAsync(input, fromUserId, "Please send me a valid URL. https is required.");
+                    return;
+                }
+
+                await UpdateAppFieldAsync(fromUserId, extra, shortName, "url", text);
+                await SendAsync(input, fromUserId, "Success!");
+                break;
+            }
+        }
+    }
+
+    private async Task HandleDeleteAppStateAsync(IRequestInput input, long fromUserId, string step, string extra,
+        string text)
+    {
+        switch (step)
+        {
+            case "link":
+            {
+                var app = await ResolveAppLinkAsync(fromUserId, text);
+                if (app == null)
+                {
+                    await SendAsync(input, fromUserId, "Invalid web app link.");
+                    return;
+                }
+
+                await SetStateAsync(fromUserId, $"deleteapp:confirm:{app.Value.Username}:{app.Value.ShortName}");
+                await SendAsync(input, fromUserId,
+                    $"Ok, deleting {app.Value.ShortName} ({GetString(app.Value.Document, "title")} " +
+                    $"(t.me/{app.Value.Username}/{app.Value.ShortName})). " +
+                    "Please type 'Yes, I am totally sure.' to proceed.");
+                break;
+            }
+
+            case "confirm":
+            {
+                if (!text.Trim().Equals("Yes, I am totally sure.", StringComparison.Ordinal))
+                {
+                    await SendAsync(input, fromUserId,
+                        "Please type 'Yes, I am totally sure.' to proceed, or /cancel to abort.");
+                    return;
+                }
+
+                // State is deleteapp:confirm:<username>:<shortName>.
+                var parts = (await GetStateAsync(fromUserId))?.Split(':') ?? [];
+                var username = parts.Length > 2 ? parts[2] : extra;
+                var shortName = parts.Length > 3 ? parts[3] : string.Empty;
+
+                var bot = await GetBotAsync(fromUserId, username);
+                await ClearStateAsync(fromUserId);
+
+                if (bot == null)
+                {
+                    await SendAsync(input, fromUserId, "Invalid web app link.");
+                    return;
+                }
+
+                await mongoDatabase.GetCollection<BsonDocument>(AppCollection).DeleteOneAsync(
+                    Builders<BsonDocument>.Filter.And(
+                        Builders<BsonDocument>.Filter.Eq("bot_id", bot["BotUserId"].AsInt64),
+                        Builders<BsonDocument>.Filter.Eq("short_name", shortName)));
+
+                await SendAsync(input, fromUserId, "Success");
+                break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sets or clears the bot's main mini app URL - the one behind the profile's "Open App" button,
+    /// used by messages.requestMainWebView.
+    /// </summary>
+    private async Task HandleMainAppUrlAsync(IRequestInput input, long fromUserId, string username, string text)
+    {
+        var bot = await GetBotAsync(fromUserId, username);
+        if (bot == null)
+        {
+            await ClearStateAsync(fromUserId);
+            await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.");
+            return;
+        }
+
+        var botUserId = bot["BotUserId"].AsInt64;
+
+        if (text.Trim().Equals("/empty", StringComparison.OrdinalIgnoreCase))
+        {
+            await ClearStateAsync(fromUserId);
+            await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
+                new BsonDocument("BotUserId", botUserId),
+                new BsonDocument("$unset", new BsonDocument("MainAppUrl", "")));
+            await SetBotHasMainAppAsync(botUserId, false);
+            await SendAsync(input, fromUserId, "Success! Mini App disabled for this bot.");
+            return;
+        }
+
+        if (!IsHttpsUrl(text))
+        {
+            await SendAsync(input, fromUserId, "Please send me a valid URL. https is required.");
+            return;
+        }
+
+        await ClearStateAsync(fromUserId);
+        await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
+            new BsonDocument("BotUserId", botUserId),
+            new BsonDocument("$set", new BsonDocument("MainAppUrl", text.Trim())));
+
+        // BotHasMainApp on the user read model is what makes clients show the "Open App" button.
+        await SetBotHasMainAppAsync(botUserId, true);
+
+        await SendAsync(input, fromUserId, "Success! Mini App settings updated.",
+            InlineRows(
+                InlineRow(Btn("« Back to Bot", $"bot_select:{username}")),
+                InlineRow(Btn("« Back to Bot List", "back_to_bots"))
+            ));
+    }
+
+    private async Task SendMainAppMenuAsync(IRequestInput input, long fromUserId, int msgId, string username)
+    {
+        var bot = await GetBotAsync(fromUserId, username);
+        if (bot == null) return;
+
+        var currentUrl = bot.TryGetValue("MainAppUrl", out var urlValue) && urlValue.IsString
+            ? urlValue.AsString
+            : null;
+
+        var status = string.IsNullOrEmpty(currentUrl)
+            ? $"Mini App is currently disabled for @{username}."
+            : $"Mini App URL for @{username}: {currentUrl}";
+
+        await SetStateAsync(fromUserId, $"mainapp:url:{username}");
+        await EditMessageAsync(input, fromUserId, msgId,
+            $"{status}\n\nSend me the Mini App URL that will be opened by tapping the 'Open App' button.\n\n" +
+            "Use /empty to disable Mini App for this bot.",
+            InlineRows(InlineRow(Btn("« Back to Settings", $"bot_settings:{username}"))));
+    }
+
+    /// <summary>Lists every web app the user owns, one inline button per app.</summary>
+    private async Task SendMyAppsAsync(IRequestInput input, long fromUserId)
+    {
+        var bots = await GetUserBotsAsync(fromUserId);
+        if (bots.Count == 0)
+        {
+            await SendAsync(input, fromUserId, "You have no bots yet. Use /newbot to create one.");
+            return;
+        }
+
+        var rows = new List<TKeyboardButtonRow>();
+        foreach (var bot in bots)
+        {
+            var username = bot["Username"].AsString;
+            foreach (var app in await GetBotAppsAsync(bot["BotUserId"].AsInt64))
+            {
+                var shortName = GetString(app, "short_name");
+                rows.Add(InlineRow(Btn($"{GetString(app, "title")} @{username}",
+                    $"app_select:{username}:{shortName}")));
+            }
+        }
+
+        if (rows.Count == 0)
+        {
+            await SendAsync(input, fromUserId,
+                "You currently have no web apps. Use /newapp command to create a first web app.");
+            return;
+        }
+
+        await SendAsync(input, fromUserId, "Choose a web app:", InlineRows(rows.ToArray()));
+    }
+
+    private async Task SendAppListTextAsync(IRequestInput input, long fromUserId, string username, BsonDocument bot)
+    {
+        await ClearStateAsync(fromUserId);
+
+        var apps = await GetBotAppsAsync(bot["BotUserId"].AsInt64);
+        if (apps.Count == 0)
+        {
+            await SendAsync(input, fromUserId,
+                $"@{username} has no web apps. Use /newapp command to create one.", new TReplyKeyboardHide());
+            return;
+        }
+
+        var lines = apps.Select(a =>
+            $"• {GetString(a, "title")} - t.me/{username}/{GetString(a, "short_name")}\n  {GetString(a, "url")}");
+
+        await SendAsync(input, fromUserId,
+            $"Web apps of @{username}:\n\n{string.Join("\n", lines)}", new TReplyKeyboardHide());
+    }
+
+    private async Task SendAppMenuAsync(IRequestInput input, long fromUserId, int msgId, string username,
+        string shortName)
+    {
+        var app = await ResolveAppAsync(fromUserId, username, shortName);
+        if (app == null)
+        {
+            await EditMessageAsync(input, fromUserId, msgId, "Invalid web app link.", null);
+            return;
+        }
+
+        await EditMessageAsync(input, fromUserId, msgId,
+            $"Web app {GetString(app, "title")} (t.me/{username}/{shortName})\n\n" +
+            $"Description: {GetString(app, "description")}\n" +
+            $"URL: {GetString(app, "url")}",
+            InlineRows(InlineRow(Btn("« Back to Bot List", "back_to_bots"))));
+    }
+
+    // --- Web app DB helpers ---
+
+    private async Task CreateAppAsync(long botId, string shortName, string title, string description, string url)
+    {
+        await mongoDatabase.GetCollection<BsonDocument>(AppCollection).InsertOneAsync(new BsonDocument
+        {
+            ["bot_id"] = botId,
+            ["app_id"] = await GetNextAppIdAsync(),
+            ["access_hash"] = Random.Shared.NextInt64(),
+            ["short_name"] = shortName,
+            ["title"] = title,
+            ["description"] = description,
+            ["url"] = url,
+            ["hash"] = Random.Shared.NextInt64(),
+            ["request_write_access"] = false,
+            ["has_settings"] = false,
+            ["inactive"] = false,
+            ["created_at"] = DateTime.UtcNow.ToTimestamp()
+        });
+    }
+
+    private async Task<long> GetNextAppIdAsync()
+    {
+        var result = await mongoDatabase.GetCollection<BsonDocument>("counters").FindOneAndUpdateAsync(
+            Builders<BsonDocument>.Filter.Eq("_id", "bot_app_id"),
+            Builders<BsonDocument>.Update.Inc("seq", 1),
+            new FindOneAndUpdateOptions<BsonDocument> { IsUpsert = true, ReturnDocument = ReturnDocument.After });
+
+        return result["seq"].ToInt64();
+    }
+
+    private async Task<BsonDocument?> GetAppAsync(long botId, string shortName)
+    {
+        return await mongoDatabase.GetCollection<BsonDocument>(AppCollection)
+            .Find(Builders<BsonDocument>.Filter.And(
+                Builders<BsonDocument>.Filter.Eq("bot_id", botId),
+                Builders<BsonDocument>.Filter.Eq("short_name", shortName)))
+            .FirstOrDefaultAsync();
+    }
+
+    private async Task<List<BsonDocument>> GetBotAppsAsync(long botId)
+    {
+        return await mongoDatabase.GetCollection<BsonDocument>(AppCollection)
+            .Find(Builders<BsonDocument>.Filter.Eq("bot_id", botId))
+            .Sort(Builders<BsonDocument>.Sort.Ascending("created_at"))
+            .ToListAsync();
+    }
+
+    private async Task<BsonDocument?> ResolveAppAsync(long ownerId, string username, string shortName)
+    {
+        var bot = await GetBotAsync(ownerId, username);
+        return bot == null ? null : await GetAppAsync(bot["BotUserId"].AsInt64, shortName);
+    }
+
+    /// <summary>
+    /// Parses a web app link (t.me/bot/app, https://t.me/bot/app, @bot/app) and verifies the caller
+    /// owns the bot behind it.
+    /// </summary>
+    private async Task<(string Username, string ShortName, BsonDocument Document)?> ResolveAppLinkAsync(
+        long ownerId, string link)
+    {
+        var value = link.Trim();
+        foreach (var prefix in new[] { "https://", "http://" })
+        {
+            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value[prefix.Length..];
+            }
+        }
+
+        foreach (var host in new[] { "t.me/", "telegram.me/" })
+        {
+            if (value.StartsWith(host, StringComparison.OrdinalIgnoreCase))
+            {
+                value = value[host.Length..];
+            }
+        }
+
+        var segments = value.TrimStart('@').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length != 2)
+        {
+            return null;
+        }
+
+        var username = segments[0].ToLowerInvariant();
+        var shortName = segments[1];
+
+        var bot = await GetBotAsync(ownerId, username);
+        if (bot == null)
+        {
+            return null;
+        }
+
+        var app = await GetAppAsync(bot["BotUserId"].AsInt64, shortName);
+        return app == null ? null : (username, shortName, app);
+    }
+
+    private async Task UpdateAppFieldAsync(long ownerId, string username, string shortName, string field, string value)
+    {
+        var bot = await GetBotAsync(ownerId, username);
+        if (bot == null) return;
+
+        await mongoDatabase.GetCollection<BsonDocument>(AppCollection).UpdateOneAsync(
+            Builders<BsonDocument>.Filter.And(
+                Builders<BsonDocument>.Filter.Eq("bot_id", bot["BotUserId"].AsInt64),
+                Builders<BsonDocument>.Filter.Eq("short_name", shortName)),
+            Builders<BsonDocument>.Update
+                .Set(field, value.Trim())
+                // Bump the hash so clients refetch via messages.getBotApp.
+                .Set("hash", Random.Shared.NextInt64()));
+    }
+
+    private async Task SetBotHasMainAppAsync(long botUserId, bool hasMainApp)
+    {
+        await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel").UpdateOneAsync(
+            new BsonDocument("UserId", botUserId),
+            new BsonDocument("$set", new BsonDocument("BotHasMainApp", hasMainApp)));
+    }
+
+    private static bool IsSkip(string text) =>
+        text.Trim().Equals("/skip", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsHttpsUrl(string text) =>
+        Uri.TryCreate(text.Trim(), UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps;
+
+    private static string GetString(BsonDocument? doc, string name)
+    {
+        return doc != null && doc.TryGetValue(name, out var value) && value.IsString ? value.AsString : string.Empty;
     }
 }

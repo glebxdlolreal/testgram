@@ -41,12 +41,17 @@ internal sealed class RequestSimpleWebViewHandler(
         }
 
         var url = await webViewSessionStore.ResolveBotUrlAsync(inputBot.UserId, obj.Url);
+        if (url == null)
+        {
+            // The bot's owner has not set a mini app URL through BotFather.
+            RpcErrors.RpcErrors400.BotInvalid.ThrowRpcError();
+        }
 
         // A simple webview cannot post messages back to a chat, so it gets no query id: there is
         // nothing for messages.prolongWebView to keep alive.
         var result = new TWebViewResultUrl
         {
-            Url = url,
+            Url = url!,
             Fullscreen = obj.Fullscreen
         };
 

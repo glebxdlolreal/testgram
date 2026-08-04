@@ -24,10 +24,17 @@ public interface IWebViewSessionStore
     Task<bool> ProlongSessionAsync(long queryId, long userId);
 
     /// <summary>
-    /// Resolves the mini app URL for a bot: an explicitly configured URL if the bot has one,
-    /// otherwise a per-bot path under the configured base URL.
+    /// Resolves the mini app URL for a bot. Returns null when the bot's owner has not configured
+    /// one, which callers surface as BOT_INVALID: the server never invents a URL, since only the
+    /// bot's developer knows where their mini app is hosted.
     /// </summary>
-    Task<string> ResolveBotUrlAsync(long botId, string? requestedUrl = null, string? shortName = null);
+    /// <param name="requestedUrl">
+    /// URL supplied by the client (only allowed in the chat with the bot itself); wins when present.
+    /// </param>
+    /// <param name="shortName">
+    /// Short name of a specific mini app (<c>/newapp</c>); when null the bot's main mini app is used.
+    /// </param>
+    Task<string?> ResolveBotUrlAsync(long botId, string? requestedUrl = null, string? shortName = null);
 }
 
 public class WebViewSessionStore(
@@ -83,32 +90,49 @@ public class WebViewSessionStore(
         return true;
     }
 
-    public async Task<string> ResolveBotUrlAsync(long botId, string? requestedUrl = null, string? shortName = null)
+    public async Task<string?> ResolveBotUrlAsync(long botId, string? requestedUrl = null, string? shortName = null)
     {
         if (!string.IsNullOrEmpty(requestedUrl))
         {
             return requestedUrl;
         }
 
-        // A bot may have a main mini app URL configured through bots.setBotInfo-style state.
-        var botApp = await mongoDatabase.GetCollection<BsonDocument>("bot_apps")
-            .Find(Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("bot_id", botId),
-                shortName == null
-                    ? Builders<BsonDocument>.Filter.Empty
-                    : Builders<BsonDocument>.Filter.Eq("short_name", shortName)))
-            .FirstOrDefaultAsync();
-
-        if (botApp != null && botApp.TryGetValue("url", out var urlValue) && urlValue.IsString &&
-            !string.IsNullOrEmpty(urlValue.AsString))
+        // A specific mini app (BotFather /newapp) is looked up by short name; without one, the bot's
+        // main mini app URL applies ("Configure Mini App").
+        if (shortName != null)
         {
-            return urlValue.AsString;
+            var botApp = await mongoDatabase.GetCollection<BsonDocument>("bot_apps")
+                .Find(Builders<BsonDocument>.Filter.And(
+                    Builders<BsonDocument>.Filter.Eq("bot_id", botId),
+                    Builders<BsonDocument>.Filter.Eq("short_name", shortName)))
+                .FirstOrDefaultAsync();
+
+            return GetUrl(botApp);
         }
 
-        var baseUrl = options.Value.WebApps.BaseUrl.TrimEnd('/');
-        return shortName == null
-            ? $"{baseUrl}/webapp/{botId}"
-            : $"{baseUrl}/webapp/{botId}/{shortName}";
+        var botState = await mongoDatabase.GetCollection<BsonDocument>("botfather-bot-state")
+            .Find(Builders<BsonDocument>.Filter.Eq("BotUserId", botId))
+            .FirstOrDefaultAsync();
+
+        if (botState != null && botState.TryGetValue("MainAppUrl", out var mainUrl) && mainUrl.IsString &&
+            !string.IsNullOrEmpty(mainUrl.AsString))
+        {
+            return mainUrl.AsString;
+        }
+
+        // No URL configured by the owner: there is nothing honest to return.
+        return null;
+    }
+
+    private static string? GetUrl(BsonDocument? document)
+    {
+        if (document != null && document.TryGetValue("url", out var value) && value.IsString &&
+            !string.IsNullOrEmpty(value.AsString))
+        {
+            return value.AsString;
+        }
+
+        return null;
     }
 
     private static int GetInt32(BsonDocument doc, string name)

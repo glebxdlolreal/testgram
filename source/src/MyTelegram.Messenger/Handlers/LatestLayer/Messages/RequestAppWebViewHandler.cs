@@ -38,12 +38,17 @@ internal sealed class RequestAppWebViewHandler(
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
 
         var url = await webViewSessionStore.ResolveBotUrlAsync(lookup!.Value.BotId, shortName: shortName);
-        var queryId = await webViewSessionStore.CreateSessionAsync(lookup.Value.BotId, input.UserId, peer, url);
+        if (url == null)
+        {
+            RpcErrors.RpcErrors400.BotAppInvalid.ThrowRpcError();
+        }
+
+        var queryId = await webViewSessionStore.CreateSessionAsync(lookup.Value.BotId, input.UserId, peer, url!);
 
         var result = new TWebViewResultUrl
         {
             QueryId = queryId,
-            Url = url,
+            Url = url!,
             Fullscreen = obj.Fullscreen
         };
 

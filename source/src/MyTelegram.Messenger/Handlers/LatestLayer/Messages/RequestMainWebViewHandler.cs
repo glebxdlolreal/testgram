@@ -42,12 +42,18 @@ internal sealed class RequestMainWebViewHandler(
 
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
         var url = await webViewSessionStore.ResolveBotUrlAsync(inputBot.UserId);
-        var queryId = await webViewSessionStore.CreateSessionAsync(inputBot.UserId, input.UserId, peer, url);
+        if (url == null)
+        {
+            // BotHasMainApp is set but no URL was configured; treat as no main app.
+            RpcErrors.RpcErrors400.BotInvalid.ThrowRpcError();
+        }
+
+        var queryId = await webViewSessionStore.CreateSessionAsync(inputBot.UserId, input.UserId, peer, url!);
 
         var result = new TWebViewResultUrl
         {
             QueryId = queryId,
-            Url = url,
+            Url = url!,
             Fullscreen = obj.Fullscreen
         };
 

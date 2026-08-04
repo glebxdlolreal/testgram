@@ -59,12 +59,18 @@ internal sealed class RequestWebViewHandler(
         }
 
         var url = await webViewSessionStore.ResolveBotUrlAsync(inputBot.UserId, obj.Url);
-        var queryId = await webViewSessionStore.CreateSessionAsync(inputBot.UserId, input.UserId, peer, url);
+        if (url == null)
+        {
+            // The bot's owner has not set a mini app URL through BotFather.
+            RpcErrors.RpcErrors400.BotWebviewDisabled.ThrowRpcError();
+        }
+
+        var queryId = await webViewSessionStore.CreateSessionAsync(inputBot.UserId, input.UserId, peer, url!);
 
         var result = new TWebViewResultUrl
         {
             QueryId = queryId,
-            Url = url,
+            Url = url!,
             Fullscreen = obj.Fullscreen
         };
 
