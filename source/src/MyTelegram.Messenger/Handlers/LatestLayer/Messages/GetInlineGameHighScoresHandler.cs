@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Bots;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Get highscores of a game sent using an inline bot
@@ -10,10 +12,38 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✖] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetInlineGameHighScoresHandler : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetInlineGameHighScores, MyTelegram.Schema.Messages.IHighScores>
+internal sealed class GetInlineGameHighScoresHandler(
+    IQueryProcessor queryProcessor,
+    IGameScoreStore gameScoreStore,
+    IUserConverterService userConverterService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetInlineGameHighScores, MyTelegram.Schema.Messages.IHighScores>
 {
-    protected override Task<MyTelegram.Schema.Messages.IHighScores> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetInlineGameHighScores obj)
+    protected override async Task<MyTelegram.Schema.Messages.IHighScores> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetInlineGameHighScores obj)
     {
-        throw new NotImplementedException();
+        var botReadModel = await queryProcessor.ProcessAsync(new GetUserByIdQuery(input.UserId));
+        if (botReadModel == null || !botReadModel.Bot)
+        {
+            RpcErrors.RpcErrors400.UserBotRequired.ThrowRpcError();
+        }
+
+        var messageId = GetInlineMessageId(obj.Id);
+        if (messageId == 0)
+        {
+            RpcErrors.RpcErrors400.MessageIdInvalid.ThrowRpcError();
+        }
+
+        var gameKey = IGameScoreStore.InlineGameKey(messageId);
+        var scores = await gameScoreStore.GetHighScoresAsync(gameKey);
+
+        return await GameHighScoresBuilder.BuildAsync(input, scores, queryProcessor, userConverterService);
+    }
+
+    private static long GetInlineMessageId(IInputBotInlineMessageID id)
+    {
+        return id switch
+        {
+            TInputBotInlineMessageID v => v.Id,
+            TInputBotInlineMessageID64 v => v.Id,
+            _ => 0
+        };
     }
 }

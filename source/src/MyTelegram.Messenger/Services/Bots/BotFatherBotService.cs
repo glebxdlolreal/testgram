@@ -31,6 +31,7 @@ public class BotFatherBotService(
         "/setabouttext - change bot about info\n" +
         "/setuserpic - change bot profile photo\n" +
         "/setcommands - change the list of commands\n" +
+        "/setinline - toggle inline mode\n" +
         "/deletebot - delete a bot\n\n" +
         "Bot Settings\n" +
         "/token - get authorization token\n" +
@@ -124,6 +125,10 @@ public class BotFatherBotService(
                 await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to change the list of commands.", "setcommands");
                 break;
+            case "/setinline":
+                await ClearStateAsync(fromUserId);
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change inline settings.", "setinline");
+                break;
         }
     }
 
@@ -185,6 +190,17 @@ public class BotFatherBotService(
                 break;
             case "business_mode":
                 await SendBusinessModeMenuAsync(input, fromUserId, msgId, username);
+                break;
+            case "inline_mode":
+                await SendInlineModeMenuAsync(input, fromUserId, msgId, username);
+                break;
+            case "inline_enable":
+                await SetBotInlineModeAsync(fromUserId, username, true);
+                await SendInlineModeMenuAsync(input, fromUserId, msgId, username);
+                break;
+            case "inline_disable":
+                await SetBotInlineModeAsync(fromUserId, username, false);
+                await SendInlineModeMenuAsync(input, fromUserId, msgId, username);
                 break;
             case "business_enable":
                 await EnableBotBusinessModeAsync(input, fromUserId, username);
@@ -283,6 +299,7 @@ public class BotFatherBotService(
                 break;
             case "setuserpic":
             case "setcommands":
+            case "setinline":
                 if (step == "pick")
                     await HandleBotPickAsync(input, fromUserId, text, SendBotMenuTextAsync);
                 break;
@@ -436,7 +453,7 @@ public class BotFatherBotService(
         await EditMessageAsync(input, fromUserId, msgId,
             $"Settings for @{username}.",
             InlineRows(
-                InlineRow(Btn("Inline Mode", $"soon:{username}"), Btn("Business Mode", $"business_mode:{username}")),
+                InlineRow(Btn("Inline Mode", $"inline_mode:{username}"), Btn("Business Mode", $"business_mode:{username}")),
                 InlineRow(Btn("Allow Groups?", $"soon:{username}"), Btn("Group Privacy", $"soon:{username}")),
                 InlineRow(Btn("Group Admin Rights", $"soon:{username}"), Btn("Channel Admin Rights", $"soon:{username}")),
                 InlineRow(Btn("Payments", $"soon:{username}"), Btn("Domain", $"soon:{username}")),
@@ -788,6 +805,44 @@ public class BotFatherBotService(
             offset += line.Length + 1;
         }
         return entities;
+    }
+
+    /// <summary>
+    /// Inline mode screen. The InlineEnabled flag on the bot's state document is what
+    /// messages.getInlineBotResults checks before forwarding queries to the bot.
+    /// </summary>
+    private async Task SendInlineModeMenuAsync(IRequestInput input, long fromUserId, int msgId, string username)
+    {
+        var bot = await GetBotAsync(fromUserId, username);
+        if (bot == null) return;
+
+        var isEnabled = bot.TryGetValue("InlineEnabled", out var enabledValue) && enabledValue.IsBoolean &&
+                        enabledValue.AsBoolean;
+        var status = isEnabled ? "✅ Enabled" : "❌ Disabled";
+
+        await EditMessageAsync(input, fromUserId, msgId,
+            $"Inline Mode for @{username}\n\nStatus: {status}\n\n" +
+            "When enabled, users can call this bot from any chat by typing " +
+            $"@{username} followed by a query.\n\n" +
+            "The bot must answer each query with messages.setInlineBotResults.",
+            InlineRows(
+                InlineRow(
+                    isEnabled
+                        ? Btn("❌ Turn off Inline Mode", $"inline_disable:{username}")
+                        : Btn("✅ Turn on Inline Mode", $"inline_enable:{username}")
+                ),
+                InlineRow(Btn("« Back to Settings", $"bot_settings:{username}"))
+            ));
+    }
+
+    private async Task SetBotInlineModeAsync(long ownerId, string username, bool enabled)
+    {
+        var bot = await GetBotAsync(ownerId, username);
+        if (bot == null) return;
+
+        await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
+            new BsonDocument("BotUserId", bot["BotUserId"].AsInt64),
+            new BsonDocument("$set", new BsonDocument("InlineEnabled", enabled)));
     }
 
     private async Task SendBusinessModeMenuAsync(IRequestInput input, long fromUserId, int msgId, string username)
