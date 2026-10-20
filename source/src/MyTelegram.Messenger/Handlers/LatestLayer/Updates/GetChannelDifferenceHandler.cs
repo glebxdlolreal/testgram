@@ -103,7 +103,7 @@ internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppS
                 await ackCacheService.AddRpcPtsToCacheAsync(input.ReqMsgId, 0, channelMaxGlobalSeqNo, new Peer(PeerType.Channel, channelId), true);
             }
 
-            var allUpdateList = updatesReadModels.Where(p => p.UpdatesType == UpdatesType.Updates).SelectMany(p => p.Updates ?? []).ToList();
+            var allUpdateList = StoredUpdateNormalizer.Normalize(updatesReadModels.Where(p => p.UpdatesType == UpdatesType.Updates).SelectMany(p => p.Updates ?? [])).ToList();
             var r = differenceConverterService.ToChannelDifference(input, dto, isChannelMember, allUpdateList, maxPts, layer: input.Layer);
             return r;
         }

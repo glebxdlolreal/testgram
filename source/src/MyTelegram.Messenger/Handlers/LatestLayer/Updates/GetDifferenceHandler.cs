@@ -94,6 +94,7 @@ internal sealed class GetDifferenceHandler(IMessageAppService messageAppService,
         var allUpdateList = updatesReadModels.Where(p => p.UpdatesType == UpdatesType.Updates).SelectMany(p => p.Updates ?? []).ToList();
         allUpdateList.AddRange(channelUpdatesReadModels.Where(p => p.UpdatesType == UpdatesType.Updates).SelectMany(p => p.Updates ?? []));
         allUpdateList.AddRange(userUpdates.SelectMany(p => p.Updates ?? []));
+        allUpdateList = StoredUpdateNormalizer.Normalize(allUpdateList).ToList();
         // Both replayed streams are capped by the same limit and truncate independently of each other.
         var channelTruncated = channelUpdatesReadModels.Count >= limit;
         var userTruncated = userUpdates.Count >= limit;
