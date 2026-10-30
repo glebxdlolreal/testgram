@@ -22,6 +22,7 @@ public static class AntiSpamServiceCollectionExtensions
 
         services.AddOptions<AntiSpamOptions>().Bind(configuration.GetSection("App:AntiSpam"));
         services.AddSingleton<AntiSpamJobStore>();
+        services.AddSingleton<AntiSpamWindowStore>();
         services.AddSingleton<AntiSpamClassifier>();
         // One process-wide window per (chat, sender); it must be a singleton to see consecutive messages.
         services.AddSingleton(sp =>

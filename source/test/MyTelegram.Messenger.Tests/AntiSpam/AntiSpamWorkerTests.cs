@@ -64,7 +64,8 @@ public class AntiSpamWorkerTests
             commands.Object, aggregates.Object, mongo.Database, Mock.Of<MyTelegram.Services.Services.IObjectMessageSender>(), Mock.Of<IQueryProcessor>(), null!, null!);
         var worker = new AntiSpamWorker(store, new AntiSpamClassifier(options), Mock.Of<IAntiSpamActorService>(),
             Mock.Of<IQueryProcessor>(), aggregates.Object, commands.Object, options, NullLogger<AntiSpamWorker>.Instance,
-            Mock.Of<MyTelegram.Messenger.Converters.ConverterServices.IMessageConverterService>(), completion, null!, null!, null!);
+            Mock.Of<MyTelegram.Messenger.Converters.ConverterServices.IMessageConverterService>(),
+            new AntiSpamWindowStore(mongo.Database, new AntiSpamClassifier(options)), completion, null!, null!, null!);
         await worker.ProcessAsync(job, default);
         await worker.ProcessAsync(job, default);
         Assert.Equal(0, await mongo.Database.GetCollection<BsonDocument>("channel_admin_log").CountDocumentsAsync(FilterDefinition<BsonDocument>.Empty));

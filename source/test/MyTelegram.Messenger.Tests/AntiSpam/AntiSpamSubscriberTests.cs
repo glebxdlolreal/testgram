@@ -27,7 +27,8 @@ public class AntiSpamSubscriberTests
         private readonly EmbeddedMongoServer _mongo = EmbeddedMongoServer.Start();
         private readonly Dictionary<int, MessageItem> _messages = new();
         private readonly Dictionary<int, int> _versions = new();
-        private readonly AntiSpamSubscriber _subscriber;
+        private AntiSpamSubscriber _subscriber = null!;
+        private readonly Func<AntiSpamSubscriber> _createSubscriber;
         private readonly AntiSpamBurstTrackerTests.ManualTime _time = new(T0);
         public readonly Mock<IChannelReadModel> ChannelModel = new();
         public bool SenderIsBot;
@@ -67,9 +68,15 @@ public class AntiSpamSubscriberTests
             aggregates.Setup(a => a.LoadAsync<MessageAggregate, MessageId>(It.IsAny<MessageId>(), It.IsAny<CancellationToken>()))
                 .ReturnsAsync((MessageId id, CancellationToken _) => new MessageAggregate(id));
 
-            _subscriber = new AntiSpamSubscriber(classifier, new AntiSpamBurstTracker(classifier, o, _time), Store,
-                queries.Object, converter.Object, aggregates.Object, o, NullLogger<AntiSpamSubscriber>.Instance, _time);
+            var window = new AntiSpamWindowStore(_mongo.Database, classifier);
+            window.InitializeAsync(default).GetAwaiter().GetResult();
+            // A fresh tracker is what a command-server restart looks like; the durable window survives it.
+            _createSubscriber = () => new AntiSpamSubscriber(classifier, new AntiSpamBurstTracker(classifier, o, _time), Store,
+                window, queries.Object, converter.Object, aggregates.Object, o, NullLogger<AntiSpamSubscriber>.Instance, _time);
+            Restart();
         }
+
+        public void Restart() => _subscriber = _createSubscriber();
 
         private static TMessage Message(int id, string text, int date) => new()
         {
@@ -82,11 +89,12 @@ public class AntiSpamSubscriberTests
             r.SenderPeerId == m.SenderUserId && r.Message == m.Message && r.Entities2 == m.Entities && r.Date == m.Date);
 
         public Task Send(int id, string text, long date, TVector<IMessageEntity>? entities = null, long sender = Sender,
-            bool forward = false, Peer? sendAs = null)
+            bool forward = false, Peer? sendAs = null, bool media = false)
         {
             _time.Now = date;
             var item = new MessageItem(new Peer(PeerType.Channel, Channel), new Peer(PeerType.Channel, Channel),
                 new Peer(PeerType.User, sender), sender, id, text, (int)date, Random.Shared.NextInt64(), true,
+                media ? SendMessageType.Media : SendMessageType.Text, media ? MessageType.Photo : MessageType.Text,
                 MessageSubType: forward ? MessageSubType.ForwardMessage : MessageSubType.Normal, Entities: entities,
                 FwdHeader: forward ? new MessageFwdHeader(false, false, new Peer(PeerType.User, 2_010_099), null, null, null, (int)date - 3600, null, null, null, null, null, null, false) : null,
                 SendAs: sendAs);
@@ -203,6 +211,55 @@ public class AntiSpamSubscriberTests
         await h.Send(3, Spam, T0 + 3, forward: true);
         await h.Send(4, Spam, T0 + 4, forward: true);
         (await h.Queued()).ShouldBe([1, 2, 3, 4]);
+    }
+
+    [RequiresMongoDbFact]
+    public async Task Media_captions_are_checked_like_text()
+    {
+        using var h = new Harness();
+        for (var i = 1; i <= 4; i++) await h.Send(i, Spam, T0 + i, media: i % 2 == 0);
+        (await h.Queued()).ShouldBe([1, 2, 3, 4]);
+    }
+
+    [RequiresMongoDbFact]
+    public async Task A_restart_in_the_middle_of_a_burst_does_not_reset_the_window()
+    {
+        using var h = new Harness();
+        for (var i = 1; i <= 3; i++) await h.Send(i, Spam, T0 + i);
+        h.Restart();
+        await h.Send(4, Spam, T0 + 10);
+        (await h.Queued()).ShouldBe([1, 2, 3, 4]);
+    }
+
+    [RequiresMongoDbFact]
+    public async Task A_restart_does_not_resurrect_entries_older_than_the_window_or_edited_away()
+    {
+        using var h = new Harness();
+        await h.Send(1, Spam, T0);
+        for (var i = 2; i <= 3; i++) await h.Send(i, Spam, T0 + 100 + i);
+        await h.Edit(3, "Edited into a harmless long message without any kind of link", T0 + 110);
+        h.Restart();
+        await h.Send(4, Spam, T0 + 130);
+        (await h.Queued()).ShouldBeEmpty(); // 1 expired, 3 no longer under scrutiny
+    }
+
+    [RequiresMongoDbFact]
+    public async Task An_edit_after_effects_were_captured_still_refences_but_not_after_admission()
+    {
+        using var h = new Harness();
+        for (var i = 1; i <= 4; i++) await h.Send(i, Spam, T0 + i);
+        var jobs = h.Database.GetCollection<BsonDocument>("antispam_jobs");
+        await jobs.UpdateOneAsync(new BsonDocument("message", 4), new BsonDocument("$set",
+            new BsonDocument { ["effects"] = new BsonDocument("mentions", new BsonArray()), ["lease"] = "worker" }));
+        await jobs.UpdateOneAsync(new BsonDocument("message", 3), new BsonDocument("$set", new BsonDocument("admission_protocol", 1)));
+        var admitted = (await h.Jobs()).Single(j => j["message"] == 3);
+        await h.Edit(4, Spam + " ", T0 + 10);
+        await h.Edit(3, Spam + " ", T0 + 11);
+        var refenced = (await h.Jobs()).Single(j => j["message"] == 4);
+        refenced["aggregate_version"].AsInt32.ShouldBe(2);
+        refenced.Contains("effects").ShouldBeFalse();
+        refenced["lease"].AsString.ShouldNotBe("worker"); // a worker holding the old lease loses its CAS steps
+        (await h.Jobs()).Single(j => j["message"] == 3).ShouldBe(admitted); // owned by the admission protocol
     }
 
     [RequiresMongoDbFact]

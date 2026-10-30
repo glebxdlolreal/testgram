@@ -6,6 +6,7 @@ namespace MyTelegram.Messenger.Services.AntiSpam;
 public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier classifier,
     IAntiSpamActorService actor, IQueryProcessor queries, IAggregateStore aggregates, ICommandBus commands,
     IOptions<AntiSpamOptions> options, ILogger<AntiSpamWorker> logger, IMessageConverterService converter,
+    AntiSpamWindowStore window,
     AntiSpamCompletionService completion, AntiSpamDeletionEffectsService effects,
     AntiSpamEffectProofReader proofReader, AntiSpamMentionAdmissionService admissions) : BackgroundService
 {
@@ -17,6 +18,7 @@ public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier cl
             {
                 await store.InitializeAsync(stoppingToken);
                 await proofReader.InitializeAsync(stoppingToken);
+                await window.InitializeAsync(stoppingToken);
                 break;
             }
             catch (Exception e) when (e is not OperationCanceledException)
@@ -104,7 +106,7 @@ public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier cl
         var mode = job.GetValue("mode", AntiSpamClassifier.StrictMode).AsString;
         if (original == null || message == null || text != original.Message || message.SenderUserId != sender ||
             message.SenderPeerId != sender || message.Post || message.SendAs?.PeerId == channelId ||
-            message.MessageAction != null || message.SendMessageType != SendMessageType.Text ||
+            message.MessageAction != null || message.SendMessageType is not (SendMessageType.Text or SendMessageType.Media) ||
             classifier.Analyze(text, message.Entities2)?.Hex(mode) != job["fingerprint"].AsString)
         {
             await AbortAsync(job, ct, "text_changed");

@@ -58,6 +58,22 @@ public sealed class AntiSpamBurstTracker(AntiSpamClassifier classifier, IOptions
         });
     }
 
+    /// <summary>True when this (chat, sender) has a live window in this process.</summary>
+    public bool IsTracked(long chat, long sender) => _rings.ContainsKey((chat, sender));
+
+    /// <summary>
+    /// Restores a cold window from durable storage (after a restart). Entries already present win, so a
+    /// concurrent observation is never overwritten by an older persisted copy.
+    /// </summary>
+    public void Seed(long chat, long sender, long now, IEnumerable<AntiSpamWindowEntry> entries) =>
+        Update(chat, sender, now, ring =>
+        {
+            foreach (var entry in entries)
+                if (ring.IndexOf(entry.MessageId) < 0 && entry.Date >= now - classifier.WindowSeconds)
+                    ring.Add(new Entry(entry.MessageId, entry.Date, entry.Keys));
+            return null;
+        });
+
     /// <summary>Marks messages as enqueued so later triggers of the same burst do not reload them.</summary>
     public void MarkEnqueued(long chat, long sender, IEnumerable<int> messageIds)
     {

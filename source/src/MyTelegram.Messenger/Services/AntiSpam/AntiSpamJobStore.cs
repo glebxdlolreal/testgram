@@ -25,9 +25,10 @@ public sealed class AntiSpamJobStore(IMongoDatabase database, IOptions<AntiSpamO
 
     /// <summary>
     /// Queues a deletion, or re-fences a queued one at a new aggregate version after an edit that still
-    /// matches. Only untouched work is re-fenced: once effects were captured or dispatch began, the old
-    /// fence stays and the worker cancels on the version mismatch. Rotating the lease makes any worker that
-    /// is mid-way through the old version lose its CAS steps. False when an existing job was left as is.
+    /// matches. Captured effects describe the old version, so they are dropped and recaptured. Rotating the
+    /// lease makes a worker mid-way through the old version lose every later CAS step (effects, admission,
+    /// dispatch, abort). Once mention admission or dispatch began, the existing fencing protocol owns the
+    /// job and it is left as is (false); the worker then cancels on the version mismatch.
     /// </summary>
     public async Task<bool> EnqueueOrRefenceAsync(long channel, long sender, int message, string fingerprint,
         byte[] originalMessage, byte[] action, int aggregateVersion, string mode, string burst, CancellationToken ct)
@@ -41,11 +42,11 @@ public sealed class AntiSpamJobStore(IMongoDatabase database, IOptions<AntiSpamO
         catch (MongoWriteException e) when (e.WriteError.Category == ServerErrorCategory.DuplicateKey) { }
         var result = await Jobs.UpdateOneAsync(new BsonDocument { ["_id"] = JobId(channel, message), ["sender"] = sender,
                 ["state"] = "pending", ["aggregate_version"] = new BsonDocument("$lt", aggregateVersion),
-                ["effects"] = new BsonDocument("$exists", false), ["dispatched"] = new BsonDocument("$ne", true),
-                ["admission_protocol"] = new BsonDocument("$exists", false) },
-            new BsonDocument("$set", new BsonDocument { ["aggregate_version"] = aggregateVersion,
+                ["dispatched"] = new BsonDocument("$ne", true), ["admission_protocol"] = new BsonDocument("$exists", false) },
+            new BsonDocument { ["$set"] = new BsonDocument { ["aggregate_version"] = aggregateVersion,
                 ["fingerprint"] = fingerprint, ["mode"] = mode, ["original_message"] = originalMessage, ["action"] = action,
-                ["lease"] = Guid.NewGuid().ToString(), ["due"] = DateTime.UtcNow.AddSeconds(Math.Clamp(options.Value.DelaySeconds, 2, 60)) }),
+                ["lease"] = Guid.NewGuid().ToString(), ["due"] = DateTime.UtcNow.AddSeconds(Math.Clamp(options.Value.DelaySeconds, 2, 60)) },
+                ["$unset"] = new BsonDocument("effects", 1) },
             cancellationToken: ct);
         return result.ModifiedCount == 1;
     }
