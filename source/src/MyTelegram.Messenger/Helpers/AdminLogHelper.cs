@@ -158,17 +158,20 @@ public static class AdminLogHelper
     /// <summary>
     /// Logs a change of the <a href="https://corefork.telegram.org/api/antispam">native antispam</a> setting.
     /// </summary>
+    /// <remarks>Called for the persisted event, so a refused toggle (CHAT_NOT_MODIFIED) is never logged;
+    /// <paramref name="operationKey"/> keeps a redelivered event from adding a second entry.</remarks>
     public static async Task LogToggleAntiSpam(
         IMongoDatabase database,
         long channelId,
         long adminUserId,
-        bool newValue)
+        bool newValue,
+        string? operationKey = null)
     {
         var action = new TChannelAdminLogEventActionToggleAntiSpam
         {
             NewValue = newValue
         };
-        await LogEventAsync(database, channelId, adminUserId, action);
+        await LogEventAsync(database, channelId, adminUserId, action, operationKey);
     }
 
     /// <summary>
@@ -838,17 +841,23 @@ public static class AdminLogHelper
         IMongoDatabase database,
         long channelId,
         long adminUserId,
-        IChannelAdminLogEventAction action)
+        IChannelAdminLogEventAction action,
+        string? operationKey = null)
     {
         var collection = database.GetCollection<BsonDocument>(AdminLogCollection.Name);
+        var id = operationKey == null ? null : $"adminlog-{channelId}-{operationKey}";
+        if (id != null && await collection.Find(new BsonDocument("_id", id)).AnyAsync())
+        {
+            return;
+        }
         var eventId = await NextEventIdAsync(database, channelId);
 
         var buffer = new ArrayBufferWriter<byte>();
         action.Serialize(buffer);
 
-        await collection.InsertOneAsync(new BsonDocument
+        var document = new BsonDocument
         {
-            ["_id"] = $"adminlog-{channelId}-{eventId}",
+            ["_id"] = id ?? $"adminlog-{channelId}-{eventId}",
             ["event_id"] = eventId,
             ["channel_id"] = channelId,
             ["user_id"] = adminUserId,
@@ -862,7 +871,15 @@ public static class AdminLogHelper
                 ["type"] = action.GetType().Name,
                 ["data"] = buffer.WrittenMemory.ToArray()
             }
-        });
+        };
+        try
+        {
+            await collection.InsertOneAsync(document);
+        }
+        catch (MongoWriteException e) when (id != null && e.WriteError.Category == ServerErrorCategory.DuplicateKey)
+        {
+            // A concurrent delivery of the same operation already logged it.
+        }
     }
 
     /// <summary>

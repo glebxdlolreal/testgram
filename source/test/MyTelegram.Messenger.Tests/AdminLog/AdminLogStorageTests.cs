@@ -37,6 +37,22 @@ public class AdminLogStorageTests
     }
 
     [RequiresMongoDbFact]
+    public async Task An_antispam_toggle_is_logged_once_per_operation()
+    {
+        using var mongo = EmbeddedMongoServer.Start();
+
+        await AdminLogHelper.LogToggleAntiSpam(mongo.Database, ChannelId, AdminUserId, true, "antispam-toggle-7");
+        await AdminLogHelper.LogToggleAntiSpam(mongo.Database, ChannelId, AdminUserId, true, "antispam-toggle-7");
+        await AdminLogHelper.LogToggleAntiSpam(mongo.Database, ChannelId, AdminUserId, false, "antispam-toggle-8");
+
+        var entries = await mongo.Database.GetCollection<BsonDocument>(AdminLogCollection.Name)
+            .Find(FilterDefinition<BsonDocument>.Empty).Sort(new BsonDocument("event_id", 1)).ToListAsync();
+        entries.Count.ShouldBe(2);
+        entries.ShouldAllBe(e => e["action"]["type"].AsString == nameof(TChannelAdminLogEventActionToggleAntiSpam));
+        entries.Select(e => e["event_id"].ToInt64()).Distinct().Count().ShouldBe(2);
+    }
+
+    [RequiresMongoDbFact]
     public async Task Each_channel_gets_its_own_id_sequence()
     {
         using var mongo = EmbeddedMongoServer.Start();

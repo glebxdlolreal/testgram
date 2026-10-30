@@ -702,6 +702,10 @@ public class ChannelDomainEventHandler(
     }
     public Task HandleAsync(IDomainEvent<ChannelAggregate, ChannelId, ChannelAntiSpamChangedEvent> domainEvent, CancellationToken cancellationToken)
     {
+        // The toggle command runs inside this process, and locally committed events never reach the
+        // cached read model updater (only RabbitMQ deliveries do). Without this, getFullChannel kept
+        // serving the stale channelFull.antispam until the process restarted.
+        channelAppService.InvalidateCache(domainEvent.AggregateEvent.ChannelId);
         return NotifyUpdateChannelAsync(domainEvent.AggregateEvent.RequestInfo,
             domainEvent.AggregateEvent.ChannelId, bareChannelUpdate: true);
     }
