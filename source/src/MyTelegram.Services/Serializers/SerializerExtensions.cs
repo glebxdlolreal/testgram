@@ -50,12 +50,25 @@ public static class SerializerExtensions
                 TopMsgId = buffer.ReadNullableInt32(),
                 MaxId = buffer.ReadNullableInt32(),
                 Dc = buffer.ReadNullableInt32(),
-                Addr = buffer.ReadString2(),
-                ReportDeliveryUntilDate = buffer.ReadNullableInt32()
+                Addr = buffer.ReadString2()
             };
         }
         var sound = buffer.ReadString2();
         return new PushData(locKey, locArgs, userId, custom, sound);
+    }
+
+    /// <summary>
+    /// Fields added to <see cref="PushData"/> after the session-server image was built go after every
+    /// field that binary knows; it stops reading before them, newer readers pick them up.
+    /// </summary>
+    public static void WritePushDataTrailer(this IBufferWriter<byte> writer, PushData? value) =>
+        writer.Write(value?.Custom?.ReportDeliveryUntilDate);
+
+    public static void ReadPushDataTrailer(this ref ReadOnlyMemory<byte> buffer, PushData? value)
+    {
+        if (buffer.Length == 0) return;
+        var reportDeliveryUntilDate = buffer.ReadNullableInt32();
+        if (value?.Custom != null) value.Custom.ReportDeliveryUntilDate = reportDeliveryUntilDate;
     }
 
     public static void Write(this IBufferWriter<byte> writer, PushData? value)
@@ -106,7 +119,10 @@ public static class SerializerExtensions
                 writer.Write(value.Custom.MaxId);
                 writer.Write(value.Custom.Dc);
                 writer.WriteString(value.Custom.Addr);
-                writer.Write(value.Custom.ReportDeliveryUntilDate);
+                // ReportDeliveryUntilDate is NOT written here: the external session-server binary reads
+                // the pre-July layout of PushData and misparses everything after an extra field (it read the
+                // following list length from the wrong bytes and died with OutOfMemoryException). Events
+                // carry it as a trailer instead, see WritePushDataTrailer.
             }
 
             writer.WriteString(value.Sound);

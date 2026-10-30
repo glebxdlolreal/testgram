@@ -905,6 +905,7 @@ public class LayeredPushMessageCreatedIntegrationEventEventDataSerializer : IEve
         writer.Write(data.GlobalSeqNo);
         writer.Write(data.PushData);
         writer.Write(data.ExcludeUserIds);
+        writer.WritePushDataTrailer(data.PushData);
     }
 
     public LayeredPushMessageCreatedIntegrationEvent Deserialize(ReadOnlyMemory<byte> buffer)
@@ -921,6 +922,7 @@ public class LayeredPushMessageCreatedIntegrationEventEventDataSerializer : IEve
         var globalSeqNo = buffer.ReadInt64();
         var pushData = buffer.ReadPushData();
         var excludeUserIds = buffer.ReadList();
+        buffer.ReadPushDataTrailer(pushData);
 
         var rentLength = data.Length;
         var owner = MemoryPool<byte>.Shared.Rent(rentLength);
@@ -1389,11 +1391,13 @@ public class PushNotificationCreatedEventEventDataSerializer : IEventDataSeriali
     public void Serialize(IBufferWriter<byte> writer, PushNotificationCreatedEvent data)
     {
         writer.Write(data.Data);
+        writer.WritePushDataTrailer(data.Data);
     }
 
     public PushNotificationCreatedEvent Deserialize(ReadOnlyMemory<byte> buffer)
     {
         var data = buffer.ReadPushData();
+        buffer.ReadPushDataTrailer(data);
 
         return new PushNotificationCreatedEvent(data);
     }
