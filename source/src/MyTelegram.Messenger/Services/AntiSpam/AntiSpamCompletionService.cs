@@ -77,6 +77,9 @@ public sealed class AntiSpamCompletionService(AntiSpamJobStore jobs, IChannelPts
         }
         if (!await effects.ApplyAsync(job, pts, ct)) return false;
         await commands.PublishAsync(new PublishAntiSpamCompletionCommand(new AntiSpamCompletionId(operation)), ct);
+        // Advance the channel Pts read model through its own aggregate (monotonic there and in the
+        // projection), never by projecting a foreign aggregate into the PtsAggregate read model.
+        await commands.PublishAsync(new UpdatePtsCommand(PtsId.Create(channel), channel, 0, pts, globalSeq, 0, messageId), ct);
         var projectedPts = await DurableCollection("eventflow-ptsreadmodel")
             .Find(new BsonDocument { ["PeerId"] = channel, ["Pts"] = new BsonDocument("$gte", pts) }).AnyAsync(ct);
         if (!projectedPts) return false;

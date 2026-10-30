@@ -1,30 +1,10 @@
-﻿using MyTelegram.Domain.Aggregates.AntiSpamCompletion;
-
-namespace MyTelegram.ReadModel.Impl;
+﻿namespace MyTelegram.ReadModel.Impl;
 
 public class PtsReadModel : IPtsReadModel,
-    IAmReadModelFor<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionPublishedEvent>,
     IAmReadModelFor<PtsAggregate, PtsId, PtsUpdatedEvent>,
     IAmReadModelFor<PtsAggregate, PtsId, QtsUpdatedEvent>,
     IAmReadModelFor<PtsAggregate, PtsId, PtsGlobalSeqNoUpdatedEvent>
 {
-    public Task ApplyAsync(IReadModelContext context,
-        IDomainEvent<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionPublishedEvent> domainEvent,
-        CancellationToken cancellationToken)
-    {
-        var e = domainEvent.AggregateEvent;
-        Id = PtsId.Create(e.ChannelId).Value;
-        PeerId = e.ChannelId;
-        if (e.Pts > Pts)
-        {
-            Pts = e.Pts;
-            Date = e.Date;
-            Seq++;
-        }
-        GlobalSeqNo = Math.Max(GlobalSeqNo, e.GlobalSeqNo);
-        return Task.CompletedTask;
-    }
-
     public virtual int Date { get; private set; }
     public virtual long GlobalSeqNo { get; private set; }
     public virtual string Id { get; private set; } = null!;

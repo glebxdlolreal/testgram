@@ -47,7 +47,9 @@ public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier cl
     {
         if (job["state"] == "confirmed")
         {
-            await completion.CompleteAsync(job, ct);
+            // Ordinary channel Pts allocations wait while a completion holds the publication
+            // reservation, so an unfinished completion is retried within seconds, not at lease expiry.
+            if (!await completion.CompleteAsync(job, ct)) await store.RetrySoonAsync(job, ct);
             return;
         }
         var channelId = job["channel"].ToInt64();

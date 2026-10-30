@@ -168,6 +168,11 @@ public sealed class AntiSpamJobStore(IMongoDatabase database, IOptions<AntiSpamO
         return saved["completion"].AsBsonDocument;
     }
 
+    public Task RetrySoonAsync(BsonDocument job, CancellationToken ct) => Jobs.UpdateOneAsync(
+        new BsonDocument { ["_id"] = job["_id"], ["lease"] = job["lease"], ["state"] = "confirmed" },
+        new BsonDocument("$set", new BsonDocument("due", DateTime.UtcNow.AddSeconds(Math.Clamp(options.Value.PollSeconds, 1, 30)))),
+        cancellationToken: ct);
+
     public Task MarkTransportAcceptedAsync(BsonDocument job, CancellationToken ct) => Jobs.UpdateOneAsync(
         new BsonDocument { ["_id"] = job["_id"], ["request"] = job["request"], ["state"] = "confirmed" },
         new BsonDocument("$set", new BsonDocument("transport_accepted", true)), cancellationToken: ct);

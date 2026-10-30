@@ -13,6 +13,7 @@ using Microsoft.Extensions.DependencyInjection;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Domain.Aggregates.AntiSpamCompletion;
+using MyTelegram.Domain.Aggregates.Pts;
 using MyTelegram.EventFlow.MongoDB;
 using MyTelegram.EventFlow.MongoDB.Extensions;
 using MyTelegram.Messenger.Services.AntiSpam;
@@ -79,17 +80,18 @@ public sealed class AntiSpamCompletionServiceTests
             .Find(new BsonDocument("PeerId", Channel)).AnyAsync());
         Assert.Equal(pts - 1, await allocator.GetReadablePtsCeilingAsync(Channel));
 
-        await recovered.Commands.PublishAsync(new PublishAntiSpamCompletionCommand(new AntiSpamCompletionId(operation)), default);
+        await recovered.PublishAsync(operation, assigned);
         var state = await mongo.Database.GetCollection<PtsReadModel>("eventflow-ptsreadmodel")
             .Find(new BsonDocument("PeerId", Channel)).SingleAsync();
         Assert.Equal(pts, state.Pts);
-        Assert.Equal(GlobalSequence, state.GlobalSeqNo);
+        // The channel Pts row advances through PtsAggregate like any other channel update; the global
+        // sequence for difference delivery lives on the updates row asserted above.
         await new DurableChannelPtsAllocator(mongo.Database).MarkPublishedAsync(Channel, operation, pts);
         Assert.Null(await allocator.GetReadablePtsCeilingAsync(Channel));
         Assert.Equal(pts + 1, await allocator.ReserveAsync(Channel, "later-message"));
 
         await recovered.CreateAsync(operation, assigned);
-        await recovered.Commands.PublishAsync(new PublishAntiSpamCompletionCommand(new AntiSpamCompletionId(operation)), default);
+        await recovered.PublishAsync(operation, assigned);
         var replayed = await mongo.Database.GetCollection<PtsReadModel>("eventflow-ptsreadmodel")
             .Find(new BsonDocument("PeerId", Channel)).SingleAsync();
         Assert.Equal(state.Seq, replayed.Seq);
@@ -150,7 +152,7 @@ public sealed class AntiSpamCompletionServiceTests
         using var runtime = new CompletionRuntime(mongo, project: true);
         await runtime.CreateAsync(operation, job["completion"].AsBsonDocument);
         // Model a delayed independent projection, even if the Pts projection has already arrived.
-        await runtime.Commands.PublishAsync(new PublishAntiSpamCompletionCommand(new AntiSpamCompletionId(operation)), default);
+        await runtime.PublishAsync(operation, job["completion"].AsBsonDocument);
         if (missing == "message-still-visible")
         {
             await mongo.Database.GetCollection<BsonDocument>("eventflow-messagereadmodel").InsertOneAsync(
@@ -356,17 +358,20 @@ public sealed class AntiSpamCompletionServiceTests
             services.AddLogging();
             services.AddSingleton<IMongoDbContext>(new TestMongoDbContext(mongo.Database));
             services.AddReadModelMongoDbContext<TestMongoDbContext>();
-            services.AddSingleton<PtsReadModelLocator>();
+            services.AddSingleton<AntiSpamCompletionUpdatesReadModelLocator>();
             services.AddEventFlow(options =>
             {
                 options.ConfigureMongoDb(mongo.Client, mongo.Database.DatabaseNamespace.DatabaseName);
                 options.UseMongoDbEventStore();
                 options.AddEvents(typeof(AntiSpamCompletionAggregate).Assembly);
-                options.AddCommandHandlers(typeof(CreateAntiSpamCompletionCommandHandler), typeof(PublishAntiSpamCompletionCommandHandler));
+                options.AddCommandHandlers(typeof(CreateAntiSpamCompletionCommandHandler), typeof(PublishAntiSpamCompletionCommandHandler),
+                    typeof(MyTelegram.Domain.Aggregates.Pts.UpdatePtsCommandHandler));
                 if (project)
                 {
-                    options.UseMongoDbReadModel<AntiSpamCompletionAggregate, AntiSpamCompletionId, UpdatesReadModel>();
-                    MyTelegram.EventFlow.MongoDB.Extensions.MyMongoDbOptionsExtensions.UseMongoDbReadModel<PtsReadModel, PtsReadModelLocator>(options);
+                    // The same registrations as the command server, which commits these events.
+                    MyTelegram.EventFlow.MongoDB.Extensions.MyMongoDbOptionsExtensions
+                        .UseMongoDbReadModel<UpdatesReadModel, AntiSpamCompletionUpdatesReadModelLocator>(options);
+                    options.UseMongoDbReadModel<PtsAggregate, PtsId, PtsReadModel>();
                 }
             });
             _services = services.BuildServiceProvider();
@@ -376,6 +381,14 @@ public sealed class AntiSpamCompletionServiceTests
             await Commands.PublishAsync(new CreateAntiSpamCompletionCommand(new AntiSpamCompletionId(operation),
                 operation, Channel, Message, assignment["pts"].AsInt32, assignment["global_seq"].ToInt64(),
                 assignment["date"].AsInt32, assignment["new_top"].AsInt32), default);
+
+        /// <summary>The publication step of AntiSpamCompletionService: the completion, then the channel Pts.</summary>
+        public async Task PublishAsync(string operation, BsonDocument assignment)
+        {
+            await Commands.PublishAsync(new PublishAntiSpamCompletionCommand(new AntiSpamCompletionId(operation)), default);
+            await Commands.PublishAsync(new UpdatePtsCommand(PtsId.Create(Channel), Channel, 0, assignment["pts"].AsInt32,
+                assignment["global_seq"].ToInt64(), 0, Message), default);
+        }
 
         public async Task<IReadOnlyCollection<IDomainEvent<AntiSpamCompletionAggregate, AntiSpamCompletionId>>> EventsAsync(string operation) =>
             await _services.GetRequiredService<IEventStore>().LoadEventsAsync<AntiSpamCompletionAggregate, AntiSpamCompletionId>(

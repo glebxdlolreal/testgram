@@ -41,6 +41,11 @@ public static class MyTelegramMessengerCommandServerExtensions
             options.UseMongoDbSnapshotStore();
 
             options.AddMyTelegramMongoDbReadModel();
+            // Antispam completions are committed here; without this projection their updates row never
+            // appears and the channel stays blocked behind the pending publication reservation.
+            MyTelegram.EventFlow.MongoDB.Extensions.MyMongoDbOptionsExtensions.UseMongoDbReadModel<
+                MyTelegram.ReadModel.MongoDB.UpdatesReadModel,
+                MyTelegram.ReadModel.ReadModelLocators.IAntiSpamCompletionUpdatesReadModelLocator>(options);
             options.AddMongoDbQueryHandlers();
 
             options.AddSystemTextJson(jsonSerializerOptions =>
