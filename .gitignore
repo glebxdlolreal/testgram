@@ -425,3 +425,6 @@ emoji_alts_manifest.json
 default_emoji_lists/
 default_emoji_lists_manifest.json
 emoji_sounds/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
