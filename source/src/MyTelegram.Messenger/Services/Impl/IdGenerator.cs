@@ -7,7 +7,8 @@ public class IdGenerator(
     IHiLoValueGeneratorFactory factory,
     IQueryProcessor queryProcessor,
     IHiLoStateBlockSizeHelper stateBlockSizeHelper,
-    ILogger<IdGenerator> logger)
+    ILogger<IdGenerator> logger,
+    MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator? channelPtsAllocator = null)
     : IIdGenerator, ITransientDependency
 {
     public async Task<int> NextIdAsync(IdType idType,
@@ -23,6 +24,13 @@ public class IdGenerator(
         int step = 1,
         CancellationToken cancellationToken = default)
     {
+        if (idType == IdType.Pts && id >= MyTelegramConsts.ChannelInitId)
+        {
+            if (channelPtsAllocator == null)
+                throw new InvalidOperationException("The durable channel Pts authority is not registered.");
+            return await channelPtsAllocator.ReserveAsync(id, Guid.NewGuid().ToString("N"), step, cancellationToken);
+        }
+
         var sw = Stopwatch.StartNew();
 
         HiLoValueGeneratorState? state = null;

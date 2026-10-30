@@ -24,7 +24,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Updates;
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
 internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppService, IQueryProcessor queryProcessor, IAckCacheService ackCacheService, //ILayeredService<IDifferenceConverter> layeredService,
- IDifferenceConverterService differenceConverterService, ILogger<GetChannelDifferenceHandler> logger, IChannelAppService channelAppService) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetChannelDifference, MyTelegram.Schema.Updates.IChannelDifference>
+ IDifferenceConverterService differenceConverterService, ILogger<GetChannelDifferenceHandler> logger, IChannelAppService channelAppService,
+ MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator channelPtsAllocator) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetChannelDifference, MyTelegram.Schema.Updates.IChannelDifference>
 {
     //private readonly IRpcResultProcessor _rpcResultProcessor;
     private readonly ILogger<GetChannelDifferenceHandler> _logger = logger;
@@ -78,6 +79,16 @@ internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppS
                 RpcErrors.RpcErrors400.ChannelPrivate.ThrowRpcError();
             }
 
+            // An unpublished native reservation must not be acknowledged as a readable cursor.
+            // Keep the caller's cursor unchanged (including callers already beyond the ceiling).
+            if (await channelPtsAllocator.GetReadablePtsCeilingAsync(channelId) != null)
+            {
+                return new MyTelegram.Schema.Updates.TChannelDifferenceEmpty
+                {
+                    Pts = obj.Pts, Final = false, Timeout = 1
+                };
+            }
+
             var limit = obj.Limit == 0 ? MyTelegramConsts.DefaultPtsTotalLimit : obj.Limit;
             limit = Math.Min(limit, MyTelegramConsts.DefaultPtsTotalLimit);
             var pts = obj.Pts;
@@ -99,12 +110,33 @@ internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppS
             if (updatesReadModels.Count > 0)
             {
                 maxPts = updatesReadModels.Max(p => p.Pts);
-                var channelMaxGlobalSeqNo = updatesReadModels.Max(p => p.GlobalSeqNo);
-                await ackCacheService.AddRpcPtsToCacheAsync(input.ReqMsgId, 0, channelMaxGlobalSeqNo, new Peer(PeerType.Channel, channelId), true);
             }
 
             var allUpdateList = StoredUpdateNormalizer.Normalize(updatesReadModels.Where(p => p.UpdatesType == UpdatesType.Updates).SelectMany(p => p.Updates ?? [])).ToList();
+            // Recheck after materializing the response: a reservation may have begun during reads.
+            // If it cleared again, its update is already durable before the ceiling can advance.
+            if (await channelPtsAllocator.GetReadablePtsCeilingAsync(channelId) != null)
+            {
+                return new MyTelegram.Schema.Updates.TChannelDifferenceEmpty
+                {
+                    Pts = obj.Pts, Final = false, Timeout = 1
+                };
+            }
+            if (dto.MessageList.Count == 0 && allUpdateList.Count == 0)
+            {
+                // A Pts projection can be newer than the updates snapshot read above. Without
+                // an actual delivered update, advancing to it would hide a concurrently saved delete.
+                return new MyTelegram.Schema.Updates.TChannelDifferenceEmpty
+                {
+                    Pts = obj.Pts, Final = true, Timeout = 30
+                };
+            }
             var r = differenceConverterService.ToChannelDifference(input, dto, isChannelMember, allUpdateList, maxPts, layer: input.Layer);
+            if (updatesReadModels.Count > 0)
+            {
+                var channelMaxGlobalSeqNo = updatesReadModels.Max(p => p.GlobalSeqNo);
+                await ackCacheService.AddRpcPtsToCacheAsync(input.ReqMsgId, 0, channelMaxGlobalSeqNo, new Peer(PeerType.Channel, channelId), true);
+            }
             return r;
         }
 

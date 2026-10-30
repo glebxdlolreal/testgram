@@ -152,7 +152,19 @@ builder.ConfigureServices((ctx,
 
 var app = builder.Build();
 
+var channelPtsMigration = app.Services.GetRequiredService<IConfiguration>()
+    .GetSection(MyTelegram.Messenger.CommandServer.Maintenance.ChannelPtsMigrationCommand.SectionName);
+if (channelPtsMigration.Exists())
+{
+    // An offline maintenance run must never also start serving traffic.
+    var exitCode = await MyTelegram.Messenger.CommandServer.Maintenance.ChannelPtsMigrationCommand.RunAsync(app.Services,
+        channelPtsMigration);
+    await Log.CloseAndFlushAsync();
+    return exitCode;
+}
+
 Log.Information("Messenger command server starting RunAsync...");
 _ = app.RunAsync();
 Log.Information("Messenger command server running, waiting...");
 Thread.Sleep(Timeout.Infinite);
+return 0;

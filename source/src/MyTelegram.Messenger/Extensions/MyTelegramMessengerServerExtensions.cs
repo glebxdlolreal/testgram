@@ -25,6 +25,8 @@ public static class MyTelegramMessengerServerExtensions
         services.AddMyTelegramHandlerServices();
         services.AddMyEventFlow();
         services.AddMyTelegramConverters();
+        services.AddSingleton<MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator,
+            MyTelegram.Messenger.Services.Pts.DurableChannelPtsAllocator>();
 
         services.AddTransient<IChatInviteLinkHelper, ChatInviteLinkHelper>();
         services.AddSingleton(typeof(IDomainEventCacheHelper<>), typeof(DomainEventCacheHelper<>));
