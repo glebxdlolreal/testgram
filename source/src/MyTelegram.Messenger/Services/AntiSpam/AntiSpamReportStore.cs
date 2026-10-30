@@ -6,7 +6,8 @@ namespace MyTelegram.Messenger.Services.AntiSpam;
 public interface IAntiSpamReportStore
 {
     Task<bool> HasAntiSpamDeletionAsync(long channelId, int messageId, CancellationToken cancellationToken = default);
-    Task SaveAsync(long reporterUserId, long channelId, int messageId, bool falsePositive, long? participantPeerId = null, CancellationToken cancellationToken = default);
+    /// <summary>True when this report is new (repeated identical reports are idempotent).</summary>
+    Task<bool> SaveAsync(long reporterUserId, long channelId, int messageId, bool falsePositive, long? participantPeerId = null, CancellationToken cancellationToken = default);
 }
 
 /// <summary>Stores moderation feedback only. Reports never enqueue a deletion or restore a message.</summary>
@@ -54,7 +55,7 @@ public sealed class AntiSpamReportStore(IMongoDatabase database) : IAntiSpamRepo
     private static bool NumberEquals(BsonDocument doc, string key, long expected) =>
         doc.TryGetValue(key, out var value) && value.IsNumeric && value.ToDecimal() == expected;
 
-    public async Task SaveAsync(long reporterUserId, long channelId, int messageId, bool falsePositive,
+    public async Task<bool> SaveAsync(long reporterUserId, long channelId, int messageId, bool falsePositive,
         long? participantPeerId = null, CancellationToken cancellationToken = default)
     {
         if (messageId <= 0) RpcErrors.RpcErrors400.MsgIdInvalid.ThrowRpcError();
@@ -68,12 +69,14 @@ public sealed class AntiSpamReportStore(IMongoDatabase database) : IAntiSpamRepo
             .SetOnInsert("date", DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         try
         {
-            await database.GetCollection<BsonDocument>(CollectionName).UpdateOneAsync(
+            var result = await database.GetCollection<BsonDocument>(CollectionName).UpdateOneAsync(
                 Builders<BsonDocument>.Filter.Eq("_id", id), update, new UpdateOptions { IsUpsert = true }, cancellationToken);
+            return result.UpsertedId != null;
         }
         catch (MongoWriteException e) when (e.WriteError.Category == ServerErrorCategory.DuplicateKey)
         {
             // Concurrent identical upserts have the same immutable report identity.
+            return false;
         }
     }
 }

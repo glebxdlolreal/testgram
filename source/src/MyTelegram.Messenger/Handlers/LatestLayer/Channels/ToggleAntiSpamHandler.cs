@@ -16,7 +16,7 @@ internal sealed class ToggleAntiSpamHandler(
         var channel = await accessService.RequireAdminAsync(input, obj.Channel);
         if (obj.Enabled)
         {
-            if ((channel.ParticipantsCount ?? 0) < appConfig.GetInt32Value("telegram_antispam_group_size_min", 200))
+            if ((channel.ParticipantsCount ?? 0) < appConfig.GetInt32Value("telegram_antispam_group_size_min", AntiSpamClassifier.DefaultGroupSizeMin))
                 RpcErrors.RpcErrors400.ParticipantsTooFew.ThrowRpcError();
             await actorService.EnsureAvailableAsync();
         }

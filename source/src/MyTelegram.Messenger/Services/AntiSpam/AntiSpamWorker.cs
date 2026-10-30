@@ -58,33 +58,41 @@ public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier cl
             if (aggregate.ChannelDeletionRequestId == requestId)
                 await store.ConfirmAsync(channelId, messageId, requestId, ct);
             else
-                await AbortAsync(job, ct);
+                await AbortAsync(job, ct, "already_deleted");
             return;
         }
         if (job["state"] == "aborting" || job["state"] == "recovery" ||
             job["attempts"].AsInt32 >= store.MaxAttempts || aggregate.AntiSpamDeletionCancelledRequestId.HasValue)
         {
-            await AbortAsync(job, ct);
+            await AbortAsync(job, ct, "exhausted");
             return;
         }
         // Legacy in-flight jobs have no reservation provenance. Definitively cancel before
         // permitting a scalar recount; if deletion already won, normal confirmation wins instead.
         if (job.GetValue("dispatched", false).ToBoolean() && !job.Contains("admission_protocol"))
         {
-            await AbortAsync(job, ct);
+            await AbortAsync(job, ct, "legacy");
             return;
         }
         var expectedVersion = job.GetValue("aggregate_version", BsonNull.Value);
         if (expectedVersion.IsBsonNull || aggregate.Version != expectedVersion.AsInt32)
         {
-            await AbortAsync(job, ct);
+            await AbortAsync(job, ct, "message_changed");
             return;
         }
+        // Recheck right before deletion: the feature is still on, the sender is still an ordinary participant,
+        // and the current text still yields the key the burst was detected with.
         var channel = await queries.ProcessAsync(new GetChannelByIdQuery(channelId), ct);
         var sender = job["sender"].ToInt64();
-        if (!options.Value.Enabled || !AntiSpamSubscriber.EligibleChannel(channel, sender))
+        if (!options.Value.Enabled || channel is not { AntiSpam: true })
         {
-            await AbortAsync(job, ct);
+            await AbortAsync(job, ct, "disabled");
+            return;
+        }
+        if (!AntiSpamSubscriber.EligibleChannel(channel, sender, classifier.MinimumParticipants) ||
+            (await queries.ProcessAsync(new GetUserByIdQuery(sender), ct))?.Bot != false)
+        {
+            await AbortAsync(job, ct, "ineligible");
             return;
         }
         ReadOnlyMemory<byte> originalBytes = job["original_message"].AsBsonBinaryData.Bytes;
@@ -93,12 +101,13 @@ public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier cl
         var text = message?.EncryptedData is { } encrypted
             ? converter.DecryptMessage(channelId, messageId, encrypted)
             : message?.Message;
-        if (original == null || message == null || text != original.Message || message.SenderUserId != sender || message.SenderPeerId != sender ||
-            message.Post || message.EditDate != null || message.SendAs != null || message.FwdHeader != null || message.MessageAction != null ||
-            message.SendMessageType != SendMessageType.Text ||
-            classifier.Fingerprint(text) != job["fingerprint"].AsString)
+        var mode = job.GetValue("mode", AntiSpamClassifier.StrictMode).AsString;
+        if (original == null || message == null || text != original.Message || message.SenderUserId != sender ||
+            message.SenderPeerId != sender || message.Post || message.SendAs?.PeerId == channelId ||
+            message.MessageAction != null || message.SendMessageType != SendMessageType.Text ||
+            classifier.Analyze(text, message.Entities2)?.Hex(mode) != job["fingerprint"].AsString)
         {
-            await AbortAsync(job, ct);
+            await AbortAsync(job, ct, "text_changed");
             return;
         }
         if (!job.Contains("effects") && !await store.SaveEffectsAsync(job, await effects.CaptureAsync(message, ct), ct))
@@ -107,7 +116,7 @@ public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier cl
         {
             // Abort (including partial acquisition) is fenced before closing reservations.
             // A lost lease cannot authorize abort; the new owner will recover the same job.
-            await AbortAsync(job, ct);
+            await AbortAsync(job, ct, "admission");
             return;
         }
         await actor.EnsureAvailableAsync(ct);
@@ -122,9 +131,17 @@ public sealed class AntiSpamWorker(AntiSpamJobStore store, AntiSpamClassifier cl
         await store.FinishAsync(job, "leased", ct);
     }
 
-    private async Task AbortAsync(BsonDocument job, CancellationToken ct)
+    private async Task AbortAsync(BsonDocument job, CancellationToken ct, string reason)
     {
+        // Count a cancellation once, when an undispatched job first leaves the deletion path.
+        var counted = job["state"] != "aborting" && job["state"] != "recovery" && !job.GetValue("dispatched", false).ToBoolean();
         if (!await store.BeginAbortAsync(job, ct)) return;
+        if (counted)
+        {
+            AntiSpamMetrics.RecheckCancelled(reason);
+            logger.LogInformation("Anti-spam deletion of {ChannelId}/{MessageId} cancelled on recheck: {Reason}",
+                job["channel"].ToInt64(), job["message"].AsInt32, reason);
+        }
         var id = MessageId.Create(job["channel"].ToInt64(), job["message"].AsInt32);
         var requestId = Guid.Parse(job["request"].AsString);
         await commands.PublishAsync(new CancelAntiSpamDeletionCommand(id, requestId), ct);

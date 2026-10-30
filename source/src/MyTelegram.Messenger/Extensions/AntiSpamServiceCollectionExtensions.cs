@@ -23,6 +23,14 @@ public static class AntiSpamServiceCollectionExtensions
         services.AddOptions<AntiSpamOptions>().Bind(configuration.GetSection("App:AntiSpam"));
         services.AddSingleton<AntiSpamJobStore>();
         services.AddSingleton<AntiSpamClassifier>();
+        // One process-wide window per (chat, sender); it must be a singleton to see consecutive messages.
+        services.AddSingleton(sp =>
+        {
+            var tracker = new AntiSpamBurstTracker(sp.GetRequiredService<AntiSpamClassifier>(),
+                sp.GetRequiredService<IOptions<AntiSpamOptions>>());
+            AntiSpamMetrics.Track(tracker);
+            return tracker;
+        });
         services.AddSingleton<AntiSpamCompletionService>();
         services.AddSingleton<AntiSpamDeletionEffectsService>();
         services.AddSingleton<AntiSpamLinkedPostPairValidator>();

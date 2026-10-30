@@ -89,6 +89,7 @@ public sealed class AntiSpamCompletionService(AntiSpamJobStore jobs, IChannelPts
         await sender.PushMessageToPeerAsync(channel.ToChannelPeer(), updates, pts: pts, globalSeqNo: globalSeq);
         await jobs.MarkTransportAcceptedAsync(job, ct);
         await jobs.WriteConfirmedLogAsync(job, ct);
+        AntiSpamMetrics.DeletionConfirmed();
         return true;
     }
 }

@@ -18,7 +18,9 @@ internal sealed class ReportAntiSpamFalsePositiveHandler(
         await actorService.EnsureAvailableAsync();
         if (!await reportStore.HasAntiSpamDeletionAsync(channel.ChannelId, obj.MsgId))
             RpcErrors.RpcErrors400.MsgIdInvalid.ThrowRpcError();
-        await reportStore.SaveAsync(input.UserId, channel.ChannelId, obj.MsgId, true);
+        // Distinct "not spam" reports are the false-positive signal for calibrating App:AntiSpam thresholds.
+        if (await reportStore.SaveAsync(input.UserId, channel.ChannelId, obj.MsgId, true))
+            AntiSpamMetrics.FalsePositiveReported();
         return new TBoolTrue();
     }
 }

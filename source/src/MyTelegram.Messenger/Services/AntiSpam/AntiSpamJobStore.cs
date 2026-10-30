@@ -4,46 +4,67 @@ using Microsoft.Extensions.Options;
 
 namespace MyTelegram.Messenger.Services.AntiSpam;
 
-/// <summary>Durable observations, CAS-leased jobs, and confirmed-only idempotent admin logs.</summary>
+/// <summary>CAS-leased deletion jobs and confirmed-only idempotent admin logs.</summary>
 public sealed class AntiSpamJobStore(IMongoDatabase database, IOptions<AntiSpamOptions> options)
 {
     private IMongoCollection<BsonDocument> Jobs => database.GetCollection<BsonDocument>("antispam_jobs")
         .WithWriteConcern(WriteConcern.WMajority);
-    private IMongoCollection<BsonDocument> Observations => database.GetCollection<BsonDocument>("antispam_observations");
     public static string JobId(long channelId, int messageId) => $"antispam-{channelId}-{messageId}";
     public int MaxAttempts => Math.Clamp(options.Value.MaxAttempts, 1, 20);
 
     public async Task InitializeAsync(CancellationToken ct)
     {
-        await Observations.Indexes.CreateManyAsync([
-            new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("expires"), new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }),
-            new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("channel").Ascending("sender").Descending("date"))], ct);
         await Jobs.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("expires"),
             new CreateIndexOptions { ExpireAfter = TimeSpan.Zero }), cancellationToken: ct);
         await Jobs.Indexes.CreateOneAsync(new CreateIndexModel<BsonDocument>(Builders<BsonDocument>.IndexKeys.Ascending("state").Ascending("due")), cancellationToken: ct);
     }
 
-    public async Task<List<(int MessageId, long Date, string Fingerprint)>> ObserveAsync(long channel, long sender,
-        int message, long date, string fingerprint, CancellationToken ct)
+    public Task EnqueueAsync(long channel, long sender, int message, string fingerprint, byte[] originalMessage,
+        byte[] action, CancellationToken ct, int? expectedAggregateVersion = null, string? mode = null, string? burst = null) =>
+        InsertOnceAsync(Jobs, NewJob(channel, sender, message, fingerprint, originalMessage, action, expectedAggregateVersion, mode, burst), ct);
+
+    /// <summary>
+    /// Queues a deletion, or re-fences a queued one at a new aggregate version after an edit that still
+    /// matches. Only untouched work is re-fenced: once effects were captured or dispatch began, the old
+    /// fence stays and the worker cancels on the version mismatch. Rotating the lease makes any worker that
+    /// is mid-way through the old version lose its CAS steps. False when an existing job was left as is.
+    /// </summary>
+    public async Task<bool> EnqueueOrRefenceAsync(long channel, long sender, int message, string fingerprint,
+        byte[] originalMessage, byte[] action, int aggregateVersion, string mode, string burst, CancellationToken ct)
     {
-        var doc = new BsonDocument { ["_id"] = JobId(channel, message), ["channel"] = channel, ["sender"] = sender,
-            ["message"] = message, ["date"] = date, ["fingerprint"] = fingerprint, ["expires"] = DateTime.UtcNow.AddMinutes(10) };
-        await InsertOnceAsync(Observations, doc, ct);
-        var recent = await Observations.Find(new BsonDocument { ["channel"] = channel, ["sender"] = sender,
-            ["date"] = new BsonDocument { ["$gte"] = date - Math.Clamp(options.Value.WindowSeconds, 10, 300), ["$lte"] = date } })
-            .Sort(new BsonDocument("date", -1)).Limit(Math.Clamp(options.Value.MaxRecentMessages, 32, 256)).ToListAsync(ct);
-        return recent.Select(x => (x["message"].AsInt32, x["date"].ToInt64(), x["fingerprint"].AsString)).ToList();
+        try
+        {
+            await Jobs.InsertOneAsync(NewJob(channel, sender, message, fingerprint, originalMessage, action,
+                aggregateVersion, mode, burst), cancellationToken: ct);
+            return true;
+        }
+        catch (MongoWriteException e) when (e.WriteError.Category == ServerErrorCategory.DuplicateKey) { }
+        var result = await Jobs.UpdateOneAsync(new BsonDocument { ["_id"] = JobId(channel, message), ["sender"] = sender,
+                ["state"] = "pending", ["aggregate_version"] = new BsonDocument("$lt", aggregateVersion),
+                ["effects"] = new BsonDocument("$exists", false), ["dispatched"] = new BsonDocument("$ne", true),
+                ["admission_protocol"] = new BsonDocument("$exists", false) },
+            new BsonDocument("$set", new BsonDocument { ["aggregate_version"] = aggregateVersion,
+                ["fingerprint"] = fingerprint, ["mode"] = mode, ["original_message"] = originalMessage, ["action"] = action,
+                ["lease"] = Guid.NewGuid().ToString(), ["due"] = DateTime.UtcNow.AddSeconds(Math.Clamp(options.Value.DelaySeconds, 2, 60)) }),
+            cancellationToken: ct);
+        return result.ModifiedCount == 1;
     }
 
-    public Task EnqueueAsync(long channel, long sender, int message, string fingerprint, byte[] originalMessage,
-        byte[] action, CancellationToken ct, int? expectedAggregateVersion = null) => InsertOnceAsync(Jobs, new BsonDocument
+    private BsonDocument NewJob(long channel, long sender, int message, string fingerprint, byte[] originalMessage,
+        byte[] action, int? expectedAggregateVersion, string? mode, string? burst)
+    {
+        var job = new BsonDocument
         {
             ["_id"] = JobId(channel, message), ["channel"] = channel, ["sender"] = sender, ["message"] = message,
             ["fingerprint"] = fingerprint, ["original_message"] = originalMessage, ["action"] = action,
             ["aggregate_version"] = expectedAggregateVersion.HasValue ? new BsonInt32(expectedAggregateVersion.Value) : BsonNull.Value,
             ["request"] = Guid.NewGuid().ToString(), ["state"] = "pending", ["attempts"] = 0,
             ["due"] = DateTime.UtcNow.AddSeconds(Math.Clamp(options.Value.DelaySeconds, 2, 60))
-        }, ct);
+        };
+        if (mode != null) job["mode"] = mode;
+        if (burst != null) job["burst"] = burst;
+        return job;
+    }
 
     private static async Task InsertOnceAsync(IMongoCollection<BsonDocument> collection, BsonDocument doc, CancellationToken ct)
     {
@@ -156,6 +177,8 @@ public sealed class AntiSpamJobStore(IMongoDatabase database, IOptions<AntiSpamO
         var channel = job["channel"].ToInt64();
         ReadOnlyMemory<byte> bytes = job["action"].AsBsonBinaryData.Bytes;
         var action = bytes.Read<IChannelAdminLogEventAction>();
+        // Like Telegram, every antispam deletion is its own channelAdminLogEventActionDeleteMessage, so each
+        // deleted message of a burst can be reviewed and reported with reportAntiSpamFalsePositive.
         var counter = await database.GetCollection<BsonDocument>("counters").FindOneAndUpdateAsync(
             new BsonDocument("_id", $"adminlog_event_id_{channel}"), new BsonDocument("$inc", new BsonDocument("seq", 1L)),
             new FindOneAndUpdateOptions<BsonDocument> { IsUpsert = true, ReturnDocument = ReturnDocument.After }, ct);
