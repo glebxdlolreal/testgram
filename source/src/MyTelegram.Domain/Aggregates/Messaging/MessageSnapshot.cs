@@ -7,7 +7,11 @@ public class MessageSnapshot(MessageItem messageItem,
         int editDate,
         bool edited,
         int pts,
-        bool isDeleted)
+        bool isDeleted,
+        bool isChannelDeleted = false,
+        Guid? channelDeletionRequestId = null,
+        int channelDeletionProofVersion = 0,
+        Guid? antiSpamDeletionCancelledRequestId = null)
     : ISnapshot
 {
     //bool editHide,
@@ -23,5 +27,9 @@ public class MessageSnapshot(MessageItem messageItem,
     public bool Pinned { get; } = pinned;
     public int Pts { get; } = pts;
     public bool IsDeleted { get; } = isDeleted;
+    public bool IsChannelDeleted { get; } = isChannelDeleted;
+    public Guid? ChannelDeletionRequestId { get; } = channelDeletionRequestId;
+    public Guid? AntiSpamDeletionCancelledRequestId { get; } = antiSpamDeletionCancelledRequestId;
+    public int ChannelDeletionProofVersion { get; } = channelDeletionProofVersion;
     public int SenderMessageId { get; } = senderMessageId;
 }

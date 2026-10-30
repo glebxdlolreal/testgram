@@ -1,5 +1,3 @@
-using EventFlow.Exceptions;
-
 namespace MyTelegram.Messenger.Services.Mentions;
 
 /// <summary>
@@ -13,9 +11,8 @@ public interface IMentionCleanupService
 }
 
 public class MentionCleanupService(
-    ICommandBus commandBus,
-    IMentionReadStateService mentionReadStateService,
-    ILogger<MentionCleanupService> logger) : IMentionCleanupService, ITransientDependency
+    IMentionReadIntentService mentionReadIntentService,
+    IMentionReadStateService mentionReadStateService) : IMentionCleanupService, ITransientDependency
 {
     public async Task OnMessagesDeletedAsync(IReadOnlyCollection<IMessageReadModel> messages)
     {
@@ -60,21 +57,8 @@ public class MentionCleanupService(
                 continue;
             }
 
-            // Marking them read as well keeps the state consistent if the same id is ever reused.
-            await mentionReadStateService.MarkReadAsync(userId, peer, unread);
-
-            foreach (var messageId in unread)
-            {
-                try
-                {
-                    await commandBus.PublishAsync(new ReadMentionCommand(DialogId.Create(userId, peer), messageId));
-                }
-                catch (DomainError)
-                {
-                    logger.LogDebug("No dialog aggregate for user {UserId} and peer {Peer}, mention counter left alone",
-                        userId, peer);
-                }
-            }
+            // The durable intent completes the counter and read marker together before returning.
+            await mentionReadIntentService.ReadAsync(userId, peer, unread);
         }
     }
 }

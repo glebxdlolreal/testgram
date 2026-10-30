@@ -1,18 +1,24 @@
+using MyTelegram.Messenger.Services.AntiSpam;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
+
 /// <summary>
-/// Report a <a href="https://corefork.telegram.org/api/antispam">native antispam</a> false positive
-/// Possible errors
-/// Code Type Description
-/// 400 CHANNEL_INVALID The provided channel is invalid.
-/// <para><c>See <a href="https://corefork.telegram.org/method/channels.reportAntiSpamFalsePositive"/> </c></para>
+/// Report a native antispam false positive without restoring the message.
+/// See https://core.telegram.org/method/channels.reportAntiSpamFalsePositive
 /// </summary>
-/// <remarks>
-/// Access: [User ✔] [Bot ✖] [Anonymous ✖]
-/// </remarks>
-internal sealed class ReportAntiSpamFalsePositiveHandler : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestReportAntiSpamFalsePositive, IBool>
+internal sealed class ReportAntiSpamFalsePositiveHandler(
+    IAntiSpamAccessService accessService,
+    IAntiSpamActorService actorService,
+    IAntiSpamReportStore reportStore) : RpcResultObjectHandler<RequestReportAntiSpamFalsePositive, IBool>
 {
-    protected override Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Channels.RequestReportAntiSpamFalsePositive obj)
+    protected override async Task<IBool> HandleCoreAsync(IRequestInput input, RequestReportAntiSpamFalsePositive obj)
     {
-        return Task.FromResult<IBool>(new TBoolTrue());
+        var channel = await accessService.RequireAdminAsync(input, obj.Channel);
+        if (obj.MsgId <= 0) RpcErrors.RpcErrors400.MsgIdInvalid.ThrowRpcError();
+        await actorService.EnsureAvailableAsync();
+        if (!await reportStore.HasAntiSpamDeletionAsync(channel.ChannelId, obj.MsgId))
+            RpcErrors.RpcErrors400.MsgIdInvalid.ThrowRpcError();
+        await reportStore.SaveAsync(input.UserId, channel.ChannelId, obj.MsgId, true);
+        return new TBoolTrue();
     }
 }

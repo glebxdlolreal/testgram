@@ -1,4 +1,3 @@
-using EventFlow.Exceptions;
 using MyTelegram.Messenger.Services.Mentions;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
@@ -20,9 +19,9 @@ internal sealed class ReadMentionsHandler(
     IQueryProcessor queryProcessor,
     IPtsHelper ptsHelper,
     IPeerHelper peerHelper,
-    ICommandBus commandBus,
     IChannelAppService channelAppService,
-    IMentionReadStateService mentionReadStateService)
+    IMentionReadStateService mentionReadStateService,
+    MentionReadIntentService mentionReadIntentService)
     : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestReadMentions, MyTelegram.Schema.Messages.IAffectedHistory>
 {
     /// <summary>
@@ -68,12 +67,7 @@ internal sealed class ReadMentionsHandler(
                     readState?.ReadIds ?? [],
                     MaxTopicMentions));
 
-            await mentionReadStateService.MarkReadAsync(input.UserId, peer, messageIds.ToList());
-
-            foreach (var messageId in messageIds)
-            {
-                await PublishReadMentionAsync(input.UserId, peer, messageId);
-            }
+            await mentionReadIntentService.ReadAsync(input.UserId, peer, messageIds.ToList());
         }
         else
         {
@@ -89,19 +83,8 @@ internal sealed class ReadMentionsHandler(
                     readState?.ReadIds ?? [],
                     1));
 
-            if (newest.Count > 0)
-            {
-                await mentionReadStateService.MarkAllReadAsync(input.UserId, peer, newest.First());
-            }
-
-            try
-            {
-                await commandBus.PublishAsync(new ReadUnreadMentionsCommand(DialogId.Create(input.UserId, peer)));
-            }
-            catch (DomainError)
-            {
-                // No dialog aggregate (for example a legacy chat): nothing to clear.
-            }
+            await mentionReadIntentService.ReadAllAsync(
+                input.UserId, peer, newest.Count > 0 ? newest.First() : readState?.ReadMaxId ?? 0);
         }
 
         // Advance pts so the client's difference loop notices the read state on other sessions.
@@ -114,17 +97,5 @@ internal sealed class ReadMentionsHandler(
             PtsCount = 1,
             Offset = 0
         };
-    }
-
-    private async Task PublishReadMentionAsync(long userId, Peer peer, int messageId)
-    {
-        try
-        {
-            await commandBus.PublishAsync(new ReadMentionCommand(DialogId.Create(userId, peer), messageId));
-        }
-        catch (DomainError)
-        {
-            // No dialog aggregate: the badge is best-effort.
-        }
     }
 }

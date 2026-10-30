@@ -26,7 +26,14 @@ public class MessageIdLocator : IMessageIdLocator, ITransientDependency
                     messageReplyCountDecrementedEvent.PostMessageId.Value).Value;
             }
 
+            if (aggregateEvent is AntiSpamReplyDeletionAppliedEvent { PostChannelId: not null, PostMessageId: not null } effect)
+                yield return MessageId.Create(effect.PostChannelId.Value, effect.PostMessageId.Value).Value;
+
             yield return domainEvent.GetIdentity().Value;
+        }
+        else if (aggregateEvent is MyTelegram.Domain.Aggregates.AntiSpamCompletion.AntiSpamCompletionCreatedEvent completion)
+        {
+            yield return MessageId.Create(completion.ChannelId, completion.MessageId).Value;
         }
         else if (domainEvent.AggregateType == typeof(SendMessageSaga))
         {

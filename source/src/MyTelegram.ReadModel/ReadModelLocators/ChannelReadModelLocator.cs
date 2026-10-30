@@ -13,6 +13,12 @@ public class ChannelReadModelLocator : IChannelReadModelLocator, ITransientDepen
         {
             switch (aggregateEvent)
             {
+                case MyTelegram.Domain.Aggregates.AntiSpamCompletion.AntiSpamCompletionTopRepairedEvent repair:
+                    yield return ChannelId.Create(repair.ChannelId).Value;
+                    break;
+                case MyTelegram.Domain.Aggregates.AntiSpamCompletion.AntiSpamCompletionCreatedEvent completion:
+                    yield return ChannelId.Create(completion.ChannelId).Value;
+                    break;
                 case DeleteChannelMessagesCompletedSagaEvent deleteChannelMessagesCompletedEvent:
                     yield return ChannelId.Create(deleteChannelMessagesCompletedEvent.ChannelId).Value;
                     break;

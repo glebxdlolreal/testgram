@@ -1,5 +1,3 @@
-using EventFlow;
-using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using MyTelegram.Domain.Aggregates.Dialog;
 using MyTelegram.Messenger.Services.Mentions;
@@ -25,14 +23,13 @@ public class MentionCleanupServiceTests
     [Fact]
     public async Task A_deleted_channel_mention_is_given_back()
     {
-        var (service, commandBus, readState) = CreateService();
+        var (service, intents, _) = CreateService();
 
         await service.OnMessagesDeletedAsync([ChannelMessage(10)]);
 
-        readState.Verify(p => p.MarkReadAsync(MentionedUserId,
+        intents.Verify(p => p.ReadAsync(MentionedUserId,
             new Peer(PeerType.Channel, ChannelId),
-            It.Is<IReadOnlyCollection<int>>(ids => ids.Single() == 10)), Times.Once);
-        commandBus.Verify(p => p.PublishAsync(It.Is<ReadMentionCommand>(c => c.MessageId == 10),
+            It.Is<IReadOnlyCollection<int>>(ids => ids.Single() == 10),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -40,18 +37,18 @@ public class MentionCleanupServiceTests
     public async Task A_mention_that_was_already_read_is_not_given_back_twice()
     {
         var state = new MentionReadStateDocument { ReadMaxId = 10 };
-        var (service, commandBus, _) = CreateService(state);
+        var (service, intents, _) = CreateService(state);
 
         await service.OnMessagesDeletedAsync([ChannelMessage(10)]);
 
-        commandBus.Verify(p => p.PublishAsync(It.IsAny<ReadMentionCommand>(), It.IsAny<CancellationToken>()),
-            Times.Never);
+        intents.Verify(p => p.ReadAsync(It.IsAny<long>(), It.IsAny<Peer>(),
+            It.IsAny<IReadOnlyCollection<int>>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
     public async Task Only_the_mentioned_users_own_copy_of_a_private_message_counts()
     {
-        var (service, commandBus, _) = CreateService();
+        var (service, intents, _) = CreateService();
 
         // The same private message exists twice: the sender's outbox copy and the recipient's inbox
         // copy. Counting both would take the badge down by two.
@@ -60,37 +57,39 @@ public class MentionCleanupServiceTests
             PrivateMessage(ownerPeerId: MentionedUserId, toPeerId: SenderUserId, messageId: 7)
         ]);
 
-        commandBus.Verify(p => p.PublishAsync(It.Is<ReadMentionCommand>(c => c.MessageId == 7),
+        intents.Verify(p => p.ReadAsync(MentionedUserId,
+            new Peer(PeerType.User, SenderUserId),
+            It.Is<IReadOnlyCollection<int>>(ids => ids.Single() == 7),
             It.IsAny<CancellationToken>()), Times.Once);
-        commandBus.Verify(p => p.PublishAsync(It.Is<ReadMentionCommand>(c => c.MessageId == 5),
+        intents.Verify(p => p.ReadAsync(It.IsAny<long>(), It.IsAny<Peer>(),
+            It.Is<IReadOnlyCollection<int>>(ids => ids.Contains(5)),
             It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
     public async Task A_message_without_mentions_is_left_alone()
     {
-        var (service, commandBus, readState) = CreateService();
+        var (service, intents, readState) = CreateService();
         var message = new Mock<IMessageReadModel>();
         message.SetupGet(p => p.MentionedUserIds).Returns((List<long>?)null);
 
         await service.OnMessagesDeletedAsync([message.Object]);
 
         readState.Verify(p => p.GetAsync(It.IsAny<long>(), It.IsAny<Peer>()), Times.Never);
-        commandBus.Verify(p => p.PublishAsync(It.IsAny<ReadMentionCommand>(), It.IsAny<CancellationToken>()),
-            Times.Never);
+        intents.Verify(p => p.ReadAsync(It.IsAny<long>(), It.IsAny<Peer>(),
+            It.IsAny<IReadOnlyCollection<int>>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
-    private static (MentionCleanupService Service, Mock<ICommandBus> CommandBus, Mock<IMentionReadStateService> ReadState)
-        CreateService(MentionReadStateDocument? state = null)
+    private static (MentionCleanupService Service, Mock<IMentionReadIntentService> Intents,
+        Mock<IMentionReadStateService> ReadState) CreateService(MentionReadStateDocument? state = null)
     {
-        var commandBus = new Mock<ICommandBus>();
+        var intents = new Mock<IMentionReadIntentService>();
         var readState = new Mock<IMentionReadStateService>();
         readState.Setup(p => p.GetAsync(It.IsAny<long>(), It.IsAny<Peer>())).ReturnsAsync(state);
 
-        var service = new MentionCleanupService(commandBus.Object, readState.Object,
-            NullLogger<MentionCleanupService>.Instance);
+        var service = new MentionCleanupService(intents.Object, readState.Object);
 
-        return (service, commandBus, readState);
+        return (service, intents, readState);
     }
 
     private static IMessageReadModel ChannelMessage(int messageId)

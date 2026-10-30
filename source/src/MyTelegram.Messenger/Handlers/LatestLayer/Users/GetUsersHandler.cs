@@ -22,7 +22,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Users;
 internal sealed class GetUsersHandler(
     IUserConverterService userConverterService,
     IAccessHashHelper2 accessHashHelper,
-    IFromMessagePeerResolver fromMessagePeerResolver)
+    IFromMessagePeerResolver fromMessagePeerResolver,
+    MyTelegram.Messenger.Services.AntiSpam.IAntiSpamActorService antiSpamActorService)
     : RpcResultObjectHandler<MyTelegram.Schema.Users.RequestGetUsers, TVector<MyTelegram.Schema.IUser>>
 {
     /// <summary>
@@ -56,7 +57,11 @@ internal sealed class GetUsersHandler(
                 {
                     // A zero access hash is only accepted for the built-in service peers; for
                     // anybody else it means the caller never legitimately received the user.
-                    if (!WellKnownUserIds.Contains(tInputUser.UserId))
+                    if (tInputUser.UserId == MyTelegramConsts.AntiSpamBotUserId)
+                    {
+                        await antiSpamActorService.EnsureAvailableAsync();
+                    }
+                    else if (!WellKnownUserIds.Contains(tInputUser.UserId))
                     {
                         await accessHashHelper.CheckAccessHashAsync(input, tInputUser.UserId,
                             tInputUser.AccessHash, AccessHashType.User);

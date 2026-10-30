@@ -19,6 +19,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 internal sealed class GetUnreadMentionsHandler(
     IQueryProcessor queryProcessor,
     ICommandBus commandBus,
+    IAggregateStore aggregateStore,
+    MyTelegram.Messenger.Services.AntiSpam.AntiSpamMentionRecountService recounts,
     IPeerHelper peerHelper,
     IMentionReadStateService mentionReadStateService,
     IChannelAppService channelAppService,
@@ -46,6 +48,10 @@ internal sealed class GetUnreadMentionsHandler(
         }
 
         var ownerPeerId = peer.PeerType == PeerType.Channel ? peer.PeerId : input.UserId;
+        var dialogId = DialogId.Create(input.UserId, peer);
+        var recountVersion = !obj.TopMsgId.HasValue
+            ? (await aggregateStore.LoadAsync<DialogAggregate, DialogId>(dialogId, CancellationToken.None)).Version
+            : 0;
         var readState = await mentionReadStateService.GetAsync(input.UserId, peer);
         var readMaxId = readState?.ReadMaxId ?? 0;
         IReadOnlyList<int> readIds = readState?.ReadIds ?? [];
@@ -77,8 +83,10 @@ internal sealed class GetUnreadMentionsHandler(
         {
             try
             {
+                // Queue first so a process crash or rejected fence cannot lose reconciliation.
+                await recounts.EnqueueAsync(input.UserId, peer, CancellationToken.None);
                 await commandBus.PublishAsync(
-                    new SyncUnreadMentionsCountCommand(DialogId.Create(input.UserId, peer), count));
+                    new SyncUnreadMentionsCountCommand(dialogId, count, recountVersion));
             }
             catch (DomainError)
             {

@@ -1,4 +1,3 @@
-using EventFlow.Exceptions;
 using MyTelegram.Messenger.Services.Mentions;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
@@ -18,9 +17,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 internal sealed class ReadMessageContentsHandler(
     IQueryProcessor queryProcessor,
     IPeerHelper peerHelper,
-    ICommandBus commandBus,
     IChannelAppService channelAppService,
-    IMentionReadStateService mentionReadStateService)
+    MentionReadIntentService mentionReadIntentService)
     : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestReadMessageContents, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Channels.RequestReadMessageContents obj)
@@ -56,19 +54,7 @@ internal sealed class ReadMessageContentsHandler(
             return new TBoolTrue();
         }
 
-        await mentionReadStateService.MarkReadAsync(input.UserId, peer, mentionedIds);
-
-        foreach (var messageId in mentionedIds)
-        {
-            try
-            {
-                await commandBus.PublishAsync(new ReadMentionCommand(DialogId.Create(input.UserId, peer), messageId));
-            }
-            catch (DomainError)
-            {
-                // The user has no dialog with the channel yet: the badge is best-effort.
-            }
-        }
+        await mentionReadIntentService.ReadAsync(input.UserId, peer, mentionedIds);
 
         return new TBoolTrue();
     }

@@ -1,4 +1,3 @@
-using EventFlow.Exceptions;
 using MyTelegram.Messenger.Helpers;
 using MyTelegram.Messenger.Services.Mentions;
 
@@ -14,9 +13,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 internal sealed class ReadMessageContentsHandler(
     IQueryProcessor queryProcessor,
     IPtsHelper ptsHelper,
-    ICommandBus commandBus,
     IObjectMessageSender objectMessageSender,
-    IMentionReadStateService mentionReadStateService)
+    MentionReadIntentService mentionReadIntentService)
     : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestReadMessageContents, MyTelegram.Schema.Messages.IAffectedMessages>
 {
     protected override async Task<MyTelegram.Schema.Messages.IAffectedMessages> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestReadMessageContents obj)
@@ -41,20 +39,7 @@ internal sealed class ReadMessageContentsHandler(
         foreach (var group in mentioned.GroupBy(p => new Peer(p.ToPeerType, p.ToPeerId)))
         {
             var ids = group.Select(p => p.MessageId).ToList();
-            await mentionReadStateService.MarkReadAsync(input.UserId, group.Key, ids);
-
-            foreach (var messageId in ids)
-            {
-                try
-                {
-                    await commandBus.PublishAsync(
-                        new ReadMentionCommand(DialogId.Create(input.UserId, group.Key), messageId));
-                }
-                catch (DomainError)
-                {
-                    // No dialog aggregate (for example a legacy chat): the badge is best-effort.
-                }
-            }
+            await mentionReadIntentService.ReadAsync(input.UserId, group.Key, ids);
         }
 
         // Advance pts so the other sessions of this user notice the read state.

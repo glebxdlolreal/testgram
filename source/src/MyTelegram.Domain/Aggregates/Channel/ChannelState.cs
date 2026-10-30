@@ -30,6 +30,7 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     IApply<ChannelTopMessageIdUpdatedEvent>,
     IApply<ChannelParticipantsHiddenUpdatedEvent>,
     IApply<ChannelAutotranslationUpdatedEvent>,
+    IApply<ChannelAntiSpamChangedEvent>,
     IApply<ChannelAvailableReactionsChangedEvent>,
     IApply<ChannelJoinRequestUpdatedEvent>,
     IApply<ChannelAdminRemovedEvent>,
@@ -83,6 +84,7 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     public bool Verified { get; private set; }
     public bool ParticipantsHidden { get; private set; }
     public bool Autotranslation { get; private set; }
+    public bool AntiSpam { get; private set; }
     public ReactionType ReactionType { get; private set; }
     public List<string>? AvailableReactions { get; private set; }
     public bool AllowCustomReaction { get; private set; }
@@ -354,6 +356,7 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
         ParticipantsHidden = snapshot.ParticipantsHidden;
         JoinRequest = snapshot.JoinRequest;
         Autotranslation = snapshot.Autotranslation;
+        AntiSpam = snapshot.AntiSpam;
     }
     public void Apply(ChannelTopMessageIdUpdatedEvent aggregateEvent)
     {
@@ -363,6 +366,11 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     {
         ParticipantsHidden = aggregateEvent.Enabled;
     }
+    public void Apply(ChannelAntiSpamChangedEvent aggregateEvent)
+    {
+        AntiSpam = aggregateEvent.Enabled;
+    }
+
     public void Apply(ChannelAutotranslationUpdatedEvent aggregateEvent)
     {
         Autotranslation = aggregateEvent.Enabled;

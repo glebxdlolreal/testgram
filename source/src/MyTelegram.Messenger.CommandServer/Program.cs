@@ -142,6 +142,10 @@ builder.ConfigureServices((ctx,
     services.AddHostedService<MyTelegram.Messenger.Services.HistoryImport.HistoryImportBackgroundService>();
     services.AddHostedService<MyTelegram.Messenger.Services.Transcription.TranscriptionBackgroundService>();
     services.AddHostedService<MyTelegram.Messenger.Services.AdminLog.AdminLogIndexInitializer>();
+    services.AddAntiSpamServices(ctx.Configuration);
+    services.AddHostedService(sp => sp.GetRequiredService<MyTelegram.Messenger.Services.Mentions.MentionReadIntentService>());
+    services.AddHostedService(sp => sp.GetRequiredService<MyTelegram.Messenger.Services.AntiSpam.AntiSpamMentionRecountService>());
+    services.AddHostedService<MyTelegram.Messenger.Services.AntiSpam.AntiSpamWorker>();
 
     services.Configure<HostOptions>(options =>
     {

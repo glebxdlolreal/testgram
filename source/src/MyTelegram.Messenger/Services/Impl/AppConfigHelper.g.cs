@@ -5,7 +5,9 @@ namespace MyTelegram.Messenger.Services.Impl;
 // https://corefork.telegram.org/api/config
 public partial class AppConfigHelper
 {
-    private static int _hash = -20708174;
+    // Derived from the finished config in GetAppConfig, so every change to the table or to
+    // AddCustomConfig yields a new hash without a manual bump.
+    private static int _hash;
     private static TJsonObject? _jsonValue;
     public IJSONValue GetAppConfig()
     {
@@ -863,8 +865,6 @@ public partial class AppConfigHelper
                 // The maximum number of speech recognition » calls per week for non-Premium users. (integer)
                 // Raised from 0, which switched the non-Premium path off entirely and hid the trial UI in
                 // tdesktop (Transcribes::trialsSupport() needs weekly_number > 0 || cooldown_until > 0).
-                // Bump _hash at the top of this file whenever this table changes, or clients sit on
-                // appConfigNotModified forever.
                 new TJsonObjectValue { Key = "transcribe_audio_trial_weekly_number", Value = new TJsonNumber { Value = 3 } },
 
                 // The maximum number of file parts uploadable by non-Premium users (integer, the maximum file size can be extrapolated by multiplying this value by 524288, the biggest possible chunk size)
@@ -943,6 +943,7 @@ public partial class AppConfigHelper
             ]
         };
         AddCustomConfig();
+        _hash = ComputeHash(_jsonValue);
 
         return _jsonValue;
     }

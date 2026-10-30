@@ -18,9 +18,15 @@ namespace MyTelegram.EventFlow.MongoDB.Extensions;
 
 public static class MyMongoDbOptionsExtensions
 {
+    private static void TryRegisterGuidSerializer()
+    {
+        try { BsonSerializer.TryRegisterSerializer(new GuidSerializer(GuidRepresentation.Standard)); }
+        catch (BsonSerializationException) { /* already registered with a compatible serializer in this AppDomain */ }
+    }
+
     public static void AddEventStoreMongoDbContext<TMongoDbContext>(this IServiceCollection services) where TMongoDbContext : class, IMongoDbContext
     {
-        BsonSerializer.TryRegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
+        TryRegisterGuidSerializer();
         services.TryAddSingleton<TMongoDbContext>();
 
         services.TryAddSingleton<IMongoDatabase>(f => f.GetRequiredService<TMongoDbContext>().GetDatabase());
@@ -34,7 +40,7 @@ public static class MyMongoDbOptionsExtensions
     public static void AddReadModelMongoDbContext<TMongoDbContext>(this IServiceCollection services)
         where TMongoDbContext : class, IMongoDbContext
     {
-        BsonSerializer.TryRegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
+        TryRegisterGuidSerializer();
         services.TryAddSingleton<TMongoDbContext>();
         services.TryAddSingleton<IMongoDbContext, TMongoDbContext>();
         services.TryAddSingleton<IQueryOnlyReadModelDescriptionProvider, QueryOnlyReadModelDescriptionProvider>();

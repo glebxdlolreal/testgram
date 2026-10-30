@@ -18,6 +18,14 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     IApply<DraftClearedEvent>,
     //IApply<DeleteUserMessagesStartedEvent>,
     IApply<MentionCreatedEvent>,
+    IApply<AntiSpamMentionDeletionAppliedEvent>,
+    IApply<AntiSpamMentionAdmittedEvent>,
+    IApply<AntiSpamMentionAdmissionReleasedEvent>,
+    IApply<MentionRecountRequestedEvent>,
+    IApply<MentionRecountCompletedEvent>,
+    IApply<MentionReadIntentAdmittedEvent>,
+    IApply<MentionReadIntentAppliedEvent>,
+    IApply<MentionReadIntentReleasedEvent>,
     IApply<MentionReadEvent>,
     IApply<UnreadMentionsReadEvent>,
     IApply<UnreadMentionsCountSyncedEvent>,
@@ -54,6 +62,52 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     public int UnreadMentionsCount { get; private set; }
     public int UnreadReactionsCount { get; private set; }
     public int UnreadPollVotesCount { get; private set; }
+
+    public string? MentionReadOperation { get; private set; }
+
+    public void Apply(MentionReadIntentAdmittedEvent aggregateEvent) => MentionReadOperation = aggregateEvent.OperationKey;
+    public void Apply(MentionReadIntentAppliedEvent aggregateEvent) { }
+    public void Apply(MentionReadIntentReleasedEvent aggregateEvent)
+    {
+        if (MentionReadOperation == aggregateEvent.OperationKey) MentionReadOperation = null;
+    }
+
+    public string? AntiSpamMentionOperation { get; private set; }
+    public int AntiSpamMentionMessageId { get; private set; }
+    public bool AntiSpamMentionConsumed { get; private set; }
+    public bool MentionRecountRequired { get; private set; }
+
+    public void Apply(AntiSpamMentionAdmittedEvent aggregateEvent)
+    {
+        HasAntiSpamMentionEffects = true;
+        AntiSpamMentionOperation = aggregateEvent.OperationKey;
+        AntiSpamMentionMessageId = aggregateEvent.MessageId;
+        AntiSpamMentionConsumed = aggregateEvent.Consumed;
+    }
+
+    public void Apply(AntiSpamMentionAdmissionReleasedEvent aggregateEvent)
+    {
+        if (AntiSpamMentionOperation == aggregateEvent.OperationKey)
+        {
+            AntiSpamMentionOperation = null;
+            AntiSpamMentionMessageId = 0;
+            AntiSpamMentionConsumed = false;
+        }
+        MentionRecountRequired = true;
+    }
+
+    public void Apply(MentionRecountRequestedEvent aggregateEvent) => MentionRecountRequired = true;
+    public void Apply(MentionRecountCompletedEvent aggregateEvent) => MentionRecountRequired = false;
+
+    public void Apply(AntiSpamMentionDeletionAppliedEvent aggregateEvent)
+    {
+        HasAntiSpamMentionEffects = true;
+        if (AntiSpamMentionOperation != null && AntiSpamMentionMessageId == aggregateEvent.MessageId)
+            AntiSpamMentionConsumed = true;
+        UnreadMentionsCount = aggregateEvent.UnreadMentionsCount;
+    }
+
+    public bool HasAntiSpamMentionEffects { get; private set; }
 
     public void Apply(ChannelHistoryClearedEvent aggregateEvent)
     {
@@ -150,11 +204,14 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
 
     public void Apply(MentionReadEvent aggregateEvent)
     {
+        if (AntiSpamMentionOperation != null && AntiSpamMentionMessageId == aggregateEvent.MessageId)
+            AntiSpamMentionConsumed = true;
         UnreadMentionsCount = aggregateEvent.UnreadMentionsCount;
     }
 
     public void Apply(UnreadMentionsReadEvent aggregateEvent)
     {
+        if (AntiSpamMentionOperation != null) AntiSpamMentionConsumed = true;
         UnreadMentionsCount = aggregateEvent.UnreadMentionsCount;
     }
 
@@ -259,6 +316,12 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
 
     public void LoadSnapshot(DialogSnapshot snapshot)
     {
+        MentionReadOperation = snapshot.MentionReadOperation;
+        AntiSpamMentionOperation = snapshot.AntiSpamMentionOperation;
+        AntiSpamMentionMessageId = snapshot.AntiSpamMentionMessageId;
+        AntiSpamMentionConsumed = snapshot.AntiSpamMentionConsumed;
+        MentionRecountRequired = snapshot.MentionRecountRequired;
+        HasAntiSpamMentionEffects = snapshot.HasAntiSpamMentionEffects;
         OwnerId = snapshot.OwnerId;
         TopMessageId = snapshot.TopMessage;
         ReadInboxMaxId = snapshot.ReadInboxMaxId;

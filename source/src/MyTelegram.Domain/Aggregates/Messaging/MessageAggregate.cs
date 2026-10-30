@@ -4,6 +4,12 @@
 public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageId, MessageSnapshot>
 {
     private readonly MessageState _state = new();
+    private int _channelDeletionProofVersion = 1;
+    public bool HasChannelDeletionProof => _channelDeletionProofVersion == 1;
+
+    public bool IsChannelDeleted => _state.IsChannelDeleted;
+    public Guid? ChannelDeletionRequestId => _state.ChannelDeletionRequestId;
+    public Guid? AntiSpamDeletionCancelledRequestId => _state.AntiSpamDeletionCancelledRequestId;
 
     public MessageAggregate(MessageId id) : base(id, SnapshotEveryFewVersionsStrategy.Default)
     {
@@ -153,10 +159,34 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
         ));
     }
 
-    [DoNotInheritRequestCommand]
-    public void DeleteChannelMessage(RequestInfo requestInfo)
+    /// <summary>
+    /// Permanently fences native moderation on this message, serialized with deletion by aggregate OCC.
+    /// Keep the first request identity even if a terminal job expires and is later recreated.
+    /// </summary>
+    [DisableAutoGeneration]
+    public void CancelAntiSpamDeletion(Guid requestId)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        if (_state.IsDeleted || _state.AntiSpamDeletionCancelledRequestId.HasValue)
+        {
+            return;
+        }
+
+        Emit(new AntiSpamDeletionCancelledEvent(requestId));
+    }
+
+    [DoNotInheritRequestCommand]
+    public void DeleteChannelMessage(RequestInfo requestInfo, int? expectedAggregateVersion = null)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        if (_state.IsChannelDeleted ||
+            (requestInfo.UserId == MyTelegramConsts.AntiSpamBotUserId &&
+             (_state.AntiSpamDeletionCancelledRequestId.HasValue || !HasChannelDeletionProof ||
+              !expectedAggregateVersion.HasValue || Version != expectedAggregateVersion.Value)))
+        {
+            AcknowledgeChannelDeletion(requestInfo);
+            return;
+        }
         var channelId = _state.MessageItem.OwnerPeer.PeerId;
         var postChannelId = _state.MessageItem.FwdHeader?.SavedFromPeer?.PeerId;
         var postMessageId = _state.MessageItem.FwdHeader?.SavedFromMsgId;
@@ -171,6 +201,14 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
             postChannelId,
             postMessageId,
             threadRootMessageId));
+    }
+
+    [DisableAutoGeneration]
+    private void AcknowledgeChannelDeletion(RequestInfo requestInfo)
+    {
+        Emit(new ChannelMessageDeletionAcknowledgedEvent(requestInfo,
+            _state.MessageItem.OwnerPeer.PeerId, _state.MessageItem.MessageId,
+            _state.ChannelDeletionRequestId));
     }
 
     [DoNotInheritRequestCommand]
@@ -449,6 +487,19 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
     /// <c>messageReplies.replies</c> keeps matching the number of messages actually left in the
     /// thread. See https://corefork.telegram.org/api/threads
     /// </summary>
+    internal void ApplyAntiSpamReplyDeletion(string operationKey, int pts, bool alreadyApplied,
+        long? postChannelId, int? postMessageId, string? expectedStaleSourceId = null)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        var current = _state.MessageItem.Reply;
+        var replies = Math.Max(0, (current?.Replies ?? 0) - (alreadyApplied ? 0 : 1));
+        var repliesPts = alreadyApplied ? current?.RepliesPts ?? 0 : pts;
+        var reply = current == null ? null : new MessageReply(current.ChannelId, replies, repliesPts,
+            current.MaxId, current.RecentRepliers == null ? null : [.. current.RecentRepliers]);
+        Emit(new AntiSpamReplyDeletionAppliedEvent(operationKey, replies, repliesPts,
+            postChannelId, postMessageId, reply, expectedStaleSourceId));
+    }
+
     public void DecrementMessageReply(int pts)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
@@ -527,7 +578,11 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
             //_state.EditHide,
             _state.Edited,
             _state.Pts,
-            _state.IsDeleted
+            _state.IsDeleted,
+            _state.IsChannelDeleted,
+            _state.ChannelDeletionRequestId,
+            _channelDeletionProofVersion,
+            _state.AntiSpamDeletionCancelledRequestId
         ));
     }
 
@@ -536,6 +591,16 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
       CancellationToken cancellationToken)
     {
         _state.LoadSnapshot(snapshot);
+        _channelDeletionProofVersion = snapshot.ChannelDeletionProofVersion;
         return Task.CompletedTask;
     }
+}
+
+public class ChannelMessageDeletionAcknowledgedEvent(RequestInfo requestInfo, long channelId,
+    int messageId, Guid? originalDeletionRequestId)
+    : RequestAggregateEvent2<MessageAggregate, MessageId>(requestInfo)
+{
+    public long ChannelId { get; } = channelId;
+    public int MessageId { get; } = messageId;
+    public Guid? OriginalDeletionRequestId { get; } = originalDeletionRequestId;
 }

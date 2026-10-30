@@ -20,7 +20,8 @@ public static class PeerKindHelper
             || userId == MyTelegramConsts.DefaultSupportUserId
             || userId == MyTelegramConsts.RepliesServiceUserId
             || userId == MyTelegramConsts.ChatImporterBotUserId
-            || userId == MyTelegramConsts.GifSearchBotUserId;
+            || userId == MyTelegramConsts.GifSearchBotUserId
+            || userId == MyTelegramConsts.AntiSpamBotUserId;
     }
 
     /// <summary>

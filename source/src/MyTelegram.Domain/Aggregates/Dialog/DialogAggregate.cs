@@ -1,7 +1,7 @@
 ﻿namespace MyTelegram.Domain.Aggregates.Dialog;
 
 [EnableAutoGeneration]
-public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, DialogId, DialogSnapshot>
+public partial class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, DialogId, DialogSnapshot>
 {
     private readonly DialogState _state = new();
 
@@ -250,9 +250,22 @@ public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, 
     /// Decrements the unread mention counter for a single message, called from
     /// messages.readMessageContents / channels.readMessageContents.
     /// </summary>
+    public bool HasAntiSpamMentionEffects => _state.HasAntiSpamMentionEffects;
+
+    internal void ApplyAntiSpamMentionDeletion(string operationKey, int messageId, bool alreadyRead)
+    {
+        alreadyRead |= _state.AntiSpamMentionOperation != null &&
+                       _state.AntiSpamMentionMessageId == messageId && _state.AntiSpamMentionConsumed;
+        Emit(new AntiSpamMentionDeletionAppliedEvent(operationKey, messageId,
+            alreadyRead ? _state.UnreadMentionsCount : Math.Max(0, _state.UnreadMentionsCount - 1)));
+    }
+
+    [DisableAutoGeneration]
     public void ReadMention(int messageId)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        if (_state.AntiSpamMentionOperation != null && _state.AntiSpamMentionMessageId == messageId &&
+            _state.AntiSpamMentionConsumed) return;
         var unreadMentionsCount = _state.UnreadMentionsCount - 1;
         if (unreadMentionsCount < 0)
         {
@@ -267,14 +280,19 @@ public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, 
     /// unread mention. Deleting a history or clearing a chat removes mentions without going through
     /// ReadMention, so the counter is re-synced whenever the exact number is computed anyway.
     /// </summary>
-    public void SyncUnreadMentionsCount(int unreadMentionsCount)
+    [DisableAutoGeneration]
+    public void SyncUnreadMentionsCount(int unreadMentionsCount, int? expectedVersion = null)
     {
-        if (IsNew || unreadMentionsCount < 0 || unreadMentionsCount == _state.UnreadMentionsCount)
+        if (IsNew || unreadMentionsCount < 0) return;
+        if (_state.AntiSpamMentionOperation != null || _state.MentionReadOperation != null ||
+            expectedVersion.HasValue && Version != expectedVersion.Value)
         {
+            if (!_state.MentionRecountRequired) Emit(new MentionRecountRequestedEvent());
             return;
         }
-
-        Emit(new UnreadMentionsCountSyncedEvent(_state.OwnerId, _state.ToPeer, unreadMentionsCount));
+        if (unreadMentionsCount != _state.UnreadMentionsCount)
+            Emit(new UnreadMentionsCountSyncedEvent(_state.OwnerId, _state.ToPeer, unreadMentionsCount));
+        if (_state.MentionRecountRequired) Emit(new MentionRecountCompletedEvent());
     }
 
     /// <summary>
@@ -423,7 +441,13 @@ public class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAggregate, 
             _state.FolderId,
             _state.UnreadReactionsCount,
             _state.UnreadPollVotesCount,
-            [.. _state.TopicDraftKeys]
+            [.. _state.TopicDraftKeys],
+            _state.HasAntiSpamMentionEffects,
+            _state.AntiSpamMentionOperation,
+            _state.AntiSpamMentionMessageId,
+            _state.AntiSpamMentionConsumed,
+            _state.MentionRecountRequired,
+            _state.MentionReadOperation
         ));
 
     }

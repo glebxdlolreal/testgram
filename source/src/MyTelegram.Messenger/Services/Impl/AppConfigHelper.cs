@@ -11,6 +11,18 @@ public partial class AppConfigHelper : IAppConfigHelper, ISingletonDependency
         return _hash;
     }
 
+    /// <summary>
+    /// Hashes the serialized config, so the value is identical in every process and changes with
+    /// any edit. Zero is avoided: clients send it to mean "nothing cached".
+    /// </summary>
+    private static int ComputeHash(TJsonObject config)
+    {
+        var writer = new System.Buffers.ArrayBufferWriter<byte>();
+        config.Serialize(writer);
+        var hash = (int)System.IO.Hashing.XxHash32.HashToUInt32(writer.WrittenSpan);
+        return hash == 0 ? 1 : hash;
+    }
+
     private void AddCustomConfig()
     {
         SetConfig("stars_paid_messages_available", new TJsonBool { Value = true });
@@ -32,6 +44,16 @@ public partial class AppConfigHelper : IAppConfigHelper, ISingletonDependency
         // emitting it, so clients that read it from appConfig found nothing.
         // See https://corefork.telegram.org/api/gifs#searching-gifs
         SetConfig("gif_search_username", new TJsonString { Value = "gif" });
+        SetConfig("telegram_antispam_user_id", new TJsonString
+        {
+            Value = MyTelegramConsts.AntiSpamBotUserId.ToString(System.Globalization.CultureInfo.InvariantCulture)
+        });
+
+        // Telegram advertises 200 here, which no group on this instance reaches, so the toggle could
+        // never be enabled. Lowered like hidden_members_group_size_min above: both the client UI and
+        // ToggleAntiSpamHandler read this same advertised value.
+        // See https://core.telegram.org/api/antispam
+        SetConfig("telegram_antispam_group_size_min", new TJsonNumber { Value = 10 });
 
         // Affiliate Programs configuration
         SetConfig("starref_program_allowed", new TJsonBool { Value = true });

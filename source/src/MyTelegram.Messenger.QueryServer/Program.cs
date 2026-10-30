@@ -93,6 +93,7 @@ builder.ConfigureServices((ctx,
     //});
 
     services.AddMyTelegramMessengerQueryServer();
+    MyTelegram.Messenger.Extensions.AntiSpamServiceCollectionExtensions.AddAntiSpamServices(services, ctx.Configuration);
     services.AddTransient<MessengerQueryDataProcessor>();
     services.AddTransient<IDataProcessor<MessengerQueryDataReceivedEvent>, MessengerQueryDataProcessor>();
     services.AddSingleton<IMessageQueueProcessor<MessengerQueryDataReceivedEvent>>(sp =>

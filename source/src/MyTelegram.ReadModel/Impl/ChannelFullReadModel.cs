@@ -1,6 +1,7 @@
 ﻿namespace MyTelegram.ReadModel.Impl;
 
 public class ChannelFullReadModel : IChannelFullReadModel,
+    IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAntiSpamChangedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelCreatedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, DiscussionGroupUpdatedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAboutEditedEvent>,
@@ -48,6 +49,14 @@ public class ChannelFullReadModel : IChannelFullReadModel,
     public bool AllowCustomReaction { get; private set; }
     public List<string>? AvailableReactions { get; private set; }
     public bool AntiSpam { get; private set; }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<ChannelAggregate, ChannelId, ChannelAntiSpamChangedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        AntiSpam = domainEvent.AggregateEvent.Enabled;
+        return Task.CompletedTask;
+    }
     public int? TtlPeriod { get; private set; }
     public virtual long? Version { get; set; }
     public int? RequestsPending { get; private set; }

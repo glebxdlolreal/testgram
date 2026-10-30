@@ -202,9 +202,10 @@ public class TempAggregate : AggregateRoot<TempAggregate, TempId>, ISkipAggregat
         int? newTopMessageIdForDiscussionGroup,
         long? discussionGroupChannelId,
         IReadOnlyCollection<int>? repliesMessageIds,
-        IReadOnlyList<MyTelegram.Schema.IMessage>? messagesToLog)
+        IReadOnlyList<MyTelegram.Schema.IMessage>? messagesToLog,
+        int? expectedAggregateVersion = null)
     {
-        Emit(new DeleteChannelMessagesStartedEvent(requestInfo, channelId, messageIds, newTopMessageId, newTopMessageIdForDiscussionGroup, discussionGroupChannelId, repliesMessageIds, messagesToLog));
+        Emit(new DeleteChannelMessagesStartedEvent(requestInfo, channelId, messageIds, newTopMessageId, newTopMessageIdForDiscussionGroup, discussionGroupChannelId, repliesMessageIds, messagesToLog, expectedAggregateVersion));
     }
 
     public void StartDeleteParticipantHistory(RequestInfo requestInfo, long channelId, List<int> messageIds, int newTopMessageId)

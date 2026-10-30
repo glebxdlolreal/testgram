@@ -1,5 +1,9 @@
+using MyTelegram.Domain.Aggregates.AntiSpamCompletion;
+
 namespace MyTelegram.ReadModel.Impl;
 public class ChannelReadModel : IChannelReadModel,
+    IAmReadModelFor<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionCreatedEvent>,
+    IAmReadModelFor<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionTopRepairedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelCreatedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, IncrementParticipantCountEvent>,
 
@@ -33,6 +37,7 @@ public class ChannelReadModel : IChannelReadModel,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelTopMessageIdUpdatedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, PreHistoryHiddenChangedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelParticipantsHiddenUpdatedEvent>,
+    IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAntiSpamChangedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAutotranslationUpdatedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAvailableReactionsChangedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelJoinRequestUpdatedEvent>,
@@ -90,6 +95,16 @@ public class ChannelReadModel : IChannelReadModel,
     public List<UsernameInfo>? Usernames { get; private set; }
     public bool ParticipantsHidden { get; private set; }
     public bool Autotranslation { get; private set; }
+    public bool AntiSpam { get; private set; }
+    public bool Gigagroup { get; private set; }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<ChannelAggregate, ChannelId, ChannelAntiSpamChangedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        AntiSpam = domainEvent.AggregateEvent.Enabled;
+        return Task.CompletedTask;
+    }
     public bool JoinToSend { get; private set; }
     public bool JoinRequest { get; private set; }
     public bool IsMonoforum { get; private set; }
@@ -205,6 +220,25 @@ public class ChannelReadModel : IChannelReadModel,
     {
         //Photo = domainEvent.AggregateEvent.Photo;
         PhotoId = domainEvent.AggregateEvent.PhotoId;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionCreatedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        // Historical creation candidates can themselves have been deleted by another operation.
+        // Only the resumable repair event is allowed to replace the top.
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionTopRepairedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        var repair = domainEvent.AggregateEvent;
+        if (TopMessageId == repair.ExpectedTopMessageId)
+            TopMessageId = repair.NewTopMessageId;
         return Task.CompletedTask;
     }
 

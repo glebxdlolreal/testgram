@@ -15,10 +15,22 @@ public class DialogSnapshot(
     int? folderId,
     int unreadReactionsCount = 0,
     int unreadPollVotesCount = 0,
-    List<string>? topicDraftKeys = null
+    List<string>? topicDraftKeys = null,
+    bool hasAntiSpamMentionEffects = false,
+    string? antiSpamMentionOperation = null,
+    int antiSpamMentionMessageId = 0,
+    bool antiSpamMentionConsumed = false,
+    bool mentionRecountRequired = false,
+    string? mentionReadOperation = null
     )
     : ISnapshot
 {
+    public string? MentionReadOperation { get; } = mentionReadOperation;
+    public string? AntiSpamMentionOperation { get; } = antiSpamMentionOperation;
+    public int AntiSpamMentionMessageId { get; } = antiSpamMentionMessageId;
+    public bool AntiSpamMentionConsumed { get; } = antiSpamMentionConsumed;
+    public bool MentionRecountRequired { get; } = mentionRecountRequired;
+    public bool HasAntiSpamMentionEffects { get; } = hasAntiSpamMentionEffects;
     public int ChannelHistoryMinId { get; } = channelHistoryMinId;
 
     public Draft? Draft { get; } = draft;

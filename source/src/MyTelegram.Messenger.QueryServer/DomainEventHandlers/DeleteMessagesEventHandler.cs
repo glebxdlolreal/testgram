@@ -5,7 +5,8 @@ public class DeleteMessagesEventHandler(
     ICommandBus commandBus,
     IIdGenerator idGenerator,
     IAckCacheService ackCacheService,
-    IUpdatesConverterService updatesConverterService)
+    IUpdatesConverterService updatesConverterService,
+    IQueryProcessor queryProcessor)
     : DomainEventHandlerBase(objectMessageSender, commandBus, idGenerator, ackCacheService),
         ISubscribeSynchronousTo<DeleteMessagesSaga4, DeleteMessagesSaga4Id, DeleteSelfMessagesCompletedSagaEvent>,
         ISubscribeSynchronousTo<DeleteMessagesSaga4, DeleteMessagesSaga4Id,
@@ -17,8 +18,24 @@ public class DeleteMessagesEventHandler(
             DeleteChannelMessagesCompletedSagaEvent>,
         ISubscribeSynchronousTo<DeleteChannelMessagesSaga, DeleteChannelMessagesSagaId,
             DeleteChannelHistoryCompletedSagaEvent>,
-        ISubscribeSynchronousTo<DialogAggregate, DialogId, ChannelHistoryClearedEvent> 
+        ISubscribeSynchronousTo<DeleteChannelMessagesSaga, DeleteChannelMessagesSagaId,
+            DeleteChannelMessagesAlreadyDeletedSagaEvent>,
+        ISubscribeSynchronousTo<DialogAggregate, DialogId, ChannelHistoryClearedEvent>
 {
+    public async Task HandleAsync(
+        IDomainEvent<DeleteChannelMessagesSaga, DeleteChannelMessagesSagaId, DeleteChannelMessagesAlreadyDeletedSagaEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        // A retry acknowledges the current channel state, without recording another deletion or push.
+        var current = await queryProcessor.ProcessAsync(
+            new GetPtsByPeerIdQuery(domainEvent.AggregateEvent.ChannelId), cancellationToken);
+        var pts = current?.Pts ?? MyTelegramConsts.PtsInitId;
+        IObject result = domainEvent.AggregateEvent.IsDeleteHistory
+            ? new TAffectedHistory { Pts = pts, PtsCount = 0, Offset = 0 }
+            : new TAffectedMessages { Pts = pts, PtsCount = 0 };
+        await SendRpcMessageToClientAsync(domainEvent.AggregateEvent.RequestInfo, result);
+    }
+
     public async Task HandleAsync(
         IDomainEvent<DeleteChannelMessagesSaga, DeleteChannelMessagesSagaId, DeleteChannelHistoryCompletedSagaEvent>
             domainEvent, CancellationToken cancellationToken)

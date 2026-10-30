@@ -28,12 +28,27 @@ public class DialogReadModel : IDialogReadModel,
     IAmReadModelFor<DialogAggregate, DialogId, UnreadReactionCreatedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, UnreadReactionsReadEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, MentionCreatedEvent>,
+    IAmReadModelFor<DialogAggregate, DialogId, AntiSpamMentionDeletionAppliedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, MentionReadEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, UnreadMentionsReadEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, UnreadMentionsCountSyncedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, PollVoteCreatedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, PollVotesReadEvent>
 {
+    public long MentionCountSourceSequence { get; private set; }
+    public long AntiSpamEffectsSequence { get; private set; }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<DialogAggregate, DialogId, AntiSpamMentionDeletionAppliedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        AntiSpamEffectsSequence = Math.Max(AntiSpamEffectsSequence, domainEvent.AggregateSequenceNumber);
+        if (domainEvent.AggregateSequenceNumber <= MentionCountSourceSequence) return Task.CompletedTask;
+        MentionCountSourceSequence = domainEvent.AggregateSequenceNumber;
+        UnreadMentionsCount = domainEvent.AggregateEvent.UnreadMentionsCount;
+        return Task.CompletedTask;
+    }
+
     public virtual int ChannelHistoryMinId { get; private set; }
     public virtual DateTime CreationTime { get; private set; }
     public virtual Draft? Draft { get; private set; }
@@ -147,6 +162,8 @@ public class DialogReadModel : IDialogReadModel,
         IDomainEvent<DialogAggregate, DialogId, MentionCreatedEvent> domainEvent,
         CancellationToken cancellationToken)
     {
+        if (domainEvent.AggregateSequenceNumber <= MentionCountSourceSequence) return Task.CompletedTask;
+        MentionCountSourceSequence = domainEvent.AggregateSequenceNumber;
         UnreadMentionsCount = domainEvent.AggregateEvent.UnreadMentionsCount;
         return Task.CompletedTask;
     }
@@ -155,6 +172,8 @@ public class DialogReadModel : IDialogReadModel,
         IDomainEvent<DialogAggregate, DialogId, MentionReadEvent> domainEvent,
         CancellationToken cancellationToken)
     {
+        if (domainEvent.AggregateSequenceNumber <= MentionCountSourceSequence) return Task.CompletedTask;
+        MentionCountSourceSequence = domainEvent.AggregateSequenceNumber;
         UnreadMentionsCount = domainEvent.AggregateEvent.UnreadMentionsCount;
         return Task.CompletedTask;
     }
@@ -163,6 +182,8 @@ public class DialogReadModel : IDialogReadModel,
         IDomainEvent<DialogAggregate, DialogId, UnreadMentionsReadEvent> domainEvent,
         CancellationToken cancellationToken)
     {
+        if (domainEvent.AggregateSequenceNumber <= MentionCountSourceSequence) return Task.CompletedTask;
+        MentionCountSourceSequence = domainEvent.AggregateSequenceNumber;
         UnreadMentionsCount = domainEvent.AggregateEvent.UnreadMentionsCount;
         return Task.CompletedTask;
     }
@@ -171,6 +192,8 @@ public class DialogReadModel : IDialogReadModel,
         IDomainEvent<DialogAggregate, DialogId, UnreadMentionsCountSyncedEvent> domainEvent,
         CancellationToken cancellationToken)
     {
+        if (domainEvent.AggregateSequenceNumber <= MentionCountSourceSequence) return Task.CompletedTask;
+        MentionCountSourceSequence = domainEvent.AggregateSequenceNumber;
         UnreadMentionsCount = domainEvent.AggregateEvent.UnreadMentionsCount;
         return Task.CompletedTask;
     }

@@ -10,6 +10,9 @@ public class PtsReadModelLocator : IPtsReadModelLocator, ITransientDependency
         var aggregateEvent = domainEvent.GetAggregateEvent();
         switch (aggregateEvent)
         {
+            case MyTelegram.Domain.Aggregates.AntiSpamCompletion.AntiSpamCompletionPublishedEvent completion:
+                ownerPeerId = completion.ChannelId;
+                break;
             //case TempPtsIncrementedEvent tempPtsIncrementedEvent:
             //    ownerPeerId = tempPtsIncrementedEvent.OwnerPeerId;
             //    break;

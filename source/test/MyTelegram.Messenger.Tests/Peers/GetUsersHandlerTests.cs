@@ -154,7 +154,8 @@ public class GetUsersHandlerTests
             [
                 userConverterService.Object,
                 accessHashHelper.Object,
-                (fromMessageResolver ?? new Mock<IFromMessagePeerResolver>(MockBehavior.Loose)).Object
+                (fromMessageResolver ?? new Mock<IFromMessagePeerResolver>(MockBehavior.Loose)).Object,
+                new Mock<MyTelegram.Messenger.Services.AntiSpam.IAntiSpamActorService>().Object
             ],
             culture: null)!;
     }

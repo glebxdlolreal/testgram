@@ -49,6 +49,7 @@ public class ChannelDomainEventHandler(
         //ISubscribeSynchronousTo<UpdatePinnedMessageSaga, UpdatePinnedMessageSagaId, UpdatePinnedMessageCompletedSagaEvent>,
         ISubscribeSynchronousTo<ChannelAggregate, ChannelId, ChannelParticipantsHiddenUpdatedEvent>,
         ISubscribeSynchronousTo<ChannelAggregate, ChannelId, ChannelAutotranslationUpdatedEvent>,
+        ISubscribeSynchronousTo<ChannelAggregate, ChannelId, ChannelAntiSpamChangedEvent>,
         ISubscribeSynchronousTo<ChannelAggregate, ChannelId, ChannelAvailableReactionsChangedEvent>,
         ISubscribeSynchronousTo<ChannelAggregate, ChannelId, ChannelJoinRequestUpdatedEvent>,
         ISubscribeSynchronousTo<JoinChannelAggregate, JoinChannelId, JoinChannelRequestCreatedEvent>,
@@ -621,9 +622,30 @@ public class ChannelDomainEventHandler(
         long memberUserId = 0,
         IChannelReadModel? channelReadModel = null,
         IPhotoReadModel? channelPhotoReadModel = null,
-        int pts = 0
+        int pts = 0,
+        bool bareChannelUpdate = false
     )
     {
+        if (bareChannelUpdate)
+        {
+            // A channel object carries caller-specific rights. Fan out only the invalidation,
+            // and let each recipient reload channelFull using its own permissions.
+            var invalidation = new TUpdates
+            {
+                Updates = new TVector<IUpdate>(new TUpdateChannel { ChannelId = channelId }),
+                Users = [],
+                Chats = [],
+                Date = DateTime.UtcNow.ToTimestamp(),
+                Seq = 0
+            };
+            await SendRpcMessageToClientAsync(requestInfo, invalidation);
+            await PushUpdatesToPeerAsync(new Peer(PeerType.User, requestInfo.UserId), invalidation,
+                excludeAuthKeyId: requestInfo.PermAuthKeyId);
+            await PushUpdatesToPeerAsync(new Peer(PeerType.Channel, channelId), invalidation,
+                excludeUserId: requestInfo.UserId);
+            return;
+        }
+
         if (channelReadModel == null)
         {
             var item = await GetChannelAndPhotoAsync(channelId);
@@ -678,6 +700,12 @@ public class ChannelDomainEventHandler(
         await SendRpcMessageToClientAsync(requestInfo, updates);
         await NotifyUpdateChannelAsync(requestInfo with { ReqMsgId = 0 }, channelId);
     }
+    public Task HandleAsync(IDomainEvent<ChannelAggregate, ChannelId, ChannelAntiSpamChangedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        return NotifyUpdateChannelAsync(domainEvent.AggregateEvent.RequestInfo,
+            domainEvent.AggregateEvent.ChannelId, bareChannelUpdate: true);
+    }
+
     public Task HandleAsync(IDomainEvent<ChannelAggregate, ChannelId, ChannelParticipantsHiddenUpdatedEvent> domainEvent, CancellationToken cancellationToken)
     {
         return NotifyUpdateChannelAsync(domainEvent.AggregateEvent.RequestInfo, domainEvent.AggregateEvent.ChannelId);

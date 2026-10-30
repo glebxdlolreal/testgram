@@ -1,8 +1,10 @@
+using MyTelegram.Domain.Aggregates.AntiSpamCompletion;
 using MyTelegram.Schema.Extensions;
 
 namespace MyTelegram.ReadModel.Impl;
 
 public class MessageReadModel : IMessageReadModel,
+    IAmReadModelFor<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionCreatedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, OutboxMessageCreatedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, InboxMessageCreatedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, OutboxMessageEditedEventV2>,
@@ -20,6 +22,7 @@ public class MessageReadModel : IMessageReadModel,
     IAmReadModelFor<MessageAggregate, MessageId, ReplyChannelMessageCompletedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, ChannelMessagePinnedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, MessageReplyUpdatedEvent>,
+    IAmReadModelFor<MessageAggregate, MessageId, AntiSpamReplyDeletionAppliedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, MessageReplyCountDecrementedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, ChannelMessageDeletedEvent>,
     IAmReadModelFor<SendMessageSaga, SendMessageSagaId, PostChannelIdUpdatedSagaEvent>,
@@ -31,6 +34,14 @@ public class MessageReadModel : IMessageReadModel,
     IAmReadModelFor<MessageAggregate, MessageId, MessageTodoUpdatedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, MessageInvoiceReceiptUpdatedEvent>
 {
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionCreatedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        context.MarkForDeletion();
+        return Task.CompletedTask;
+    }
+
     public int Date { get; private set; }
     public int? EditDate { get; private set; }
     public bool EditHide { get; private set; }
@@ -442,6 +453,7 @@ public class MessageReadModel : IMessageReadModel,
     public Task ApplyAsync(IReadModelContext context, IDomainEvent<MessageAggregate, MessageId, ReplyChannelMessageCompletedEvent> domainEvent, CancellationToken cancellationToken)
     {
 
+        if (!AcceptReplyCount(domainEvent.AggregateIdentity.Value, domainEvent.AggregateSequenceNumber)) return Task.CompletedTask;
         Reply = domainEvent.AggregateEvent.Reply;
 
         return Task.CompletedTask;
@@ -464,8 +476,58 @@ public class MessageReadModel : IMessageReadModel,
         return Task.CompletedTask;
     }
 
+    public string? ReplyCountSourceId { get; private set; }
+    public long ReplyCountSourceSequence { get; private set; }
+    public string? AntiSpamEffectsSourceId { get; private set; }
+    public long AntiSpamEffectsSequence { get; private set; }
+
+    private bool AcceptReplyCount(string sourceId, long sequence)
+    {
+        // A linked post's reply count is owned by its discussion root, not the post aggregate.
+        // Refuse a different established owner rather than comparing unrelated sequences.
+        if (ReplyCountSourceId != null && ReplyCountSourceId != sourceId) return false;
+        if (sequence <= ReplyCountSourceSequence) return false;
+        ReplyCountSourceId = sourceId;
+        ReplyCountSourceSequence = sequence;
+        return true;
+    }
+
+    public Task ApplyAsync(IReadModelContext context, IDomainEvent<MessageAggregate, MessageId, AntiSpamReplyDeletionAppliedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        var sourceId = domainEvent.AggregateIdentity.Value;
+        var effect = domainEvent.AggregateEvent;
+        if (effect.ExpectedStaleSourceId != null && effect.PostChannelId.HasValue && effect.PostMessageId.HasValue &&
+            Id == MyTelegram.Domain.Aggregates.Messaging.MessageId.Create(effect.PostChannelId.Value, effect.PostMessageId.Value).Value && Id != sourceId &&
+            ReplyCountSourceId == effect.ExpectedStaleSourceId)
+        {
+            // The command issuer verified the old source does not own this immutable post pair.
+            // Compare-and-swap only that exact stale source; never reset the root or a newer owner.
+            ReplyCountSourceId = null;
+            ReplyCountSourceSequence = 0;
+            AntiSpamEffectsSourceId = null;
+            AntiSpamEffectsSequence = 0;
+        }
+        if (ReplyCountSourceId != null && ReplyCountSourceId != sourceId) return Task.CompletedTask;
+        AntiSpamEffectsSourceId = sourceId;
+        AntiSpamEffectsSequence = Math.Max(AntiSpamEffectsSequence, domainEvent.AggregateSequenceNumber);
+        if (!AcceptReplyCount(sourceId, domainEvent.AggregateSequenceNumber)) return Task.CompletedTask;
+        if (domainEvent.AggregateEvent.Reply is { } snapshot)
+        {
+            var repliesPts = Id == sourceId ? domainEvent.AggregateEvent.Pts : Reply?.RepliesPts ?? snapshot.RepliesPts;
+            Reply = new MessageReply(snapshot.ChannelId, domainEvent.AggregateEvent.Replies, repliesPts,
+                snapshot.MaxId, snapshot.RecentRepliers == null ? null : [.. snapshot.RecentRepliers]);
+        }
+        else if (Reply != null)
+        {
+            Reply.Replies = domainEvent.AggregateEvent.Replies;
+            if (Id == sourceId) Reply.RepliesPts = domainEvent.AggregateEvent.Pts;
+        }
+        return Task.CompletedTask;
+    }
+
     public Task ApplyAsync(IReadModelContext context, IDomainEvent<MessageAggregate, MessageId, MessageReplyCountDecrementedEvent> domainEvent, CancellationToken cancellationToken)
     {
+        if (!AcceptReplyCount(domainEvent.AggregateIdentity.Value, domainEvent.AggregateSequenceNumber)) return Task.CompletedTask;
         if (Reply != null)
         {
             Reply.Replies = domainEvent.AggregateEvent.Replies;

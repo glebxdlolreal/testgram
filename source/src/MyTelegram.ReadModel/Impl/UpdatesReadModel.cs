@@ -1,9 +1,11 @@
 ﻿using MyTelegram.Domain.Aggregates.Updates;
+using MyTelegram.Domain.Aggregates.AntiSpamCompletion;
 
 namespace MyTelegram.ReadModel.Impl;
 
 public class UpdatesReadModel : IUpdatesReadModel,
-    IAmReadModelFor<UpdatesAggregate, UpdatesId, UpdatesCreatedEvent>
+    IAmReadModelFor<UpdatesAggregate, UpdatesId, UpdatesCreatedEvent>,
+    IAmReadModelFor<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionCreatedEvent>
 {
     public long OwnerPeerId { get; private set; }
 
@@ -27,6 +29,24 @@ public class UpdatesReadModel : IUpdatesReadModel,
     public virtual long? Version { get; set; }
 
 
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<AntiSpamCompletionAggregate, AntiSpamCompletionId, AntiSpamCompletionCreatedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        var e = domainEvent.AggregateEvent;
+        Id = domainEvent.AggregateIdentity.Value;
+        OwnerPeerId = ChannelId = e.ChannelId;
+        UpdatesType = UpdatesType.Updates;
+        Pts = e.Pts;
+        Date = e.Date;
+        GlobalSeqNo = e.GlobalSeqNo;
+        Updates = [new TUpdateDeleteChannelMessages { ChannelId = e.ChannelId,
+            Messages = new TVector<int>(e.MessageId), Pts = e.Pts, PtsCount = 1 }];
+        Users = [];
+        Chats = [e.ChannelId];
+        return Task.CompletedTask;
+    }
 
     public Task ApplyAsync(IReadModelContext context, IDomainEvent<UpdatesAggregate, UpdatesId, UpdatesCreatedEvent> domainEvent, CancellationToken cancellationToken)
     {

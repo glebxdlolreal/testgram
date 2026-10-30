@@ -26,7 +26,10 @@ public class MessageState : AggregateState<MessageAggregate, MessageId, MessageS
     IApply<ReplyChannelMessageCompletedEvent>,
     IApply<ChannelMessagePinnedEvent>,
     IApply<ChannelMessageDeletedEvent>,
+    IApply<ChannelMessageDeletionAcknowledgedEvent>,
+    IApply<AntiSpamDeletionCancelledEvent>,
     IApply<MessageReplyUpdatedEvent>,
+    IApply<AntiSpamReplyDeletionAppliedEvent>,
     IApply<MessageReplyCountDecrementedEvent>,
     IApply<MessageUnpinnedEvent>,
     IApply<MessagePinnedUpdatedEvent>,
@@ -52,8 +55,32 @@ public class MessageState : AggregateState<MessageAggregate, MessageId, MessageS
     public ConcurrentDictionary<long, List<Reaction>> UserReactions { get; } = new();
 
     public bool IsDeleted { get; private set; }
+    public bool IsChannelDeleted { get; private set; }
+    public Guid? ChannelDeletionRequestId { get; private set; }
+    public Guid? AntiSpamDeletionCancelledRequestId { get; private set; }
+
+    public void Apply(AntiSpamDeletionCancelledEvent aggregateEvent)
+    {
+        if (!IsDeleted)
+        {
+            AntiSpamDeletionCancelledRequestId ??= aggregateEvent.RequestId;
+        }
+    }
+
     public void Apply(ChannelMessageDeletedEvent aggregateEvent)
     {
+        // Preserve the first identity even when replaying historical duplicate deletion events.
+        if (!IsChannelDeleted)
+        {
+            ChannelDeletionRequestId = aggregateEvent.RequestInfo.RequestId;
+        }
+        IsChannelDeleted = true;
+        IsDeleted = true;
+    }
+
+    public void Apply(ChannelMessageDeletionAcknowledgedEvent aggregateEvent)
+    {
+        // An acknowledgement is not another deletion and must not replace its owner.
     }
 
     public void Apply(ChannelMessagePinnedEvent aggregateEvent)
@@ -125,6 +152,15 @@ public class MessageState : AggregateState<MessageAggregate, MessageId, MessageS
         if (MessageItem.Reply != null)
         {
             MessageItem.Reply.ChannelId = aggregateEvent.ChannelId;
+        }
+    }
+
+    public void Apply(AntiSpamReplyDeletionAppliedEvent aggregateEvent)
+    {
+        if (MessageItem.Reply != null)
+        {
+            MessageItem.Reply.Replies = aggregateEvent.Replies;
+            MessageItem.Reply.RepliesPts = aggregateEvent.Pts;
         }
     }
 
@@ -204,6 +240,9 @@ public class MessageState : AggregateState<MessageAggregate, MessageId, MessageS
         Edited = snapshot.Edited;
         Pts = snapshot.Pts;
         IsDeleted = snapshot.IsDeleted;
+        IsChannelDeleted = snapshot.IsChannelDeleted;
+        ChannelDeletionRequestId = snapshot.ChannelDeletionRequestId;
+        AntiSpamDeletionCancelledRequestId = snapshot.AntiSpamDeletionCancelledRequestId;
     }
 
     public void Apply(OutboxMessageEditedEventV2 aggregateEvent)

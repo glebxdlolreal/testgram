@@ -402,6 +402,22 @@ public class ChannelAggregate : MyInMemorySnapshotAggregateRoot<ChannelAggregate
         Emit(new ChannelSignatureChangedEvent(requestInfo, _state.ChannelId, signatureEnabled, profilesEnabled));
     }
 
+    public void ToggleAntiSpam(RequestInfo requestInfo, bool enabled)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        CheckAdminRights(requestInfo, rights => rights.DeleteMessages);
+        if (_state.Broadcast)
+        {
+            RpcErrors.RpcErrors400.MegagroupRequired.ThrowRpcError();
+        }
+        if (_state.AntiSpam == enabled)
+        {
+            RpcErrors.RpcErrors400.ChatNotModified.ThrowRpcError();
+        }
+
+        Emit(new ChannelAntiSpamChangedEvent(requestInfo, _state.ChannelId, enabled));
+    }
+
     public void ToggleSlowMode(RequestInfo requestInfo,
         int seconds,
         long selfUserId)
@@ -493,7 +509,8 @@ public class ChannelAggregate : MyInMemorySnapshotAggregateRoot<ChannelAggregate
             _state.ParticipantsHidden,
             _state.JoinRequest,
             _state.ProfileColor,
-            _state.Autotranslation
+            _state.Autotranslation,
+            _state.AntiSpam
         ));
     }
     protected override Task LoadSnapshotAsync(ChannelSnapshot snapshot,

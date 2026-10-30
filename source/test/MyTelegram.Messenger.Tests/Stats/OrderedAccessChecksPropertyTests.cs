@@ -294,6 +294,8 @@ public class OrderedAccessChecksPropertyTests
         public List<UsernameInfo>? Usernames => null;
         public bool ParticipantsHidden => false;
         public bool Autotranslation => false;
+        public bool AntiSpam => false;
+        public bool Gigagroup => false;
         public bool JoinToSend => false;
         public bool JoinRequest => false;
         public bool IsMonoforum => false;

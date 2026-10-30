@@ -32,6 +32,11 @@ public class MyTelegramConsts
     /// </summary>
     public const long GifSearchBotUserId = SystemBotUserIdBase + 1;
 
+    /// <summary>Locally owned moderation actor, never a channel participant or administrator.</summary>
+    public const long AntiSpamBotUserId = SystemBotUserIdBase + 2;
+    public const string AntiSpamBotUserName = "TestgramAntiSpamBot";
+    public const string AntiSpamActorCollection = "system-antispam-actor";
+
     /// <summary>
     /// True for ids in the system-bot block, which <c>BotFatherBotService</c> must never hand out to a
     /// user-created bot.

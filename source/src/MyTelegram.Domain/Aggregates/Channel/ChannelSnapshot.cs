@@ -46,7 +46,8 @@ public class ChannelSnapshot(
     bool participantsHidden,
     bool joinRequest,
     PeerColor? profileColor = null,
-    bool autotranslation = false
+    bool autotranslation = false,
+    bool antiSpam = false
 )
     : ISnapshot
 {
@@ -114,4 +115,5 @@ public class ChannelSnapshot(
     /// See https://corefork.telegram.org/api/translation#autotranslation-for-channels
     /// </summary>
     public bool Autotranslation { get; } = autotranslation;
+    public bool AntiSpam { get; } = antiSpam;
 }

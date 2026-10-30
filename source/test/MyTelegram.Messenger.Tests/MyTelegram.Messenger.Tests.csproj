@@ -26,9 +26,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\MyTelegram.DataSeeder\MyTelegram.DataSeeder.csproj" Aliases="DataSeeder" />
     <ProjectReference Include="..\..\src\MyTelegram.Messenger\MyTelegram.Messenger.csproj" />
     <ProjectReference Include="..\..\src\MyTelegram.Messenger.QueryServer\MyTelegram.Messenger.QueryServer.csproj" />
     <ProjectReference Include="..\..\src\MyTelegram.Schema\MyTelegram.Schema.csproj" />
+    <ProjectReference Include="..\..\src\MyTelegram.TestBase\MyTelegram.TestBase.csproj" />
   </ItemGroup>
 
   <ItemGroup>
