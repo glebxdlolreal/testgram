@@ -1070,7 +1070,10 @@ public sealed partial class PremiumBotService
             message = string.Empty;
         }
 
-        await commandBus.PublishAsync(new EditOutboxMessageCommand(MessageId.Create(BotUserId, botMessageId), BotRequest(), botMessageId,
+        // Commands are deduplicated per aggregate by ReqMsgId; the message was created with 0, so an edit
+        // carrying 0 too would be dropped as a repeat of its creation.
+        var request = BotRequest() with { ReqMsgId = Random.Shared.NextInt64(1, long.MaxValue) };
+        await commandBus.PublishAsync(new EditOutboxMessageCommand(MessageId.Create(BotUserId, botMessageId), request, botMessageId,
             message, DateTime.UtcNow.ToTimestamp(), WithCommandEntities(text, entities), null, markup, false,
             messageAppService.GetHashtags(text), encryptedData, inboxEncryptedData));
     }

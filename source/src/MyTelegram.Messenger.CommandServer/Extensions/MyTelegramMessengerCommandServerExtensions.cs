@@ -25,6 +25,7 @@ public static class MyTelegramMessengerCommandServerExtensions
         services.AddSubscription<MyTelegram.Messenger.Services.Premium.PremiumBotCallbackRequestedEvent, PremiumBotEventHandler>();
         services.AddSubscription<MyTelegram.Messenger.Services.Premium.PremiumBotPaymentSettledEvent, PremiumBotEventHandler>();
         services.AddSubscription<MyTelegram.Messenger.Services.Premium.PremiumWelcomeRequestedEvent, PremiumBotEventHandler>();
+        services.AddSubscription<MyTelegram.Messenger.Services.Bots.BotRequestedPeerEvent, BotRequestedPeerEventHandler>();
 
     }
 

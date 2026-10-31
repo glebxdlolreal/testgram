@@ -223,6 +223,21 @@ public class PremiumBotCommandsTests
     }
 
     [Fact]
+    public void A_chosen_chat_crosses_to_the_command_server_intact()
+    {
+        var serializer = new MyTelegram.Messenger.Services.Bots.BotRequestedPeerEventDataSerializer();
+        var chosen = new MyTelegram.Messenger.Services.Bots.BotRequestedPeerEvent(UserId, 42, 222, PremiumBotService.BotUserId, 77, 2,
+            [new Peer(PeerType.Channel, ChannelId), new Peer(PeerType.User, FriendId)]);
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+
+        serializer.Serialize(buffer, chosen);
+        var read = serializer.Deserialize(buffer.WrittenMemory);
+
+        (read with { Peers = chosen.Peers }).ShouldBe(chosen);
+        read.Peers.ShouldBe(chosen.Peers);
+    }
+
+    [Fact]
     public void The_welcome_notification_matches_real_telegram()
     {
         PremiumWelcomeNotifier.Text.ShouldBe("Thank you for subscribing to 🌟 Telegram Premium! Learn all about the exclusive benefits you've unlocked: @premium.");

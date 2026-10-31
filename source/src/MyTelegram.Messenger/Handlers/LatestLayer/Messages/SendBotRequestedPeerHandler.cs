@@ -1,4 +1,4 @@
-using MyTelegram.Messenger.Services.Premium;
+using MyTelegram.Messenger.Services.Bots;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
@@ -16,8 +16,7 @@ internal sealed class SendBotRequestedPeerHandler(
     IQueryProcessor queryProcessor,
     IPeerHelper peerHelper,
     IAccessHashHelper2 accessHashHelper,
-    IMessageAppService messageAppService,
-    IPremiumBotService premiumBotService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendBotRequestedPeer, MyTelegram.Schema.IUpdates>
+    IEventBus eventBus) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendBotRequestedPeer, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestSendBotRequestedPeer obj)
     {
@@ -46,48 +45,23 @@ internal sealed class SendBotRequestedPeerHandler(
             RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
         }
 
-        var peers = new TVector<IPeer>();
         var chosen = new List<Peer>();
         foreach (var requestedPeer in obj.RequestedPeers)
         {
             await accessHashHelper.CheckAccessHashAsync(input, requestedPeer);
             var peer = peerHelper.GetPeer(requestedPeer, input.UserId);
-            IPeer? tlPeer = peer?.PeerType switch
-            {
-                PeerType.User or PeerType.Self => new TPeerUser { UserId = peer.PeerId },
-                PeerType.Chat => new TPeerChat { ChatId = peer.PeerId },
-                PeerType.Channel => new TPeerChannel { ChannelId = peer.PeerId },
-                _ => null
-            };
-            if (tlPeer == null)
+            if (peer?.PeerType is not (PeerType.User or PeerType.Self or PeerType.Chat or PeerType.Channel))
             {
                 RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
             }
 
-            peers.Add(tlPeer!);
             chosen.Add(peer!.PeerType == PeerType.Self ? new Peer(PeerType.User, peer.PeerId) : peer);
         }
 
-        // The choice lands in the chat as a service message replying to the message with the button.
-        await messageAppService.SendMessageAsync([new SendMessageInput(
-            input.ToRequestInfo() with { ReqMsgId = 0 },
-            input.UserId,
-            new Peer(PeerType.User, botPeer.PeerId),
-            string.Empty,
-            Random.Shared.NextInt64(),
-            inputReplyTo: new TInputReplyToMessage { ReplyToMsgId = obj.MsgId!.Value },
-            sendMessageType: SendMessageType.MessageService,
-            messageType: MessageType.Text,
-            messageAction: new TMessageActionRequestedPeer
-            {
-                ButtonId = obj.ButtonId,
-                Peers = peers
-            })]);
-
-        if (botPeer.PeerId == PremiumBotService.BotUserId)
-        {
-            _ = Task.Run(() => premiumBotService.HandleRequestedPeerAsync(input, obj.ButtonId, chosen));
-        }
+        // The service message (and an in-process bot's answer) is sent by the command server: this
+        // request is answered by the query server, whose message ids would collide.
+        await eventBus.PublishAsync(new BotRequestedPeerEvent(input.UserId, input.PermAuthKeyId, input.Layer, botPeer.PeerId,
+            obj.MsgId!.Value, obj.ButtonId, chosen));
 
         // The service message reaches both sides through the push pipeline.
         return new TUpdates
