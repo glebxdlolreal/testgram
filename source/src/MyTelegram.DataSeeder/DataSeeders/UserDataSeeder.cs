@@ -343,10 +343,16 @@ public class UserDataSeeder(
             await commandBus.PublishAsync(new SetVerifiedCommand(UserId.Create(userId), true));
         }
 
-        if (string.IsNullOrEmpty(user?.About))
+        // Real @PremiumBot's profile text (measured 2026-10-31); the first wording this seeder wrote is
+        // replaced, anything else an operator set is left alone.
+        if (string.IsNullOrEmpty(user?.About) ||
+            user.About == "I can help you subscribe to Telegram Premium. Send /start to see the options.")
         {
-            await UpdateUserBioAsync(userId, "I can help you subscribe to Telegram Premium. Send /start to see the options.");
+            await UpdateUserBioAsync(userId,
+                "This bot lets you subscribe to Telegram Premium or buy subscription gifts for loved ones – with discounts up to 40%.");
         }
+
+        await SetPremiumBotInfoAsync(userId);
 
         await database.GetCollection<BsonDocument>("botfather-bot-state").UpdateOneAsync(
             Builders<BsonDocument>.Filter.Eq("BotUserId", userId),
@@ -356,6 +362,47 @@ public class UserDataSeeder(
                 .Set("Name", "Premium Bot")
                 .SetOnInsert("OwnerId", 0L)
                 .SetOnInsert("CreatedAt", DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+            new UpdateOptions { IsUpsert = true });
+    }
+
+    /// <summary>
+    /// The "/" menu and the description real <c>@PremiumBot</c> shows (measured 2026-10-31), in the
+    /// documents <c>bots.setBotCommands</c> and <c>bots.setBotInfo</c> write, so getFullUser serves them.
+    /// </summary>
+    private async Task SetPremiumBotInfoAsync(long userId)
+    {
+        var commands = new BsonArray
+        {
+            new BsonDocument { ["Command"] = "start", ["Description"] = "Telegram Premium Subscription" },
+            new BsonDocument { ["Command"] = "upgrade", ["Description"] = "Switch to Annual Subscription" },
+            new BsonDocument { ["Command"] = "gift", ["Description"] = "Gift Telegram Premium" },
+            new BsonDocument { ["Command"] = "stars", ["Description"] = "Buy or Gift Telegram Stars" },
+            new BsonDocument { ["Command"] = "giveaway", ["Description"] = "Prepay Premium Giveaway" },
+            new BsonDocument { ["Command"] = "stars_giveaway", ["Description"] = "Prepay Stars Giveaway" }
+        };
+
+        await database.GetCollection<BsonDocument>("bot_commands").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotId", userId) &
+            Builders<BsonDocument>.Filter.Eq("ScopeType", "TBotCommandScopeDefault") &
+            Builders<BsonDocument>.Filter.Eq("PeerId", BsonNull.Value) &
+            Builders<BsonDocument>.Filter.Eq("LangCode", ""),
+            Builders<BsonDocument>.Update
+                .Set("BotId", userId)
+                .Set("ScopeType", "TBotCommandScopeDefault")
+                .Set("PeerId", BsonNull.Value)
+                .Set("LangCode", "")
+                .Set("Commands", commands)
+                .Set("UpdatedAt", DateTime.UtcNow),
+            new UpdateOptions { IsUpsert = true });
+
+        await database.GetCollection<BsonDocument>("bot_info").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotId", userId) & Builders<BsonDocument>.Filter.Eq("LangCode", ""),
+            Builders<BsonDocument>.Update
+                .Set("BotId", userId)
+                .Set("LangCode", "")
+                .Set("Description", "This bot can help you subscribe to Telegram Premium with a discount up to 40%. " +
+                                    "You can also buy subscription gifts for your loved ones.")
+                .Set("UpdatedAt", DateTime.UtcNow),
             new UpdateOptions { IsUpsert = true });
     }
 

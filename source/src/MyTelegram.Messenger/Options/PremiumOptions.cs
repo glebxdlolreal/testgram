@@ -68,6 +68,12 @@ public class PremiumOptions
 
     public int InvoicePhotoHeight { get; set; } = 650;
 
+    /// <summary>
+    /// The terms a recurring @PremiumBot invoice links to (<c>invoice.terms_url</c>, which clients make
+    /// the buyer accept); real Telegram's, measured 2026-10-31.
+    /// </summary>
+    public string TermsUrl { get; set; } = "https://telegra.ph/End-User-License-Agreement-09-05-2";
+
     /// <summary>How fast accounts without Premium may upload and download, see <see cref="PremiumSpeedLimitOptions"/>.</summary>
     public PremiumSpeedLimitOptions SpeedLimit { get; set; } = new();
 

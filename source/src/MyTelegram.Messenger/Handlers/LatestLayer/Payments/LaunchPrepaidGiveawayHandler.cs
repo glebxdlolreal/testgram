@@ -17,6 +17,7 @@ internal sealed class LaunchPrepaidGiveawayHandler(
     IMongoDatabase mongoDatabase,
     IMessageAppService messageAppService,
     IPeerHelper peerHelper,
+    IQueryProcessor queryProcessor,
     IPremiumPurchaseGate premiumPurchaseGate)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestLaunchPrepaidGiveaway, MyTelegram.Schema.IUpdates>
 {
@@ -40,6 +41,15 @@ internal sealed class LaunchPrepaidGiveawayHandler(
 
         if (giveaway == null)
             RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
+
+        // Prepaid for one channel, and launched there by one of its admins only.
+        if (giveaway!.TryGetValue("ChannelId", out var prepaidChannelId) && prepaidChannelId.ToInt64() != targetPeer.PeerId)
+            RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
+
+        var channel = await queryProcessor.ProcessAsync(new GetChannelByIdQuery(targetPeer.PeerId));
+        if (channel == null ||
+            (channel.CreatorId != input.UserId && channel.AdminList.All(admin => admin.UserId != input.UserId)))
+            RpcErrors.RpcErrors403.ChatAdminRequired.ThrowRpcError();
 
         // Extract giveaway data
         var type = giveaway["Type"].AsString; // "premium" or "stars"

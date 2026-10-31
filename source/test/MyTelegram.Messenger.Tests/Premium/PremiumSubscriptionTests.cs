@@ -241,7 +241,9 @@ public class PremiumSubscriptionTests
     private static PremiumSubscriptionService Subscriptions(IMongoDatabase database, Mock<ICommandBus> bus, bool premium) =>
         new(database, bus.Object, PremiumPricingAndLimitTests.Users(premium).Object, NullLogger<PremiumSubscriptionService>.Instance);
 
-    private static PremiumBotService Bot(IMongoDatabase database, List<SendMessageInput> sent, bool blocked)
+    internal static PremiumBotService Bot(IMongoDatabase database, List<SendMessageInput> sent, bool blocked,
+        IQueryProcessor? queries = null, IPremiumAutoRenewService? autoRenew = null, IPremiumSubscriptionService? subscriptions = null,
+        ICommandBus? commandBus = null)
     {
         var messages = new Mock<IMessageAppService>();
         messages.Setup(m => m.SendMessageAsync(It.IsAny<List<SendMessageInput>>()))
@@ -264,14 +266,19 @@ public class PremiumSubscriptionTests
         var proxy = new Mock<IWebDocumentProxy>();
         proxy.Setup(p => p.Sign(It.IsAny<string>())).Returns(42);
 
-        return new PremiumBotService(database, messages.Object, media.Object, ids.Object, new Mock<IQueryProcessor>().Object,
+        var serverOptions = new Mock<Microsoft.Extensions.Options.IOptionsMonitor<MyTelegramMessengerServerOptions>>();
+        serverOptions.SetupGet(o => o.CurrentValue).Returns(new MyTelegramMessengerServerOptions());
+
+        return new PremiumBotService(database, messages.Object, media.Object, ids.Object, queries ?? new Mock<IQueryProcessor>().Object,
             new Mock<IUserConverterService>().Object, Microsoft.Extensions.Options.Options.Create(new PremiumOptions()),
-            PremiumPricingAndLimitTests.Gate(blocked).Object, new Mock<IPremiumSubscriptionService>().Object,
-            new Mock<IPremiumCardCheckout>().Object, new Mock<IBotInvoicePaymentService>().Object,
+            PremiumPricingAndLimitTests.Gate(blocked).Object, subscriptions ?? new Mock<IPremiumSubscriptionService>().Object,
+            new Mock<IPremiumCardCheckout>().Object, autoRenew ?? new Mock<IPremiumAutoRenewService>().Object,
+            new Mock<IPremiumGiftService>().Object, new Mock<IPremiumWelcomeNotifier>().Object, commandBus ?? new Mock<ICommandBus>().Object, new Mock<MyTelegram.Services.Services.IDataEncryptionHelper>().Object,
+            serverOptions.Object, new Mock<IBotInvoicePaymentService>().Object,
             registrar.Object, proxy.Object, NullLogger<PremiumBotService>.Instance);
     }
 
-    private static IRequestInput Input()
+    internal static IRequestInput Input()
     {
         var input = new Mock<IRequestInput>();
         input.SetupGet(i => i.UserId).Returns(UserId);

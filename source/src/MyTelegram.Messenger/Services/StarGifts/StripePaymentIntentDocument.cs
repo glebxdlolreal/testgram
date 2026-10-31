@@ -31,4 +31,10 @@ public class StripePaymentIntentDocument
 
     /// <summary>For an @PremiumBot invoice: the stored bot invoice the form was issued for.</summary>
     public string? BotInvoiceId { get; set; }
+
+    /// <summary>
+    /// Keep the card for off-session renewals (an @PremiumBot subscription); the charge then saves it
+    /// on a Stripe customer.
+    /// </summary>
+    public bool SaveCardForRenewal { get; set; }
 }

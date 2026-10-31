@@ -27,7 +27,8 @@ internal sealed class SendPaymentFormHandler(
     IPremiumCardCheckout premiumCardCheckout,
     IPremiumGiftService premiumGiftService,
     IPremiumSubscriptionService premiumSubscriptionService,
-    IPremiumBotService premiumBotService)
+    IPremiumBotService premiumBotService,
+    IPremiumWelcomeNotifier premiumWelcomeNotifier)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestSendPaymentForm, MyTelegram.Schema.Payments.IPaymentResult>
 {
     protected override async Task<MyTelegram.Schema.Payments.IPaymentResult> HandleCoreAsync(
@@ -163,43 +164,9 @@ internal sealed class SendPaymentFormHandler(
             }
         }
 
-        bool isGift = intent!.RecipientUserId > 0;
-        long creditUserId = isGift ? intent.RecipientUserId : input.UserId;
-
-        await StarsBalanceHelper.AddBalanceAsync(mongoDatabase, creditUserId, intent.Stars);
-
-        if (isGift)
-        {
-            await StarsBalanceHelper.AddTransactionAsync(mongoDatabase, input.UserId, -intent.Stars,
-                title: $"Gift {intent.Stars} Stars", peerUserId: intent.RecipientUserId);
-            await StarsBalanceHelper.AddTransactionAsync(mongoDatabase, creditUserId, intent.Stars,
-                gift: true, title: $"Gift {intent.Stars} Stars", peerUserId: input.UserId);
-
-            var giftPurpose = (obj.Invoice as TInputInvoiceStars)?.Purpose as TInputStorePaymentStarsGift;
-            var messageAction = new TMessageActionGiftStars
-            {
-                Currency = giftPurpose?.Currency ?? "USD",
-                Amount = giftPurpose?.Amount ?? 0,
-                Stars = intent.Stars,
-                TransactionId = intent.PaymentIntentId,
-            };
-            await messageAppService.SendMessageAsync([new SendMessageInput(
-                input.ToRequestInfo() with { ReqMsgId = 0 },
-                input.UserId,
-                new Peer(PeerType.User, intent.RecipientUserId),
-                string.Empty,
-                Random.Shared.NextInt64(),
-                sendMessageType: SendMessageType.MessageService,
-                messageType: MessageType.Text,
-                messageAction: messageAction
-            )]);
-        }
-        else
-        {
-            // Create transaction for recipient (creditUserId) who received the stars
-            await StarsBalanceHelper.AddTransactionAsync(mongoDatabase, creditUserId, intent.Stars,
-                title: $"Stripe top-up: {intent.Stars} stars");
-        }
+        var giftPurpose = (obj.Invoice as TInputInvoiceStars)?.Purpose as TInputStorePaymentStarsGift;
+        await StarsPurchaseHelper.CreditAsync(mongoDatabase, messageAppService, input, intent!.RecipientUserId, intent.Stars,
+            giftPurpose?.Currency ?? "USD", giftPurpose?.Amount ?? 0, intent.PaymentIntentId);
 
         await col.DeleteOneAsync(x => x.Id == intent.Id);
 
@@ -771,8 +738,13 @@ internal sealed class SendPaymentFormHandler(
                 break;
 
             case PremiumCardCheckout.KindSubscription:
-                await premiumSubscriptionService.GrantAsync(input.UserId, PremiumDuration.DaysFromMonths(intent.PremiumMonths),
+                var granted = await premiumSubscriptionService.GrantAsync(input.UserId, PremiumDuration.DaysFromMonths(intent.PremiumMonths),
                     "card", input.UserId);
+                if (granted.BecamePremium)
+                {
+                    await premiumWelcomeNotifier.NotifyAsync(input.UserId);
+                }
+
                 break;
 
             case PremiumCardCheckout.KindGiveaway when intent.GiveawayPurpose != null:

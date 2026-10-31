@@ -29,7 +29,8 @@ public sealed class PremiumStorePurchaseService(
     IQueryProcessor queryProcessor,
     IPremiumPurchaseGate premiumPurchaseGate,
     IPremiumSubscriptionService premiumSubscriptionService,
-    IPremiumGiftService premiumGiftService) : IPremiumStorePurchaseService, ITransientDependency
+    IPremiumGiftService premiumGiftService,
+    IPremiumWelcomeNotifier premiumWelcomeNotifier) : IPremiumStorePurchaseService, ITransientDependency
 {
     public async Task SettleAsync(IRequestInput input, string platform, ReadOnlyMemory<byte> receipt,
         IInputStorePaymentPurpose? purpose, string? storeProduct)
@@ -67,8 +68,12 @@ public sealed class PremiumStorePurchaseService(
         await premiumPurchaseGate.EnsureAllowedAsync(input.UserId);
         await StoreTransactionHelper.AuthorizeUnverifiedTopupAsync(
             mongoDatabase, options.Value.Payments, platform, receipt, input.UserId, 0);
-        await premiumSubscriptionService.GrantAsync(input.UserId,
+        var granted = await premiumSubscriptionService.GrantAsync(input.UserId,
             PremiumDuration.DaysFromMonths(MonthsFromStoreProduct(storeProduct)), platform, input.UserId);
+        if (granted.BecamePremium)
+        {
+            await premiumWelcomeNotifier.NotifyAsync(input.UserId);
+        }
     }
 
     /// <summary>

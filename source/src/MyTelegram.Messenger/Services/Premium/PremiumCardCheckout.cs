@@ -28,10 +28,16 @@ public interface IPremiumCardCheckout
     /// Charges the card and claims the intent so it can be settled exactly once. Throws if the charge
     /// is not confirmed or the form was already settled.
     /// </summary>
-    Task ChargeAsync(StripePaymentIntentDocument intent, IInputPaymentCredentials? credentials);
+    Task<PremiumCardCharge> ChargeAsync(StripePaymentIntentDocument intent, IInputPaymentCredentials? credentials);
 }
 
 public sealed record PremiumCardForm(long FormId, string NativeProvider, string NativeParamsJson);
+
+/// <summary>
+/// A settled charge. The customer and card are set only when the intent asked to keep the card
+/// (<see cref="StripePaymentIntentDocument.SaveCardForRenewal"/>) and Stripe really charged it.
+/// </summary>
+public sealed record PremiumCardCharge(bool Verified, string? StripeCustomerId, string? StripePaymentMethodId);
 
 /// <inheritdoc />
 public sealed class PremiumCardCheckout(
@@ -113,11 +119,13 @@ public sealed class PremiumCardCheckout(
         return intent!;
     }
 
-    public async Task ChargeAsync(StripePaymentIntentDocument intent, IInputPaymentCredentials? credentials)
+    public async Task<PremiumCardCharge> ChargeAsync(StripePaymentIntentDocument intent, IInputPaymentCredentials? credentials)
     {
         var stripe = options.Value.Stripe;
         var tokenId = ReadCardToken(credentials);
         var chargeVerified = false;
+        string? customerId = null;
+        string? paymentMethodId = null;
 
         if (!string.IsNullOrEmpty(stripe.SecretKey) && !string.IsNullOrEmpty(tokenId) &&
             !intent.PaymentIntentId.StartsWith("unverified_", StringComparison.Ordinal))
@@ -127,7 +135,13 @@ public sealed class PremiumCardCheckout(
             {
                 try
                 {
-                    await StripeHelper.ConfirmPaymentIntentAsync(stripe.SecretKey, intent.PaymentIntentId, tokenId!);
+                    if (intent.SaveCardForRenewal)
+                    {
+                        customerId = await StripeHelper.CreateCustomerAsync(stripe.SecretKey, $"Telegram user {intent.UserId}");
+                        await StripeHelper.SaveCardForFutureUsageAsync(stripe.SecretKey, intent.PaymentIntentId, customerId);
+                    }
+
+                    paymentMethodId = await StripeHelper.ConfirmPaymentIntentAsync(stripe.SecretKey, intent.PaymentIntentId, tokenId!);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -162,6 +176,10 @@ public sealed class PremiumCardCheckout(
 
         logger.LogInformation("Premium card payment settled: formId={FormId} userId={UserId} kind={Kind} amount={Amount} {Currency} verified={Verified}",
             intent.FormId, intent.UserId, intent.PremiumKind, intent.Amount, intent.Currency, chargeVerified);
+
+        return customerId != null && paymentMethodId != null
+            ? new PremiumCardCharge(chargeVerified, customerId, paymentMethodId)
+            : new PremiumCardCharge(chargeVerified, null, null);
     }
 
     private static bool IsPaid(string status) => status is "succeeded" or "requires_capture";

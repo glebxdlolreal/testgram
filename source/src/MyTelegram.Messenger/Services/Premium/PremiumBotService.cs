@@ -34,6 +34,15 @@ public interface IPremiumBotService
     /// <summary>A press on one of the bot's inline buttons; answered by sending the chosen invoice.</summary>
     Task HandleCallbackAsync(IRequestInput input, string data);
 
+    /// <summary>Tells the subscriber how an automatic renewal went.</summary>
+    Task NotifyRenewalAsync(PremiumRenewalOutcome outcome);
+
+    /// <summary>The chat picked with one of the bot's <c>keyboardButtonRequestPeer</c> buttons.</summary>
+    Task HandleRequestedPeerAsync(IRequestInput input, int buttonId, IReadOnlyList<Peer> peers);
+
+    /// <summary>A contact shared with the bot; <paramref name="contactUserId"/> is 0 for a phone with no account.</summary>
+    Task HandleContactAsync(IRequestInput input, long contactUserId);
+
     bool IsPremiumBotInvoice(BotInvoiceDocument storedInvoice);
 
     Task<IPaymentForm> BuildPaymentFormAsync(IRequestInput input, BotInvoiceDocument storedInvoice);
@@ -42,7 +51,7 @@ public interface IPremiumBotService
 }
 
 /// <inheritdoc />
-public sealed class PremiumBotService(
+public sealed partial class PremiumBotService(
     IMongoDatabase mongoDatabase,
     IMessageAppService messageAppService,
     IMediaHelper mediaHelper,
@@ -53,6 +62,12 @@ public sealed class PremiumBotService(
     IPremiumPurchaseGate premiumPurchaseGate,
     IPremiumSubscriptionService premiumSubscriptionService,
     IPremiumCardCheckout premiumCardCheckout,
+    IPremiumAutoRenewService premiumAutoRenewService,
+    IPremiumGiftService premiumGiftService,
+    IPremiumWelcomeNotifier premiumWelcomeNotifier,
+    ICommandBus commandBus,
+    IDataEncryptionHelper dataEncryptionHelper,
+    IOptionsMonitor<MyTelegramMessengerServerOptions> serverOptions,
     IBotInvoicePaymentService botInvoicePaymentService,
     IWebFileRegistrar webFileRegistrar,
     IWebDocumentProxy webDocumentProxy,
@@ -72,27 +87,32 @@ public sealed class PremiumBotService(
     {
         try
         {
-            var userId = input.UserId;
             var russian = await IsRussianAsync(input);
             var command = text.Trim();
-
-            if (!command.StartsWith("/start", StringComparison.OrdinalIgnoreCase) ||
-                (command.Length > 6 && !char.IsWhiteSpace(command[6]) && command[6] != '@'))
+            if (!command.StartsWith('/'))
             {
-                await SendNotUnderstoodAsync(userId, russian);
+                // A reply-keyboard button, or text typed in answer to one of the bot's questions.
+                await HandleReplyAsync(input.UserId, command, russian);
                 return;
             }
 
-            var parameter = command.Length > 6 ? command[6..].Trim() : string.Empty;
-            if (parameter.StartsWith('@'))
+            // "/start 12", "/start@PremiumBot 12"
+            var space = command.IndexOfAny([' ', '\n', '\t']);
+            var name = space < 0 ? command[1..] : command[1..space];
+            var parameter = space < 0 ? string.Empty : command[(space + 1)..].Trim();
+            var at = name.IndexOf('@');
+            if (at >= 0)
             {
-                // "/start@PremiumBot 12"
-                var space = parameter.IndexOf(' ');
-                parameter = space < 0 ? string.Empty : parameter[(space + 1)..].Trim();
+                if (!string.Equals(name[(at + 1)..], MyTelegramConsts.PremiumBotUserName, StringComparison.OrdinalIgnoreCase))
+                {
+                    await SendNotUnderstoodAsync(input.UserId, russian);
+                    return;
+                }
+
+                name = name[..at];
             }
 
-            int.TryParse(parameter, NumberStyles.None, CultureInfo.InvariantCulture, out var requestedMonths);
-            await OfferAsync(userId, requestedMonths, russian);
+            await HandleCommandAsync(input.UserId, name.ToLowerInvariant(), parameter, russian);
         }
         catch (Exception ex)
         {
@@ -106,6 +126,13 @@ public sealed class PremiumBotService(
         {
             // "init/24M/<id>": the term the button switches to.
             var russian = await IsRussianAsync(input);
+            if (data.StartsWith(GiveawayCallbackPrefix, StringComparison.Ordinal) ||
+                data.StartsWith(StarsGiveawayCallbackPrefix, StringComparison.Ordinal))
+            {
+                await HandleGiveawayCallbackAsync(input.UserId, data, russian);
+                return;
+            }
+
             var months = 0;
             if (data.StartsWith(CallbackPrefix, StringComparison.Ordinal))
             {
@@ -157,18 +184,21 @@ public sealed class PremiumBotService(
 
     public async Task<IPaymentForm> BuildPaymentFormAsync(IRequestInput input, BotInvoiceDocument storedInvoice)
     {
-        var months = ReadMonths(storedInvoice);
-        await premiumPurchaseGate.EnsureAllowedAsync(input.UserId);
+        var purchase = ReadPurchase(storedInvoice);
+        await EnsureCanBuyAsync(input.UserId, storedInvoice, purchase);
 
         var invoice = BotInvoiceHelper.ReadInvoice(storedInvoice);
         var form = await premiumCardCheckout.CreateAsync(input.UserId, storedInvoice.TotalAmount, storedInvoice.Currency,
             storedInvoice.Title, intent =>
             {
                 intent.PremiumKind = PremiumCardCheckout.KindBotInvoice;
-                intent.PremiumMonths = months;
-                intent.PremiumQuantity = 1;
-                intent.PremiumRecipientUserIds = [input.UserId];
+                intent.PremiumMonths = purchase.Months;
+                intent.PremiumQuantity = purchase.Quantity;
+                intent.PremiumRecipientUserIds = [.. purchase.Recipients];
+                intent.Stars = purchase.Stars;
                 intent.BotInvoiceId = storedInvoice.Id;
+                // Subscriptions renew: the card goes on file for the next term.
+                intent.SaveCardForRenewal = purchase.Kind == PurchaseKind.Subscription;
             });
 
         // tdlib refuses a form whose seller bot or payment provider it has never seen, so both ids
@@ -194,40 +224,109 @@ public sealed class PremiumBotService(
     public async Task<IPaymentResult> PayAsync(IRequestInput input, BotInvoiceDocument storedInvoice, RequestSendPaymentForm request)
     {
         var intent = await premiumCardCheckout.FindAsync(request.FormId, input.UserId);
-        if (intent.PremiumKind != PremiumCardCheckout.KindBotInvoice || intent.PremiumMonths <= 0 ||
+        if (intent.PremiumKind != PremiumCardCheckout.KindBotInvoice ||
             (intent.BotInvoiceId != null && intent.BotInvoiceId != storedInvoice.Id &&
              intent.BotInvoiceId != BotInvoiceHelper.MakeSlugId(storedInvoice.Slug)))
         {
             RpcErrors.RpcErrors400.PaymentProviderInvalid.ThrowRpcError();
         }
 
-        await premiumPurchaseGate.EnsureAllowedAsync(input.UserId);
-        await premiumCardCheckout.ChargeAsync(intent, request.Credentials);
-
-        var result = await premiumSubscriptionService.GrantAsync(input.UserId, PremiumDuration.DaysFromMonths(intent.PremiumMonths),
-            "premium-bot", input.UserId);
-
+        var purchase = ReadPurchase(storedInvoice);
+        await EnsureCanBuyAsync(input.UserId, storedInvoice, purchase);
+        var charge = await premiumCardCheckout.ChargeAsync(intent, request.Credentials);
         await botInvoicePaymentService.CompleteExternalChargeAsync(input, storedInvoice, intent.PaymentIntentId);
-
         var russian = await IsRussianAsync(input);
-        await SendTextAsync(input.UserId, russian
-            ? $"Спасибо за покупку! Telegram Premium активен до {FormatDate(result.ExpiresAt)}."
-            : $"Thank you for your purchase! Telegram Premium is active until {FormatDate(result.ExpiresAt)}.");
 
-        return new TPaymentResult
+        var price = FormatPrice(storedInvoice.TotalAmount, storedInvoice.Currency, russian);
+        switch (purchase.Kind)
         {
-            Updates = new TUpdates
-            {
-                Updates = new TVector<IUpdate>(),
-                Users = new TVector<IUser>(),
-                Chats = new TVector<IChat>(),
-                Date = DateTime.UtcNow.ToTimestamp(),
-                Seq = 0
-            }
-        };
+            case PurchaseKind.Subscription:
+                var result = await premiumSubscriptionService.GrantAsync(input.UserId, PremiumDuration.DaysFromMonths(purchase.Months),
+                    "premium-bot", input.UserId);
+                if (charge is { StripeCustomerId: { } customerId, StripePaymentMethodId: { } paymentMethodId })
+                {
+                    await premiumAutoRenewService.SaveCardAsync(input.UserId, purchase.Months, storedInvoice.TotalAmount,
+                        storedInvoice.Currency, customerId, paymentMethodId);
+                }
+
+                await SendSubscriptionReceiptAsync(input.UserId, price, result.ExpiresAt, russian);
+                if (result.BecamePremium)
+                {
+                    await premiumWelcomeNotifier.NotifyAsync(input.UserId);
+                }
+
+                break;
+
+            case PurchaseKind.PremiumGift:
+                var names = new List<string>();
+                foreach (var recipient in purchase.Recipients)
+                {
+                    await premiumGiftService.DeliverAsync(input, recipient, purchase.Months, storedInvoice.Currency,
+                        storedInvoice.TotalAmount / purchase.Recipients.Length, null, "premium-bot-gift");
+                    var user = await queryProcessor.ProcessAsync(new GetUserByIdQuery(recipient));
+                    names.Add(user == null ? recipient.ToString(CultureInfo.InvariantCulture) : DisplayName(user));
+                }
+
+                await SendAsync(input.UserId, russian
+                    ? $"Спасибо! Получен платёж на сумму {price}.\nПодарочная подписка Telegram Premium на {MonthsText(purchase.Months, true)} отправлена: {string.Join(", ", names)}."
+                    : $"Thank you! We received the payment for {price}.\nA {MonthsText(purchase.Months, false)} Telegram Premium gift has been sent to {string.Join(", ", names)}.",
+                    markup: new TReplyKeyboardHide());
+                break;
+
+            case PurchaseKind.Stars:
+                await StarsPurchaseHelper.CreditAsync(mongoDatabase, messageAppService, input, purchase.Recipients.FirstOrDefault(),
+                    purchase.Stars, storedInvoice.Currency, storedInvoice.TotalAmount, intent.PaymentIntentId);
+                await SendStarsReceiptAsync(input.UserId, price, purchase, russian);
+                break;
+
+            case PurchaseKind.PremiumGiveaway:
+            case PurchaseKind.StarsGiveaway:
+                await PrepayGiveawayAsync(input.UserId, purchase, price, russian);
+                break;
+        }
+
+        return EmptyPaymentResult();
     }
 
-    private async Task SendInvoiceAsync(long userId, PremiumPeriodOption period, bool russian)
+    /// <summary>
+    /// Links are made out to the user the bot offered them to; Premium is refused to an account it is off
+    /// sale for, and to recipients who may not receive it.
+    /// </summary>
+    private async Task EnsureCanBuyAsync(long userId, BotInvoiceDocument storedInvoice, BotPurchase purchase)
+    {
+        if (purchase.Kind != PurchaseKind.Subscription && storedInvoice.ToPeerId != userId)
+        {
+            RpcErrors.RpcErrors400.InvoiceInvalid.ThrowRpcError();
+        }
+
+        if (purchase.Kind is PurchaseKind.Subscription or PurchaseKind.PremiumGift or PurchaseKind.PremiumGiveaway)
+        {
+            await premiumPurchaseGate.EnsureAllowedAsync(userId);
+        }
+
+        if (purchase.Kind == PurchaseKind.PremiumGift)
+        {
+            foreach (var recipient in purchase.Recipients)
+            {
+                await premiumPurchaseGate.EnsureAllowedAsync(recipient);
+            }
+        }
+    }
+
+    private static TPaymentResult EmptyPaymentResult() => new()
+    {
+        Updates = new TUpdates
+        {
+            Updates = new TVector<IUpdate>(),
+            Users = new TVector<IUser>(),
+            Chats = new TVector<IChat>(),
+            Date = DateTime.UtcNow.ToTimestamp(),
+            Seq = 0
+        }
+    };
+
+    private async Task SendInvoiceAsync(long userId, PremiumPeriodOption period, bool russian, bool upgrade = false,
+        bool offerMonthly = false)
     {
         var inputInvoice = CreateInputInvoice(period, russian);
         var media = await mediaHelper.SaveMediaAsync(inputInvoice);
@@ -252,10 +351,25 @@ public sealed class PremiumBotService(
             })
         });
 
-        var note = russian
-            ? "Оплатите счёт выше, чтобы получить доступ к эксклюзивным функциям, доступным только для подписчиков Telegram Premium."
-            : "Pay the invoice above to get access to exclusive features available only to Telegram Premium subscribers.";
-        var noteBold = russian ? "Оплатите счёт выше".Length : "Pay the invoice above".Length;
+        string note;
+        TVector<IMessageEntity> noteEntities;
+        IReplyMarkup noteMarkup;
+        if (upgrade)
+        {
+            // /upgrade: the longer term is bought now and starts when the current one ends.
+            note = UpgradeNote(russian);
+            noteEntities = new TVector<IMessageEntity>();
+            noteMarkup = new TReplyKeyboardHide();
+        }
+        else
+        {
+            note = russian
+                ? "Оплатите счёт выше, чтобы получить доступ к эксклюзивным функциям, доступным только для подписчиков Telegram Premium."
+                : "Pay the invoice above to get access to exclusive features available only to Telegram Premium subscribers.";
+            var noteBold = russian ? "Оплатите счёт выше".Length : "Pay the invoice above".Length;
+            noteEntities = new TVector<IMessageEntity>(new TMessageEntityBold { Offset = 0, Length = noteBold });
+            noteMarkup = SwitchTermMarkup(period, noteId, russian, offerMonthly);
+        }
 
         // One command, so the note can never overtake the invoice it refers to.
         await messageAppService.SendMessageAsync([
@@ -276,8 +390,8 @@ public sealed class PremiumBotService(
                 new Peer(PeerType.User, userId),
                 note,
                 Random.Shared.NextInt64(),
-                entities: new TVector<IMessageEntity>(new TMessageEntityBold { Offset = 0, Length = noteBold }),
-                replyMarkup: SwitchTermMarkup(period, noteId, russian),
+                entities: noteEntities,
+                replyMarkup: noteMarkup,
                 messageId: noteId)
         ]);
 
@@ -288,9 +402,10 @@ public sealed class PremiumBotService(
 
     /// <summary>
     /// Under a monthly invoice, a switch to two years with its saving per month; under a yearly one, a
-    /// switch to monthly at its price; under the two-year one nothing (real Telegram hides the keyboard).
+    /// switch to monthly at its price; under the two-year one nothing (real Telegram hides the keyboard),
+    /// except when it came from <c>/upgrade</c> without Premium, where it offers monthly too.
     /// </summary>
-    private IReplyMarkup SwitchTermMarkup(PremiumPeriodOption period, int noteId, bool russian)
+    private IReplyMarkup SwitchTermMarkup(PremiumPeriodOption period, int noteId, bool russian, bool offerMonthly)
     {
         var options = premiumOptions.Value;
         var monthly = options.FindSubscription(1);
@@ -306,7 +421,7 @@ public sealed class PremiumBotService(
                 target = 24;
             }
         }
-        else if (period.Months == 12 && monthly != null)
+        else if ((period.Months == 12 || (offerMonthly && period.Months > 1)) && monthly != null)
         {
             var price = FormatPrice(monthly.Amount, russian);
             text = russian ? $"Перейти на ежемесячную за {price} в месяц" : $"Switch to monthly for {price} per month";
@@ -396,6 +511,9 @@ public sealed class PremiumBotService(
                 },
             Invoice = new TInvoice
             {
+                // Recurring, as on real Telegram, only where renewals can really be charged.
+                Recurring = !string.IsNullOrEmpty(serverOptions.CurrentValue.Stripe?.SecretKey),
+                TermsUrl = string.IsNullOrEmpty(serverOptions.CurrentValue.Stripe?.SecretKey) ? null : options.TermsUrl,
                 Currency = options.Currency,
                 Prices = new TVector<ILabeledPrice>(new TLabeledPrice
                 {
@@ -411,31 +529,71 @@ public sealed class PremiumBotService(
         };
     }
 
-    private static int ReadMonths(BotInvoiceDocument storedInvoice)
+    private enum PurchaseKind
+    {
+        Subscription,
+        PremiumGift,
+        PremiumGiveaway,
+        Stars,
+        StarsGiveaway
+    }
+
+    /// <summary>What a bot invoice sells, from its payload.</summary>
+    private sealed record BotPurchase(PurchaseKind Kind, int Months = 0, long ChannelId = 0, int Quantity = 1, long Stars = 0,
+        long[]? RecipientIds = null)
+    {
+        public long[] Recipients => RecipientIds ?? [];
+    }
+
+    /// <summary>
+    /// Payloads: <c>premium:&lt;months&gt;</c>, <c>premium-gift:&lt;months&gt;:&lt;user,…&gt;</c>,
+    /// <c>premium-giveaway:&lt;channel&gt;:&lt;months&gt;:&lt;quantity&gt;</c>, <c>stars:&lt;stars&gt;:&lt;recipient or 0&gt;</c>,
+    /// <c>stars-giveaway:&lt;channel&gt;:&lt;stars&gt;:&lt;winners&gt;</c>.
+    /// </summary>
+    private static BotPurchase ReadPurchase(BotInvoiceDocument storedInvoice)
     {
         var payload = Encoding.UTF8.GetString(storedInvoice.Payload);
-        var months = 0;
-        if (payload.StartsWith(PayloadPrefix, StringComparison.Ordinal))
+        var colon = payload.IndexOf(':');
+        var kind = colon < 0 ? string.Empty : payload[..colon];
+        var parts = colon < 0 ? [] : payload[(colon + 1)..].Split(':');
+        BotPurchase? purchase = null;
+
+        switch (kind)
         {
-            int.TryParse(payload.AsSpan(PayloadPrefix.Length), NumberStyles.None, CultureInfo.InvariantCulture, out months);
+            case "premium" when parts.Length == 1 && TryPositive(parts[0], out var months):
+                purchase = new BotPurchase(PurchaseKind.Subscription, (int)months);
+                break;
+            case "premium-gift" when parts.Length == 2 && TryPositive(parts[0], out var giftMonths):
+                var recipients = parts[1].Split(',').Select(p => TryPositive(p, out var id) ? id : 0).ToArray();
+                if (recipients.Length > 0 && recipients.All(id => id > 0))
+                {
+                    purchase = new BotPurchase(PurchaseKind.PremiumGift, (int)giftMonths, Quantity: recipients.Length, RecipientIds: recipients);
+                }
+
+                break;
+            case "premium-giveaway" when parts.Length == 3 && TryPositive(parts[0], out var channelId) &&
+                                         TryPositive(parts[1], out var giveawayMonths) && TryPositive(parts[2], out var quantity):
+                purchase = new BotPurchase(PurchaseKind.PremiumGiveaway, (int)giveawayMonths, channelId, (int)quantity);
+                break;
+            case "stars" when parts.Length == 2 && TryPositive(parts[0], out var stars) &&
+                              long.TryParse(parts[1], NumberStyles.None, CultureInfo.InvariantCulture, out var starsRecipient):
+                purchase = new BotPurchase(PurchaseKind.Stars, Stars: stars, RecipientIds: starsRecipient > 0 ? [starsRecipient] : []);
+                break;
+            case "stars-giveaway" when parts.Length == 3 && TryPositive(parts[0], out var starsChannelId) &&
+                                       TryPositive(parts[1], out var pool) && TryPositive(parts[2], out var winners):
+                purchase = new BotPurchase(PurchaseKind.StarsGiveaway, ChannelId: starsChannelId, Quantity: (int)winners, Stars: pool);
+                break;
         }
 
-        if (months <= 0)
+        if (purchase == null)
         {
             RpcErrors.RpcErrors400.InvoiceInvalid.ThrowRpcError();
         }
 
-        return months;
-    }
+        return purchase!;
 
-    private async Task SendTextAsync(long userId, string text)
-    {
-        await messageAppService.SendMessageAsync([new SendMessageInput(
-            BotRequest(),
-            BotUserId,
-            new Peer(PeerType.User, userId),
-            text,
-            Random.Shared.NextInt64())]);
+        static bool TryPositive(string value, out long number) =>
+            long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out number) && number > 0;
     }
 
     private async Task SendNotUnderstoodAsync(long userId, bool russian)
@@ -460,6 +618,18 @@ public sealed class PremiumBotService(
         var device = input.PermAuthKeyId != 0
             ? await queryProcessor.ProcessAsync(new GetDeviceByAuthKeyIdQuery(input.PermAuthKeyId))
             : null;
+        return IsRussian(device);
+    }
+
+    /// <summary>For a message nobody asked for (a renewal): the language of the account's latest session.</summary>
+    private async Task<bool> IsRussianAsync(long userId)
+    {
+        var devices = await queryProcessor.ProcessAsync(new GetDeviceByUserIdQuery(userId));
+        return IsRussian(devices.Where(d => d.IsActive).MaxBy(d => d.DateActive));
+    }
+
+    private static bool IsRussian(IDeviceReadModel? device)
+    {
         var language = string.IsNullOrEmpty(device?.LangCode) ? device?.SystemLangCode : device.LangCode;
 
         return language?.StartsWith("ru", StringComparison.OrdinalIgnoreCase) == true;
@@ -507,9 +677,11 @@ public sealed class PremiumBotService(
     }
 
     /// <summary>"299,00 RUB" / "1 990,00 RUB" with no-break spaces, as real Telegram's bot writes prices.</summary>
-    private string FormatPrice(long amount, bool russian)
+    private string FormatPrice(long amount, bool russian) => FormatPrice(amount, premiumOptions.Value.Currency, russian);
+
+    private static string FormatPrice(long amount, string currencyCode, bool russian)
     {
-        var currency = premiumOptions.Value.Currency.ToUpperInvariant();
+        var currency = currencyCode.ToUpperInvariant();
         var format = (NumberFormatInfo)NumberFormatInfo.InvariantInfo.Clone();
         format.NumberGroupSeparator = russian ? "\u00a0" : ",";
         format.NumberDecimalSeparator = russian ? "," : ".";

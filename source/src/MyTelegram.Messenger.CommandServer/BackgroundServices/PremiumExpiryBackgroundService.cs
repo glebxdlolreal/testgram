@@ -7,6 +7,8 @@ namespace MyTelegram.Messenger.CommandServer.BackgroundServices;
 /// <summary>
 /// Drives <see cref="IPremiumSubscriptionService.RevokeExpiredAsync"/>: turns Premium off once an
 /// account's paid term has run out. Nothing did this before, so a one-month purchase lasted forever.
+/// Subscriptions with recurring payments (<see cref="IPremiumAutoRenewService"/>) are charged and
+/// extended just before that.
 /// </summary>
 /// <remarks>
 /// Accounts holding Premium with no recorded term (seeded, or granted on sign-up through
@@ -38,6 +40,14 @@ public class PremiumExpiryBackgroundService(
                     {
                         logger.LogInformation("Normalized {Count} legacy Premium subscription records", count);
                     }
+                }
+
+                // Renewals first: a term about to end is extended before it can be revoked.
+                var autoRenewService = scope.ServiceProvider.GetRequiredService<IPremiumAutoRenewService>();
+                var premiumBotService = scope.ServiceProvider.GetRequiredService<IPremiumBotService>();
+                foreach (var outcome in await autoRenewService.RenewDueAsync(stoppingToken))
+                {
+                    await premiumBotService.NotifyRenewalAsync(outcome);
                 }
 
                 await subscriptionService.RevokeExpiredAsync(stoppingToken);
