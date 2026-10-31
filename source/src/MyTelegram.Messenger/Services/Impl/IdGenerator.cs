@@ -8,7 +8,8 @@ public class IdGenerator(
     IQueryProcessor queryProcessor,
     IHiLoStateBlockSizeHelper stateBlockSizeHelper,
     ILogger<IdGenerator> logger,
-    MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator? channelPtsAllocator = null)
+    MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator? channelPtsAllocator = null,
+    IMessageIdAllocator? messageIdAllocator = null)
     : IIdGenerator, ITransientDependency
 {
     public async Task<int> NextIdAsync(IdType idType,
@@ -29,6 +30,14 @@ public class IdGenerator(
             if (channelPtsAllocator == null)
                 throw new InvalidOperationException("The durable channel Pts authority is not registered.");
             return await channelPtsAllocator.ReserveAsync(id, Guid.NewGuid().ToString("N"), step, cancellationToken);
+        }
+
+        // Message ids come from a counter every process shares; see IMessageIdAllocator.
+        if (idType == IdType.MessageId && messageIdAllocator != null)
+        {
+            var messageId = await messageIdAllocator.NextAsync(id, step, async () => await GetMaxMessageIdAsync(id), cancellationToken);
+            EnsureIdIsInRange(idType, messageId);
+            return messageId;
         }
 
         var sw = Stopwatch.StartNew();
@@ -161,11 +170,18 @@ public class IdGenerator(
         return relativeId > 0 ? relativeId : 0;
     }
 
+    /// <summary>
+    /// The highest message id ever handed out for <paramref name="ownerPeerId"/>. The message read
+    /// model alone is not enough: a deleted message leaves it, so after deleting the newest message and
+    /// a restart its id would be handed out again and the next send would fail on the still existing
+    /// aggregate. The pts read model keeps a high-water mark that deletions do not lower.
+    /// </summary>
     private async Task<int> GetMaxMessageIdAsync(long ownerPeerId)
     {
         int? maxId = await queryProcessor.ProcessAsync(new GetMaxMessageIdByPeerIdQuery(ownerPeerId));
+        var pts = await queryProcessor.ProcessAsync(new GetPtsByPeerIdQuery(ownerPeerId));
 
-        return maxId ?? 0;
+        return Math.Max(maxId ?? 0, pts?.MaxMessageId ?? 0);
     }
 
     private async Task<HiLoValueGeneratorState> GetStateAsync(IdType idType, long id, long oldMaxId)

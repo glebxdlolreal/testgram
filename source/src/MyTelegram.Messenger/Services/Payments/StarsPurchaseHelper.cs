@@ -29,7 +29,9 @@ public static class StarsPurchaseHelper
             gift: true, title: $"Gift {stars} Stars", peerUserId: input.UserId);
 
         await messageAppService.SendMessageAsync([new SendMessageInput(
-            input.ToRequestInfo() with { ReqMsgId = 0 },
+            // Its own request: a send saga is keyed by the request id, so a second message sent on the
+            // caller's request would merge into the first one and be lost.
+            input.ToRequestInfo() with { ReqMsgId = 0, RequestId = Guid.NewGuid() },
             input.UserId,
             new Peer(PeerType.User, recipientUserId),
             string.Empty,
