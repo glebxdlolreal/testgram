@@ -210,13 +210,17 @@ public class PremiumPricingAndLimitTests
         var sounds = new Mock<MyTelegram.Messenger.Services.Emoji.IEmojiSoundAppConfigBuilder>();
         var transcription = new Mock<MyTelegram.Messenger.Services.Transcription.ITranscriptionAppConfigBuilder>();
         var handler = CreateHandler("Help.GetAppConfigHandler", appConfigHelper, sounds.Object, transcription.Object,
-            Gate(blocked).Object);
+            Gate(blocked).Object, PremiumSubscriptionTests.StarsGate(blocked).Object);
 
         var result = (MyTelegram.Schema.Help.TAppConfig)(await InvokeAsync(handler, new MyTelegram.Schema.Help.RequestGetAppConfig { Hash = 0 }))!;
         var values = ((TJsonObject)result.Config).Value.OfType<TJsonObjectValue>().ToList();
 
-        values.Count(v => v.Key == "premium_purchase_blocked").ShouldBe(1);
-        values.Single(v => v.Key == "premium_purchase_blocked").Value.ShouldBeOfType<TJsonBool>().Value.ShouldBe(blocked);
+        foreach (var key in new[] { "premium_purchase_blocked", "stars_purchase_blocked" })
+        {
+            values.Count(v => v.Key == key).ShouldBe(1);
+            values.Single(v => v.Key == key).Value.ShouldBeOfType<TJsonBool>().Value.ShouldBe(blocked);
+        }
+
         (result.Hash == appConfigHelper.GetAppConfigHash()).ShouldBe(!blocked);
     }
 

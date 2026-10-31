@@ -1,5 +1,4 @@
-using System.Collections.Concurrent;
-using MongoDB.Bson;
+using MyTelegram.Messenger.Services.Payments;
 using MongoDB.Driver;
 
 namespace MyTelegram.Messenger.Services.Premium;
@@ -29,48 +28,12 @@ public interface IPremiumPurchaseGate
     Task EnsureAllowedAsync(params long[] userIds);
 }
 
-/// <inheritdoc />
-public sealed class PremiumPurchaseGate(IMongoDatabase mongoDatabase) : IPremiumPurchaseGate, ISingletonDependency
+/// <inheritdoc cref="IPremiumPurchaseGate" />
+public sealed class PremiumPurchaseGate(IMongoDatabase mongoDatabase)
+    : PurchaseBlockList(mongoDatabase, CollectionName), IPremiumPurchaseGate, ISingletonDependency
 {
     public const string CollectionName = "premium-purchase-blocks";
-    public static readonly TimeSpan CacheDuration = TimeSpan.FromSeconds(30);
 
-    private readonly ConcurrentDictionary<long, (bool Blocked, DateTime ReadAt)> _cache = new();
-
-    public async Task<bool> IsBlockedAsync(long userId)
-    {
-        if (userId <= 0)
-        {
-            return false;
-        }
-
-        if (_cache.TryGetValue(userId, out var cached) && DateTime.UtcNow - cached.ReadAt < CacheDuration)
-        {
-            return cached.Blocked;
-        }
-
-        // MongoDB compares numbers by value across Int32/Int64/Double, so a hand-typed {_id: 123}
-        // matches as well.
-        var document = await mongoDatabase.GetCollection<BsonDocument>(CollectionName)
-            .Find(Builders<BsonDocument>.Filter.Eq("_id", userId))
-            .FirstOrDefaultAsync();
-
-        // A document with no Blocked field still means blocked: inserting {_id: id} is the shortest
-        // way to switch an account off by hand.
-        var blocked = document != null && (!document.Contains("Blocked") || document["Blocked"].ToBoolean());
-        _cache[userId] = (blocked, DateTime.UtcNow);
-
-        return blocked;
-    }
-
-    public async Task EnsureAllowedAsync(params long[] userIds)
-    {
-        foreach (var userId in userIds.Distinct())
-        {
-            if (await IsBlockedAsync(userId))
-            {
-                RpcErrors.RpcErrors406.PremiumCurrentlyUnavailable.ThrowRpcError();
-            }
-        }
-    }
+    /// <summary>The one "Premium unavailable" error the API documents (payments.canPurchaseStore).</summary>
+    protected override void ThrowBlocked() => RpcErrors.RpcErrors406.PremiumCurrentlyUnavailable.ThrowRpcError();
 }

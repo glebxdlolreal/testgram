@@ -14,11 +14,14 @@ internal sealed class GetAppConfigHandler(
     IAppConfigHelper appConfigHelper,
     IEmojiSoundAppConfigBuilder emojiSoundAppConfigBuilder,
     ITranscriptionAppConfigBuilder transcriptionAppConfigBuilder,
-    IPremiumPurchaseGate premiumPurchaseGate)
+    IPremiumPurchaseGate premiumPurchaseGate,
+    MyTelegram.Messenger.Services.Payments.IStarsPurchaseGate starsPurchaseGate)
     : RpcResultObjectHandler<Schema.Help.RequestGetAppConfig, Schema.Help.IAppConfig>
 {
     private const string PremiumPurchaseBlockedKey = "premium_purchase_blocked";
     private const int PremiumPurchaseBlockedHashSalt = 0x50524d42;
+    private const string StarsPurchaseBlockedKey = "stars_purchase_blocked";
+    private const int StarsPurchaseBlockedHashSalt = 0x53545242;
 
     protected override async Task<Schema.Help.IAppConfig> HandleCoreAsync(IRequestInput input,
         Schema.Help.RequestGetAppConfig obj)
@@ -71,6 +74,20 @@ internal sealed class GetAppConfigHandler(
             };
 
             hash = unchecked(hash * 31 + PremiumPurchaseBlockedHashSalt);
+        }
+
+        // stars_purchase_blocked likewise: an explicit false for everyone, true for an account Stars are
+        // off sale for, so its clients hide buying them.
+        if (input.UserId != 0 && await starsPurchaseGate.IsBlockedAsync(input.UserId) && config is TJsonObject starsObject)
+        {
+            config = new TJsonObject
+            {
+                Value = new TVector<IJSONObjectValue>(starsObject.Value
+                    .Where(p => p is not TJsonObjectValue { Key: StarsPurchaseBlockedKey })
+                    .Append(new TJsonObjectValue { Key = StarsPurchaseBlockedKey, Value = new TJsonBool { Value = true } }))
+            };
+
+            hash = unchecked(hash * 31 + StarsPurchaseBlockedHashSalt);
         }
 
         if (obj.Hash == hash)

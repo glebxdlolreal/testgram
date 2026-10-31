@@ -64,6 +64,7 @@ public sealed partial class PremiumBotService(
     IUserConverterService userConverterService,
     IOptions<PremiumOptions> premiumOptions,
     IPremiumPurchaseGate premiumPurchaseGate,
+    IStarsPurchaseGate starsPurchaseGate,
     IPremiumSubscriptionService premiumSubscriptionService,
     IPremiumCardCheckout premiumCardCheckout,
     IPremiumAutoRenewService premiumAutoRenewService,
@@ -168,7 +169,8 @@ public sealed partial class PremiumBotService(
     {
         if (await premiumPurchaseGate.IsBlockedAsync(userId))
         {
-            await SendNotUnderstoodAsync(userId, russian);
+            // Off sale for this account: the same answer, without the invoice or anything to press.
+            await SendAsync(userId, InvoiceNote(russian), [InvoiceNoteBold(russian)], new TReplyKeyboardHide());
             return;
         }
 
@@ -242,7 +244,8 @@ public sealed partial class PremiumBotService(
 
         // Paid. What was bought is delivered by the command server, the one process that may send messages.
         await eventBus.PublishAsync(new PremiumBotPaymentSettledEvent(input.UserId, input.PermAuthKeyId, input.Layer, storedInvoice.Id,
-            intent.PaymentIntentId, charge.StripeCustomerId ?? string.Empty, charge.StripePaymentMethodId ?? string.Empty));
+            intent.PaymentIntentId, charge.StripeCustomerId ?? string.Empty, charge.StripePaymentMethodId ?? string.Empty,
+            charge.CredentialsTitle ?? string.Empty));
 
         return EmptyPaymentResult();
     }
@@ -260,7 +263,8 @@ public sealed partial class PremiumBotService(
         }
 
         var purchase = ReadPurchase(storedInvoice);
-        await botInvoicePaymentService.CompleteExternalChargeAsync(Fresh(input), storedInvoice, settled.PaymentIntentId);
+        await botInvoicePaymentService.CompleteExternalChargeAsync(Fresh(input), storedInvoice, settled.PaymentIntentId,
+            settled.CredentialsTitle);
         var russian = await IsRussianAsync(input);
         var price = FormatPrice(storedInvoice.TotalAmount, storedInvoice.Currency, russian);
         switch (purchase.Kind)
@@ -335,6 +339,11 @@ public sealed partial class PremiumBotService(
             await premiumPurchaseGate.EnsureAllowedAsync(userId);
         }
 
+        if (purchase.Kind is PurchaseKind.Stars or PurchaseKind.StarsGiveaway)
+        {
+            await starsPurchaseGate.EnsureAllowedAsync([userId, .. purchase.Recipients]);
+        }
+
         if (purchase.Kind == PurchaseKind.PremiumGift)
         {
             foreach (var recipient in purchase.Recipients)
@@ -394,11 +403,8 @@ public sealed partial class PremiumBotService(
         }
         else
         {
-            note = russian
-                ? "Оплатите счёт выше, чтобы получить доступ к эксклюзивным функциям, доступным только для подписчиков Telegram Premium."
-                : "Pay the invoice above to get access to exclusive features available only to Telegram Premium subscribers.";
-            var noteBold = russian ? "Оплатите счёт выше".Length : "Pay the invoice above".Length;
-            noteEntities = new TVector<IMessageEntity>(new TMessageEntityBold { Offset = 0, Length = noteBold });
+            note = InvoiceNote(russian);
+            noteEntities = new TVector<IMessageEntity>(InvoiceNoteBold(russian));
             noteMarkup = SwitchTermMarkup(period, noteId, russian, offerMonthly);
         }
 
@@ -665,6 +671,13 @@ public sealed partial class PremiumBotService(
 
         return language?.StartsWith("ru", StringComparison.OrdinalIgnoreCase) == true;
     }
+
+    private static string InvoiceNote(bool russian) => russian
+        ? "Оплатите счёт выше, чтобы получить доступ к эксклюзивным функциям, доступным только для подписчиков Telegram Premium."
+        : "Pay the invoice above to get access to exclusive features available only to Telegram Premium subscribers.";
+
+    private static TMessageEntityBold InvoiceNoteBold(bool russian) =>
+        new() { Offset = 0, Length = russian ? "Оплатите счёт выше".Length : "Pay the invoice above".Length };
 
     private static RequestInfo BotRequest() => RequestInfo.Empty with
     {

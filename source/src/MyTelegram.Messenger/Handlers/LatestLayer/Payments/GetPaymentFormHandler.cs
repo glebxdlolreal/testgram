@@ -20,7 +20,8 @@ internal sealed class GetPaymentFormHandler(
     IOptions<PremiumOptions> premiumOptions,
     IPremiumPurchaseGate premiumPurchaseGate,
     IPremiumCardCheckout premiumCardCheckout,
-    IPremiumBotService premiumBotService)
+    IPremiumBotService premiumBotService,
+    IStarsPurchaseGate starsPurchaseGate)
     : RpcResultObjectHandler<RequestGetPaymentForm, IPaymentForm>
 {
     protected override async Task<IPaymentForm> HandleCoreAsync(IRequestInput input, RequestGetPaymentForm obj)
@@ -402,6 +403,12 @@ internal sealed class GetPaymentFormHandler(
         long stars = 0;
         long recipientUserId = 0;
 
+        // Stars off sale for this account (or, for a gift, its recipient): see IStarsPurchaseGate.
+        if (invoice.Purpose is TInputStorePaymentStarsTopup or TInputStorePaymentStarsGiveaway)
+        {
+            await starsPurchaseGate.EnsureAllowedAsync(input.UserId);
+        }
+
         if (invoice.Purpose is TInputStorePaymentStarsTopup topup)
         {
             stars = topup.Stars;
@@ -415,6 +422,7 @@ internal sealed class GetPaymentFormHandler(
             var opt = StripeHelper.TopupOptions.FirstOrDefault(o => o.Stars == gift.Stars);
             amountCents = opt != default ? opt.Amount : gift.Amount;
             recipientUserId = gift.UserId is TInputUser inputUser ? inputUser.UserId : peerHelper.GetPeer(gift.UserId, input.UserId).PeerId;
+            await starsPurchaseGate.EnsureAllowedAsync(input.UserId, recipientUserId);
         }
         else if (invoice.Purpose is TInputStorePaymentStarsGiveaway giveaway)
         {

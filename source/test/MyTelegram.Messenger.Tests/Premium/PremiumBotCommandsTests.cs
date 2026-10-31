@@ -210,6 +210,27 @@ public class PremiumBotCommandsTests
         sent[1].Message.ShouldStartWith("Automatic payment failed. We will try again in several hours.");
     }
 
+    [RequiresMongoDbFact]
+    public async Task Blocked_accounts_get_the_same_answers_with_nothing_to_press()
+    {
+        using var mongo = EmbeddedMongoServer.Start();
+        var sent = new List<SendMessageInput>();
+        var bot = PremiumSubscriptionTests.Bot(mongo.Database, sent, blocked: true, Queries(premium: false).Object, starsBlocked: true);
+
+        await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "/gift");
+        await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "/stars");
+        await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "/giveaway");
+        await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "/stars_giveaway");
+        await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "/upgrade");
+
+        sent.Select(m => m.Message[..12]).ShouldBe(["To gift 🎁 a", "Your current", "To 💰 pay fo", "To 💰 pay fo", "Pay the invo"]);
+        sent.ShouldAllBe(m => m.Media == null && m.ReplyMarkup is TReplyKeyboardHide);
+
+        // Nothing is waiting for an answer: a reply-keyboard text is not understood.
+        await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "Buy Telegram Stars");
+        sent[^1].Message.ShouldStartWith("Sorry, I didn't understand");
+    }
+
     [Fact]
     public void A_settled_payment_crosses_to_the_command_server_intact()
     {

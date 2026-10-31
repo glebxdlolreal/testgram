@@ -381,7 +381,8 @@ public sealed partial class PremiumBotService
         var twoYears = premiumOptions.Value.FindSubscription(24);
         if (twoYears == null || await premiumPurchaseGate.IsBlockedAsync(userId))
         {
-            await SendNotUnderstoodAsync(userId, russian);
+            // OfferAsync answers an account Premium is off sale for without anything to pay.
+            await OfferAsync(userId, 24, russian);
             return;
         }
 
@@ -463,17 +464,19 @@ public sealed partial class PremiumBotService
 
     private async Task StartGiftAsync(long userId, bool russian)
     {
-        if (await premiumPurchaseGate.IsBlockedAsync(userId))
-        {
-            await SendNotUnderstoodAsync(userId, russian);
-            return;
-        }
-
+        var blocked = await premiumPurchaseGate.IsBlockedAsync(userId);
         var gift = russian ? "подарить" : "gift";
         var button = russian ? "Выбрать получателя подарка" : "Select Gift Recipient";
         var text = russian
             ? $"Чтобы {gift} 🎁 подписку Telegram Premium другому пользователю, пожалуйста, воспользуйтесь кнопкой {button}. 👇"
             : $"To {gift} 🎁 a Telegram Premium subscription to another user, please use the {button} button. 👇";
+
+        if (blocked)
+        {
+            // Premium is off sale for this account: the same answer with nothing to press.
+            await SendAsync(userId, text, [Bold(text, gift), Bold(text, button)], new TReplyKeyboardHide());
+            return;
+        }
 
         await SetDialogAsync(userId, StateGift);
         await SendAsync(userId, text, [Bold(text, gift), Bold(text, button)], new TReplyKeyboardMarkup
@@ -549,13 +552,21 @@ public sealed partial class PremiumBotService
         var balanceOffset = text.IndexOf(amount, StringComparison.Ordinal);
         var buyOffset = text.IndexOf(buy, balanceOffset + amount.Length, StringComparison.Ordinal);
 
+        IMessageEntity[] entities =
+        [
+            new TMessageEntityBold { Offset = balanceOffset, Length = amount.Length },
+            new TMessageEntityItalic { Offset = buyOffset, Length = buy.Length },
+            new TMessageEntityItalic { Offset = text.IndexOf(gift, buyOffset + buy.Length, StringComparison.Ordinal), Length = gift.Length }
+        ];
+        if (await starsPurchaseGate.IsBlockedAsync(userId))
+        {
+            // Stars are off sale for this account: the balance, with nothing to press.
+            await SendAsync(userId, text, entities, new TReplyKeyboardHide());
+            return;
+        }
+
         await SetDialogAsync(userId, StateStars);
-        await SendAsync(userId, text,
-            [
-                new TMessageEntityBold { Offset = balanceOffset, Length = amount.Length },
-                new TMessageEntityItalic { Offset = buyOffset, Length = buy.Length },
-                new TMessageEntityItalic { Offset = text.IndexOf(gift, buyOffset + buy.Length, StringComparison.Ordinal), Length = gift.Length }
-            ],
+        await SendAsync(userId, text, entities,
             new TReplyKeyboardMarkup
             {
                 Resize = true,
@@ -575,6 +586,13 @@ public sealed partial class PremiumBotService
     /// <summary>The Stars packs on sale, each a link to its top-up (or, for a friend, gift) invoice.</summary>
     private async Task SendStarsPacksAsync(long userId, IUserReadModel? recipient, bool russian)
     {
+        if (await starsPurchaseGate.IsBlockedAsync(userId) ||
+            (recipient != null && await starsPurchaseGate.IsBlockedAsync(recipient.UserId)))
+        {
+            await SendNotUnderstoodAsync(userId, russian);
+            return;
+        }
+
         await SendAsync(userId, "⭐️", markup: new TReplyKeyboardHide());
 
         var rows = new TVector<IKeyboardButtonRow>();
@@ -614,11 +632,7 @@ public sealed partial class PremiumBotService
 
     private async Task StartGiveawayAsync(long userId, bool stars, bool russian)
     {
-        if (!stars && await premiumPurchaseGate.IsBlockedAsync(userId))
-        {
-            await SendNotUnderstoodAsync(userId, russian);
-            return;
-        }
+        var blocked = stars ? await starsPurchaseGate.IsBlockedAsync(userId) : await premiumPurchaseGate.IsBlockedAsync(userId);
 
         var prize = russian
             ? stars ? "Звёзды Telegram" : "подписки Telegram Premium"
@@ -666,6 +680,13 @@ public sealed partial class PremiumBotService
                     MaxQuantity = 1
                 }))
         };
+
+        if (blocked)
+        {
+            // Off sale for this account: the same answer with nothing to press.
+            await SendAsync(userId, text, entities, new TReplyKeyboardHide());
+            return;
+        }
 
         await SetDialogAsync(userId, stars ? StateGiveawayStars : StateGiveawayPremium);
         await SendAsync(userId, text, entities, markup);
@@ -746,7 +767,7 @@ public sealed partial class PremiumBotService
             !long.TryParse(parts[0], NumberStyles.None, CultureInfo.InvariantCulture, out var channelId) ||
             await queryProcessor.ProcessAsync(new GetChannelByIdQuery(channelId)) is not { } channel ||
             !IsGiveawayAdmin(channel, userId) ||
-            (!stars && await premiumPurchaseGate.IsBlockedAsync(userId)))
+            (stars ? await starsPurchaseGate.IsBlockedAsync(userId) : await premiumPurchaseGate.IsBlockedAsync(userId)))
         {
             await SendNotUnderstoodAsync(userId, russian);
             return;

@@ -35,9 +35,11 @@ public sealed record PremiumCardForm(long FormId, string NativeProvider, string 
 
 /// <summary>
 /// A settled charge. The customer and card are set only when the intent asked to keep the card
-/// (<see cref="StripePaymentIntentDocument.SaveCardForRenewal"/>) and Stripe really charged it.
+/// (<see cref="StripePaymentIntentDocument.SaveCardForRenewal"/>) and Stripe really charged it;
+/// <see cref="CredentialsTitle"/> ("Visa •••• 4242") whenever a card was charged, for the receipt.
 /// </summary>
-public sealed record PremiumCardCharge(bool Verified, string? StripeCustomerId, string? StripePaymentMethodId);
+public sealed record PremiumCardCharge(bool Verified, string? StripeCustomerId, string? StripePaymentMethodId,
+    string? CredentialsTitle = null);
 
 /// <inheritdoc />
 public sealed class PremiumCardCheckout(
@@ -177,9 +179,13 @@ public sealed class PremiumCardCheckout(
         logger.LogInformation("Premium card payment settled: formId={FormId} userId={UserId} kind={Kind} amount={Amount} {Currency} verified={Verified}",
             intent.FormId, intent.UserId, intent.PremiumKind, intent.Amount, intent.Currency, chargeVerified);
 
-        return customerId != null && paymentMethodId != null
-            ? new PremiumCardCharge(chargeVerified, customerId, paymentMethodId)
-            : new PremiumCardCharge(chargeVerified, null, null);
+        string? credentialsTitle = null;
+        if (paymentMethodId != null)
+        {
+            credentialsTitle = await StripeHelper.GetPaymentMethodTitleAsync(stripe.SecretKey!, paymentMethodId);
+        }
+
+        return new PremiumCardCharge(chargeVerified, customerId, customerId != null ? paymentMethodId : null, credentialsTitle);
     }
 
     private static bool IsPaid(string status) => status is "succeeded" or "requires_capture";

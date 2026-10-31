@@ -216,8 +216,9 @@ public class PremiumSubscriptionTests
         await bot.HandleMessageAsync(Input(), "/start 12");
         await bot.HandleCallbackAsync(Input(), "init/24M/1");
 
+        // The same answer as for anyone else, minus the invoice and anything to press.
         sent.Count.ShouldBe(3);
-        sent.ShouldAllBe(m => m.Media == null && m.Message == "Sorry, I didn't understand your request. Send the /start command");
+        sent.ShouldAllBe(m => m.Media == null && m.Message.StartsWith("Pay the invoice above") && m.ReplyMarkup is TReplyKeyboardHide);
         (await mongo.Database.GetCollection<BotInvoiceDocument>(BotInvoiceHelper.CollectionName)
             .CountDocumentsAsync(FilterDefinition<BotInvoiceDocument>.Empty)).ShouldBe(0);
     }
@@ -243,7 +244,7 @@ public class PremiumSubscriptionTests
 
     internal static PremiumBotService Bot(IMongoDatabase database, List<SendMessageInput> sent, bool blocked,
         IQueryProcessor? queries = null, IPremiumAutoRenewService? autoRenew = null, IPremiumSubscriptionService? subscriptions = null,
-        ICommandBus? commandBus = null)
+        ICommandBus? commandBus = null, bool starsBlocked = false)
     {
         var messages = new Mock<IMessageAppService>();
         messages.Setup(m => m.SendMessageAsync(It.IsAny<List<SendMessageInput>>()))
@@ -271,11 +272,18 @@ public class PremiumSubscriptionTests
 
         return new PremiumBotService(database, messages.Object, media.Object, ids.Object, queries ?? new Mock<IQueryProcessor>().Object,
             new Mock<IUserConverterService>().Object, Microsoft.Extensions.Options.Options.Create(new PremiumOptions()),
-            PremiumPricingAndLimitTests.Gate(blocked).Object, subscriptions ?? new Mock<IPremiumSubscriptionService>().Object,
+            PremiumPricingAndLimitTests.Gate(blocked).Object, StarsGate(starsBlocked).Object, subscriptions ?? new Mock<IPremiumSubscriptionService>().Object,
             new Mock<IPremiumCardCheckout>().Object, autoRenew ?? new Mock<IPremiumAutoRenewService>().Object,
             new Mock<IPremiumGiftService>().Object, new Mock<IPremiumWelcomeNotifier>().Object, new Mock<MyTelegram.EventBus.IEventBus>().Object, commandBus ?? new Mock<ICommandBus>().Object, new Mock<MyTelegram.Services.Services.IDataEncryptionHelper>().Object,
             serverOptions.Object, new Mock<IBotInvoicePaymentService>().Object,
             registrar.Object, proxy.Object, NullLogger<PremiumBotService>.Instance);
+    }
+
+    internal static Mock<IStarsPurchaseGate> StarsGate(bool blocked)
+    {
+        var gate = new Mock<IStarsPurchaseGate>();
+        gate.Setup(g => g.IsBlockedAsync(It.IsAny<long>())).ReturnsAsync(blocked);
+        return gate;
     }
 
     internal static IRequestInput Input()

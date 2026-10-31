@@ -34,7 +34,9 @@ public interface IBotInvoicePaymentService
     /// invoice): the <c>messageActionPaymentSent</c> receipt, <c>receipt_msg_id</c> on the invoice
     /// message and the stored receipt <c>payments.getPaymentReceipt</c> reads.
     /// </summary>
-    Task CompleteExternalChargeAsync(IRequestInput input, BotInvoiceDocument storedInvoice, string chargeId);
+    /// <param name="credentialsTitle">How the card shows on the receipt ("Visa •••• 4242"), when known.</param>
+    Task CompleteExternalChargeAsync(IRequestInput input, BotInvoiceDocument storedInvoice, string chargeId,
+        string? credentialsTitle = null);
 }
 
 public class BotInvoicePaymentService(
@@ -52,10 +54,11 @@ public class BotInvoicePaymentService(
     private static readonly TimeSpan PrecheckoutTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PrecheckoutPollInterval = TimeSpan.FromMilliseconds(500);
 
-    public Task CompleteExternalChargeAsync(IRequestInput input, BotInvoiceDocument storedInvoice, string chargeId)
+    public Task CompleteExternalChargeAsync(IRequestInput input, BotInvoiceDocument storedInvoice, string chargeId,
+        string? credentialsTitle = null)
     {
         return CompleteAsync(input, storedInvoice, BotInvoiceHelper.ReadInvoice(storedInvoice), chargeId,
-            requestedInfo: null, shippingOptionId: null);
+            requestedInfo: null, shippingOptionId: null, credentialsTitle);
     }
 
     public async Task<bool> CanHandleAsync(IRequestInput input, IInputInvoice invoice)
@@ -416,7 +419,8 @@ public class BotInvoicePaymentService(
         IInvoice invoiceDetails,
         string chargeId,
         IPaymentRequestedInfo? requestedInfo,
-        string? shippingOptionId)
+        string? shippingOptionId,
+        string? credentialsTitle = null)
     {
         // The buyer is the sender of the service message, so its id comes from the buyer's id space —
         // the same one payments.getPaymentReceipt will quote back.
@@ -477,6 +481,7 @@ public class BotInvoicePaymentService(
             TransactionId = chargeId,
             Info = requestedInfo?.ToBytes(),
             ShippingOptionId = shippingOptionId,
+            CredentialsTitle = string.IsNullOrEmpty(credentialsTitle) ? null : credentialsTitle,
             InvoiceSlug = storedInvoice.Slug
         });
 

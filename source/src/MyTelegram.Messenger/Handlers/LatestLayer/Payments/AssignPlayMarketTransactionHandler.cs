@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Payments;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.StarGifts;
@@ -31,7 +32,8 @@ internal sealed class AssignPlayMarketTransactionHandler(
     IMongoDatabase mongoDatabase,
     IOptions<MyTelegramMessengerServerOptions> options,
     IObjectMessageSender objectMessageSender,
-    IPremiumStorePurchaseService premiumStorePurchaseService)
+    IPremiumStorePurchaseService premiumStorePurchaseService,
+    IStarsPurchaseGate starsPurchaseGate)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestAssignPlayMarketTransaction, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(
@@ -54,6 +56,9 @@ internal sealed class AssignPlayMarketTransactionHandler(
                 obj.Purpose, ReadProductId(receiptJson!));
             return StoreTransactionHelper.EmptyUpdates();
         }
+
+        // Everything past here credits Stars.
+        await starsPurchaseGate.EnsureAllowedAsync(input.UserId);
 
         var collection = mongoDatabase.GetCollection<StripePaymentIntentDocument>("stripe-payment-intents");
         var userId = input.UserId;

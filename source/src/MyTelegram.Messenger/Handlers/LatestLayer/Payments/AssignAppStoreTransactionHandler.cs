@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Payments;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.StarGifts;
@@ -22,7 +23,8 @@ internal sealed class AssignAppStoreTransactionHandler(
     IMongoDatabase mongoDatabase,
     IOptions<MyTelegramMessengerServerOptions> options,
     IObjectMessageSender objectMessageSender,
-    IPremiumStorePurchaseService premiumStorePurchaseService)
+    IPremiumStorePurchaseService premiumStorePurchaseService,
+    IStarsPurchaseGate starsPurchaseGate)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestAssignAppStoreTransaction, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(
@@ -44,6 +46,7 @@ internal sealed class AssignAppStoreTransactionHandler(
                 return StoreTransactionHelper.EmptyUpdates();
 
             case TInputStorePaymentStarsTopup topup:
+                await starsPurchaseGate.EnsureAllowedAsync(input.UserId);
                 await SettleStarsTopupAsync(input.UserId, obj.Receipt, topup.Stars);
                 return StoreTransactionHelper.EmptyUpdates();
 

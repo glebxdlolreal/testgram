@@ -50,6 +50,27 @@ internal sealed class GetPaymentReceiptHandler(
             users.Add(userConverterService.ToUser(input, bot, layer: input.Layer));
         }
 
+        // Paid by card: the ordinary receipt (clients open the card check for it, and the Stars
+        // transaction screen for paymentReceiptStars).
+        if (receipt.Currency != BotInvoiceHelper.StarsCurrency)
+        {
+            return new MyTelegram.Schema.Payments.TPaymentReceipt
+            {
+                Date = receipt.Date,
+                BotId = receipt.BotId,
+                // The bots that sell for money here are their own payment provider (see the payment form).
+                ProviderId = receipt.BotId,
+                Title = receipt.Title,
+                Description = receipt.Description,
+                Photo = PaymentReceiptHelper.ReadPhoto(receipt),
+                Invoice = PaymentReceiptHelper.ReadInvoice(receipt),
+                Currency = receipt.Currency,
+                TotalAmount = receipt.TotalAmount,
+                CredentialsTitle = receipt.CredentialsTitle ?? "Card",
+                Users = users
+            };
+        }
+
         return new MyTelegram.Schema.Payments.TPaymentReceiptStars
         {
             Date = receipt.Date,

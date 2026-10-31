@@ -28,7 +28,8 @@ internal sealed class SendPaymentFormHandler(
     IPremiumGiftService premiumGiftService,
     IPremiumSubscriptionService premiumSubscriptionService,
     IPremiumBotService premiumBotService,
-    IPremiumWelcomeNotifier premiumWelcomeNotifier)
+    IPremiumWelcomeNotifier premiumWelcomeNotifier,
+    IStarsPurchaseGate starsPurchaseGate)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestSendPaymentForm, MyTelegram.Schema.Payments.IPaymentResult>
 {
     protected override async Task<MyTelegram.Schema.Payments.IPaymentResult> HandleCoreAsync(
@@ -71,6 +72,12 @@ internal sealed class SendPaymentFormHandler(
 
         if (intent == null)
             RpcErrors.RpcErrors400.PaymentProviderInvalid.ThrowRpcError();
+
+        // Checked again at payment time: a block switched on after the form was issued still applies.
+        if (intent!.PremiumKind == null)
+        {
+            await starsPurchaseGate.EnsureAllowedAsync(input.UserId, intent.RecipientUserId);
+        }
 
         var stripe = options.Value.Stripe;
         var credentialsJson = (obj.Credentials as TInputPaymentCredentials)?.Data?.Data ?? "{}";

@@ -17,7 +17,8 @@ public sealed record PremiumBotPaymentSettledEvent(
     string StoredInvoiceId,
     string PaymentIntentId,
     string StripeCustomerId,
-    string StripePaymentMethodId);
+    string StripePaymentMethodId,
+    string CredentialsTitle = "");
 
 /// <summary>Asks the command server to send the 777000 "Thank you for subscribing" note, for the same reason.</summary>
 public sealed record PremiumWelcomeRequestedEvent(long UserId);
@@ -28,7 +29,7 @@ public sealed class PremiumBotPaymentSettledEventDataSerializer
 {
     public void Serialize(IBufferWriter<byte> writer, PremiumBotPaymentSettledEvent data)
     {
-        string[] texts = [data.StoredInvoiceId, data.PaymentIntentId, data.StripeCustomerId, data.StripePaymentMethodId];
+        string[] texts = [data.StoredInvoiceId, data.PaymentIntentId, data.StripeCustomerId, data.StripePaymentMethodId, data.CredentialsTitle];
         var encoded = texts.Select(Encoding.UTF8.GetBytes).ToArray();
         var size = 20 + encoded.Sum(e => 4 + e.Length);
         var span = writer.GetSpan(size);
@@ -50,7 +51,7 @@ public sealed class PremiumBotPaymentSettledEventDataSerializer
     {
         var span = buffer.Span;
         var offset = 20;
-        var texts = new string[4];
+        var texts = new string[5];
         for (var i = 0; i < texts.Length; i++)
         {
             var length = BinaryPrimitives.ReadInt32LittleEndian(span[offset..]);
@@ -62,7 +63,7 @@ public sealed class PremiumBotPaymentSettledEventDataSerializer
             BinaryPrimitives.ReadInt64LittleEndian(span),
             BinaryPrimitives.ReadInt64LittleEndian(span[8..]),
             BinaryPrimitives.ReadInt32LittleEndian(span[16..]),
-            texts[0], texts[1], texts[2], texts[3]);
+            texts[0], texts[1], texts[2], texts[3], texts[4]);
     }
 
     public object Deserialize(Type type, ReadOnlyMemory<byte> buffer) => Deserialize(buffer);

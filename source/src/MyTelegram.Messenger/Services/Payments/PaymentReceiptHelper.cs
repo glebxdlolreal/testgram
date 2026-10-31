@@ -45,6 +45,9 @@ public sealed class PaymentReceiptDocument
 
     public string? ShippingOptionId { get; set; }
     public string? InvoiceSlug { get; set; }
+
+    /// <summary>The card a money payment was made with, as <c>paymentReceipt.credentials_title</c> shows it.</summary>
+    public string? CredentialsTitle { get; set; }
 }
 
 public static class PaymentReceiptHelper
