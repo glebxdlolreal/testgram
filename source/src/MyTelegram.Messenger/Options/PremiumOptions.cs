@@ -52,6 +52,9 @@ public class PremiumOptions
 
     public List<PremiumPeriodOption>? Periods { get; set; }
 
+    /// <summary>How fast accounts without Premium may upload and download, see <see cref="PremiumSpeedLimitOptions"/>.</summary>
+    public PremiumSpeedLimitOptions SpeedLimit { get; set; } = new();
+
     /// <summary>The configured terms, ordered by length, with invalid rows dropped.</summary>
     public IReadOnlyList<PremiumPeriodOption> GetPeriods()
     {
@@ -73,4 +76,30 @@ public class PremiumOptions
     /// <summary>A term sold as a gift.</summary>
     public PremiumPeriodOption? FindGift(int months) =>
         GetPeriods().FirstOrDefault(p => p.Months == months && p.Gift);
+}
+
+/// <summary>
+/// The upload/download speed cap for accounts without Premium. Past it the server answers
+/// <c>upload.saveFilePart</c>, <c>upload.saveBigFilePart</c> and <c>upload.getFile</c> with
+/// <c>420 FLOOD_PREMIUM_WAIT_X</c>: the client retries by itself after X seconds and offers Premium
+/// to speed the transfer up. See https://corefork.telegram.org/api/files
+/// </summary>
+/// <remarks>
+/// Bound from <c>Premium:SpeedLimit</c>, e.g. <c>Premium__SpeedLimit__Enabled=false</c>,
+/// <c>Premium__SpeedLimit__UploadBytesPerSecond=1048576</c>. Each account first gets
+/// <see cref="BurstBytes"/> at full speed in each direction; the allowance then refills at the
+/// configured rate, so a short transfer never notices the cap and a long one settles at it.
+/// </remarks>
+public class PremiumSpeedLimitOptions
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Sustained upload rate for an account without Premium, in bytes per second.</summary>
+    public long UploadBytesPerSecond { get; set; } = 1024 * 1024;
+
+    /// <summary>Sustained download rate for an account without Premium, in bytes per second.</summary>
+    public long DownloadBytesPerSecond { get; set; } = 1024 * 1024;
+
+    /// <summary>How much an account may move at full speed before the cap applies, per direction.</summary>
+    public long BurstBytes { get; set; } = 512L * 1024 * 1024;
 }

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Options;
 using MyTelegram.Messenger.Services.Phone;
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.QueryServer.Services;
 using MyTelegram.Schema;
 using MyTelegram.Schema.Extensions;
@@ -22,7 +23,9 @@ public sealed class FileDownloadLaneRouter(
     IRabbitMqSerializer rabbitMqSerializer,
     MessengerQueryDataProcessor queryDataProcessor,
     IFileReferenceHelper fileReferenceHelper,
-    IUserAccessHashKeyCache userAccessHashKeyCache)
+    IUserAccessHashKeyCache userAccessHashKeyCache,
+    IPremiumTransferSpeedLimiter speedLimiter,
+    IObjectMessageSender objectMessageSender)
     : BackgroundService, IFileDownloadLaneRouter, IDisposable
 {
     private const string SourceExchange = "mytelegram_exchange";
@@ -32,6 +35,10 @@ public sealed class FileDownloadLaneRouter(
     private const string DirectFileServerQueue = "MyTelegramFileServer";
     private const string FileServerQueue = "MyTelegramFileServerRaw";
     private const uint InputGroupCallStreamConstructorId = 0x0598a92a;
+    private const int FloodErrorCode = 420;
+
+    // What a getFile is charged when its limit cannot be read: the largest part clients ask for.
+    private const int MaxGetFileLimit = 1024 * 1024;
     private static readonly string[] RoutedKeys =
     [
         nameof(DownloadDataReceivedEvent),
@@ -55,6 +62,11 @@ public sealed class FileDownloadLaneRouter(
 
     private async Task ForwardAsync(DataReceivedEvent eventData, string routingKey)
     {
+        if (await TryThrottleAsync(eventData))
+        {
+            return;
+        }
+
         using var writer = new CommunityToolkit.HighPerformance.Buffers.ArrayPoolBufferWriter<byte>();
         rabbitMqSerializer.Serialize(writer, eventData);
         await ForwardRawAsync(writer.WrittenMemory, routingKey);
@@ -172,7 +184,7 @@ public sealed class FileDownloadLaneRouter(
             case nameof(UploadDataReceivedEvent):
             {
                 var eventData = rabbitMqSerializer.Deserialize<UploadDataReceivedEvent>(body);
-                if (await TryRerouteGroupCallStreamFileAsync(eventData))
+                if (await TryRerouteGroupCallStreamFileAsync(eventData) || await TryThrottleAsync(eventData))
                 {
                     return;
                 }
@@ -183,7 +195,7 @@ public sealed class FileDownloadLaneRouter(
             case nameof(DownloadDataReceivedEvent):
             {
                 var eventData = rabbitMqSerializer.Deserialize<DownloadDataReceivedEvent>(body);
-                if (await TryRerouteGroupCallStreamFileAsync(eventData))
+                if (await TryRerouteGroupCallStreamFileAsync(eventData) || await TryThrottleAsync(eventData))
                 {
                     return;
                 }
@@ -194,7 +206,7 @@ public sealed class FileDownloadLaneRouter(
         }
 
         var uploadEvent = TryDeserialize<UploadDataReceivedEvent>(body);
-        if (uploadEvent is not null && await TryRerouteGroupCallStreamFileAsync(uploadEvent))
+        if (uploadEvent is not null && (await TryRerouteGroupCallStreamFileAsync(uploadEvent) || await TryThrottleAsync(uploadEvent)))
         {
             return;
         }
@@ -206,7 +218,7 @@ public sealed class FileDownloadLaneRouter(
         }
 
         var downloadEvent = TryDeserialize<DownloadDataReceivedEvent>(body);
-        if (downloadEvent is not null && await TryRerouteGroupCallStreamFileAsync(downloadEvent))
+        if (downloadEvent is not null && (await TryRerouteGroupCallStreamFileAsync(downloadEvent) || await TryThrottleAsync(downloadEvent)))
         {
             return;
         }
@@ -222,6 +234,86 @@ public sealed class FileDownloadLaneRouter(
             routingKey,
             body.Length);
         await ForwardRawAsync(body, routingKey);
+    }
+
+    /// <summary>
+    /// Answers a file part with <c>420 FLOOD_PREMIUM_WAIT_X</c> instead of forwarding it when an account
+    /// without Premium is past its speed cap. This router is the only place that sees every part on its way
+    /// to the closed file-server, which has no such limit of its own. A part refused here never reaches the
+    /// file-server, and the client sends it again after X seconds, so nothing is lost or written twice.
+    /// See https://corefork.telegram.org/api/files
+    /// </summary>
+    private async Task<bool> TryThrottleAsync(DataReceivedEvent eventData)
+    {
+        var transfer = GetTransfer(eventData);
+        if (transfer == null)
+        {
+            return false;
+        }
+
+        int wait;
+        try
+        {
+            wait = await speedLimiter.AcquireAsync(eventData.UserId, transfer.Value.Direction, transfer.Value.Bytes);
+        }
+        catch (Exception ex)
+        {
+            // The limit is a courtesy to Premium, never a reason to stall a transfer.
+            logger.LogWarning(ex, "Failed to check the Premium speed limit, forwarding, reqMsgId: {ReqMsgId}", eventData.ReqMsgId);
+            return false;
+        }
+
+        if (wait == 0)
+        {
+            return false;
+        }
+
+        logger.LogDebug(
+            "Speed limit: {Direction} by user {UserId} told to wait {Wait}s, reqMsgId: {ReqMsgId}",
+            transfer.Value.Direction,
+            eventData.UserId,
+            wait,
+            eventData.ReqMsgId);
+
+        var input = new RequestInput(eventData.ConnectionId, eventData.ConnectionType, eventData.RequestId, eventData.ObjectId,
+            eventData.ReqMsgId, eventData.SeqNumber, eventData.UserId, eventData.AuthKeyId, eventData.PermAuthKeyId,
+            eventData.Layer, eventData.Date, eventData.DeviceType, eventData.ClientIp, eventData.SessionId,
+            eventData.AccessHashKeyId);
+        await objectMessageSender.SendMessageToPeerAsync(input.ToRequestInfo(), new TRpcResult
+        {
+            ReqMsgId = eventData.ReqMsgId,
+            Result = new TRpcError { ErrorCode = FloodErrorCode, ErrorMessage = $"FLOOD_PREMIUM_WAIT_{wait}" }
+        });
+        return true;
+    }
+
+    /// <summary>The direction and size of a file part, or <c>null</c> for anything that is not one.</summary>
+    private (FileTransferDirection Direction, long Bytes)? GetTransfer(DataReceivedEvent eventData)
+    {
+        switch (eventData.ObjectId)
+        {
+            case ObjectIdConsts.SaveFilePartObjectId:
+            case ObjectIdConsts.SaveBigFilePartObjectId:
+                // The part is nearly all of the request; parsing it would only copy it.
+                return (FileTransferDirection.Upload, eventData.Data.Length);
+            case ObjectIdConsts.GetFileObjectId:
+            case ObjectIdConsts.GetFileObjectIdLayer143:
+                try
+                {
+                    if (eventData.Data.ToTObject<IObject>() is RequestGetFile { Limit: > 0 } request)
+                    {
+                        return (FileTransferDirection.Download, Math.Min(request.Limit, MaxGetFileLimit));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.LogDebug(ex, "Failed to read the limit of upload.getFile, reqMsgId: {ReqMsgId}", eventData.ReqMsgId);
+                }
+
+                return (FileTransferDirection.Download, MaxGetFileLimit);
+            default:
+                return null;
+        }
     }
 
     private TEventData? TryDeserialize<TEventData>(ReadOnlyMemory<byte> body)

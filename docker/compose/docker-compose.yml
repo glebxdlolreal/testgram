@@ -647,6 +647,12 @@ services:
       App__Stripe__SecretKey: ${App__Stripe__SecretKey}
       # Telegram Premium prices are in this currency; the terms default to PremiumOptions.DefaultPeriods.
       Premium__Currency: ${Premium__Currency:-USD}
+      # Speed cap for accounts without Premium: past it file parts get 420 FLOOD_PREMIUM_WAIT_X.
+      # Enforced in the file lane router, see https://corefork.telegram.org/api/files
+      Premium__SpeedLimit__Enabled: ${Premium__SpeedLimit__Enabled:-true}
+      Premium__SpeedLimit__UploadBytesPerSecond: ${Premium__SpeedLimit__UploadBytesPerSecond:-1048576}
+      Premium__SpeedLimit__DownloadBytesPerSecond: ${Premium__SpeedLimit__DownloadBytesPerSecond:-1048576}
+      Premium__SpeedLimit__BurstBytes: ${Premium__SpeedLimit__BurstBytes:-536870912}
       EmailSenderOptions__Enabled: ${EmailSenderOptions__Enabled}
       EmailSenderOptions__FromAddress: ${EmailSenderOptions__FromAddress}
       EmailSenderOptions__FromDisplayName: ${EmailSenderOptions__FromDisplayName}
