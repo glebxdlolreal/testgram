@@ -260,7 +260,7 @@ public sealed partial class PremiumBotService(
         }
 
         var purchase = ReadPurchase(storedInvoice);
-        await botInvoicePaymentService.CompleteExternalChargeAsync(input, storedInvoice, settled.PaymentIntentId);
+        await botInvoicePaymentService.CompleteExternalChargeAsync(Fresh(input), storedInvoice, settled.PaymentIntentId);
         var russian = await IsRussianAsync(input);
         var price = FormatPrice(storedInvoice.TotalAmount, storedInvoice.Currency, russian);
         switch (purchase.Kind)
@@ -286,7 +286,7 @@ public sealed partial class PremiumBotService(
                 var names = new List<string>();
                 foreach (var recipient in purchase.Recipients)
                 {
-                    await premiumGiftService.DeliverAsync(input, recipient, purchase.Months, storedInvoice.Currency,
+                    await premiumGiftService.DeliverAsync(Fresh(input), recipient, purchase.Months, storedInvoice.Currency,
                         storedInvoice.TotalAmount / purchase.Recipients.Length, null, "premium-bot-gift");
                     var user = await queryProcessor.ProcessAsync(new GetUserByIdQuery(recipient));
                     names.Add(user == null ? recipient.ToString(CultureInfo.InvariantCulture) : DisplayName(user));
@@ -294,12 +294,12 @@ public sealed partial class PremiumBotService(
 
                 await SendAsync(input.UserId, russian
                     ? $"Спасибо! Получен платёж на сумму {price}.\nПодарочная подписка Telegram Premium на {MonthsText(purchase.Months, true)} отправлена: {string.Join(", ", names)}."
-                    : $"Thank you! We received the payment for {price}.\nA {MonthsText(purchase.Months, false)} Telegram Premium gift has been sent to {string.Join(", ", names)}.",
+                    : $"Thank you! We received the payment for {price}.\nA {purchase.Months}-month Telegram Premium gift has been sent to {string.Join(", ", names)}.",
                     markup: new TReplyKeyboardHide());
                 break;
 
             case PurchaseKind.Stars:
-                await StarsPurchaseHelper.CreditAsync(mongoDatabase, messageAppService, input, purchase.Recipients.FirstOrDefault(),
+                await StarsPurchaseHelper.CreditAsync(mongoDatabase, messageAppService, Fresh(input), purchase.Recipients.FirstOrDefault(),
                     purchase.Stars, storedInvoice.Currency, storedInvoice.TotalAmount, settled.PaymentIntentId);
                 await SendStarsReceiptAsync(input.UserId, price, purchase, russian);
                 break;
@@ -311,6 +311,13 @@ public sealed partial class PremiumBotService(
         }
 
     }
+
+    /// <summary>
+    /// The same request with its own id. A message send saga is keyed by the request id, so two messages
+    /// sent on one request (the receipt, then a gift) merge and the second is silently lost.
+    /// </summary>
+    private static IRequestInput Fresh(IRequestInput input) =>
+        input is RequestInput request ? request with { RequestId = Guid.NewGuid() } : input;
 
     /// <summary>
     /// Links are made out to the user the bot offered them to; Premium is refused to an account it is off

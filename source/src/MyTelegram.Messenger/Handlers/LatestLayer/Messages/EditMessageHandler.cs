@@ -457,16 +457,17 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
             var isPaused = await pausedCollection.Find(pausedFilter).AnyAsync();
             if (isPaused) continue;
 
-            // Check if peer is in ExcludeUsers
-            var recipientsDoc = conn["Recipients"].AsBsonDocument;
-            if (recipientsDoc.Contains("ExcludeUsers"))
+            // Optional parts of a connection are stored as null when unset; reading them as arrays or
+            // documents regardless failed every edit in a chat of a user with a business bot.
+            if (conn.GetValue("Recipients", BsonNull.Value) is BsonDocument recipientsDoc &&
+                recipientsDoc.GetValue("ExcludeUsers", BsonNull.Value) is BsonArray excludeArray &&
+                excludeArray.Any(u => u.ToInt64() == peerId))
             {
-                var excludeArray = recipientsDoc["ExcludeUsers"].AsBsonArray;
-                if (excludeArray.Any(u => u.AsInt64 == peerId)) continue;
+                continue;
             }
 
             // Check if bot has ReadMessages right
-            var rightsDoc = conn["Rights"].AsBsonDocument;
+            if (conn.GetValue("Rights", BsonNull.Value) is not BsonDocument rightsDoc) continue;
             if (!rightsDoc.Contains("ReadMessages") || !rightsDoc["ReadMessages"].AsBoolean)
                 continue;
 
