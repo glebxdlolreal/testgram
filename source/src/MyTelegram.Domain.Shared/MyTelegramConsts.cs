@@ -38,6 +38,14 @@ public class MyTelegramConsts
     public const string AntiSpamActorCollection = "system-antispam-actor";
 
     /// <summary>
+    /// <c>@PremiumBot</c>, the bot named by the <c>premium_bot_username</c> app config key that sells
+    /// Telegram Premium. Served in-process by <c>PremiumBotService</c>, like BotFather.
+    /// See https://corefork.telegram.org/api/premium
+    /// </summary>
+    public const long PremiumBotUserId = SystemBotUserIdBase + 3;
+    public const string PremiumBotUserName = "PremiumBot";
+
+    /// <summary>
     /// True for ids in the system-bot block, which <c>BotFatherBotService</c> must never hand out to a
     /// user-created bot.
     /// </summary>

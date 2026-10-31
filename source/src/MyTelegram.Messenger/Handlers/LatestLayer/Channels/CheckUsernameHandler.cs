@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.Services.Fragment;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
@@ -20,7 +21,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
 internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUsernameHelper usernameHelper,
-    IFragmentCollectibleCatalog collectibleCatalog) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestCheckUsername, IBool>
+    IFragmentCollectibleCatalog collectibleCatalog, IChannelAppService channelAppService,
+    IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestCheckUsername, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Channels.RequestCheckUsername obj)
     {
@@ -30,6 +32,16 @@ internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUser
             {
                 RpcErrors.RpcErrors400.UsernameInvalid.ThrowRpcError();
             }
+        }
+
+        // Clients check here before offering a public link (inputChannelEmpty while creating a channel),
+        // and show the "too many public links" screen on CHANNELS_ADMIN_PUBLIC_TOO_MUCH.
+        var currentUserName = obj.Channel is TInputChannel inputChannel
+            ? (await channelAppService.GetAsync(inputChannel.ChannelId))?.UserName
+            : null;
+        if (string.IsNullOrEmpty(currentUserName))
+        {
+            await premiumLimitGuard.EnsureCanOwnPublicChannelAsync(input.UserId);
         }
 
         var userNameReadModel = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(obj.Username.ToLower()));

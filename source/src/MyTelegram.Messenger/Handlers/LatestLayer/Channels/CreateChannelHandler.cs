@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
 
@@ -19,10 +20,13 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class CreateChannelHandler(ICommandBus commandBus, IIdGenerator idGenerator, IRandomHelper randomHelper, IMongoDatabase mongoDatabase) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestCreateChannel, MyTelegram.Schema.IUpdates>
+internal sealed class CreateChannelHandler(ICommandBus commandBus, IIdGenerator idGenerator, IRandomHelper randomHelper, IMongoDatabase mongoDatabase, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestCreateChannel, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestCreateChannel obj)
     {
+        // The creator becomes a member, so channels_limit applies.
+        await premiumLimitGuard.EnsureCanJoinChannelAsync(input.UserId);
+
         var ttl = obj.TtlPeriod;
         var ttlFromDefaultSetting = false;
         if (ttl == null || ttl == 0)

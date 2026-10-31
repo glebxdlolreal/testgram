@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
 using MyTelegram.Messenger.Services.StarsSubscriptions;
@@ -26,7 +27,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class ImportChatInviteHandler(ICommandBus commandBus, IChannelAppService channelAppService, IQueryProcessor queryProcessor, IStarsSubscriptionService starsSubscriptionService, IChatInvitePeekService chatInvitePeekService, IChatInviteExportedConverterService chatInviteExportedConverterService, IMongoDatabase mongoDatabase) : RpcResultObjectHandler<RequestImportChatInvite, IUpdates>
+internal sealed class ImportChatInviteHandler(ICommandBus commandBus, IChannelAppService channelAppService, IQueryProcessor queryProcessor, IStarsSubscriptionService starsSubscriptionService, IChatInvitePeekService chatInvitePeekService, IChatInviteExportedConverterService chatInviteExportedConverterService, IMongoDatabase mongoDatabase, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<RequestImportChatInvite, IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestImportChatInvite obj)
     {
@@ -86,6 +87,12 @@ internal sealed class ImportChatInviteHandler(ICommandBus commandBus, IChannelAp
         if (joinRequestReadModel is { IsJoinRequestProcessed: false })
         {
             RpcErrors.RpcErrors400.InviteRequestSent.ThrowRpcError();
+        }
+
+        // channels_limit applies when the link joins outright; a join request is checked on approval.
+        if (!chatInviteReadModel.RequestNeeded && !channelReadModel.JoinRequest)
+        {
+            await premiumLimitGuard.EnsureCanJoinChannelAsync(input.UserId);
         }
 
         // A paid invite link can only be imported once the Star subscription has been paid for

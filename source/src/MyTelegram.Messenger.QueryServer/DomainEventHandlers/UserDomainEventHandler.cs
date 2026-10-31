@@ -16,7 +16,8 @@ public class UserDomainEventHandler(
     IQueryProcessor queryProcessor,
     IEmojiStatusResolver emojiStatusResolver,
     IUserConverterService userConverterService,
-    IUsernameUpdateNotifier usernameUpdateNotifier)
+    IUsernameUpdateNotifier usernameUpdateNotifier,
+    IUserAppService userAppService)
     : DomainEventHandlerBase(objectMessageSender,
             commandBus,
             idGenerator,
@@ -28,7 +29,8 @@ public class UserDomainEventHandler(
         ISubscribeSynchronousTo<UserAggregate, UserId, UserProfilePhotoUploadedEvent>,
         ISubscribeSynchronousTo<UserAggregate, UserId, UserEmojiStatusUpdatedEvent>,
         ISubscribeSynchronousTo<UserAggregate, UserId, UserRecentEmojiStatusesClearedEvent>,
-        ISubscribeSynchronousTo<UserAggregate, UserId, UserColorUpdatedEvent>
+        ISubscribeSynchronousTo<UserAggregate, UserId, UserColorUpdatedEvent>,
+        ISubscribeSynchronousTo<UserAggregate, UserId, UserPremiumStatusChangedEvent>
 {
     public async Task HandleAsync(IDomainEvent<UserAggregate, UserId, UserCreatedEvent> domainEvent,
         CancellationToken cancellationToken)
@@ -199,6 +201,35 @@ public class UserDomainEventHandler(
     {
         var userId = domainEvent.AggregateEvent.UserId;
         var user = await userConverterService.GetUserAsync(domainEvent.AggregateEvent.RequestInfo, userId, layer: domainEvent.AggregateEvent.RequestInfo.Layer);
+
+        var updates = new TUpdates
+        {
+            Updates = new TVector<IUpdate>(new TUpdateUser { UserId = userId }),
+            Users = new TVector<IUser>(user),
+            Chats = new TVector<IChat>(),
+            Date = DateTime.UtcNow.ToTimestamp()
+        };
+
+        await PushUpdatesToPeerAsync(new Peer(PeerType.User, userId), updates);
+    }
+
+    /// <summary>
+    /// Tells every session of the account that its Premium status changed - after a purchase, a gift,
+    /// a gift code or expiry. Without it the client keeps the old <c>user.premium</c> flag (and the
+    /// limits and UI that hang off it) until something else makes it refetch itself.
+    /// See https://corefork.telegram.org/api/premium
+    /// </summary>
+    public async Task HandleAsync(IDomainEvent<UserAggregate, UserId, UserPremiumStatusChangedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        var userId = domainEvent.AggregateEvent.UserId;
+
+        // Read the user afresh: the in-process cache may not have applied this event yet, and the
+        // update exists precisely to carry the new flag.
+        userAppService.InvalidateCache(userId);
+        var request = RequestInfo.Empty with { UserId = userId, Layer = Layers.LayerLatest };
+        var user = await userConverterService.GetUserAsync(request, userId, skipPrivacy: true, layer: Layers.LayerLatest);
+        user.Self = true;
 
         var updates = new TUpdates
         {

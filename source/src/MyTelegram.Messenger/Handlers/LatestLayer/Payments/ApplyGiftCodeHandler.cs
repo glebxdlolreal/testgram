@@ -1,5 +1,6 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
+using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// <summary>
@@ -14,7 +15,10 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class ApplyGiftCodeHandler(IMongoDatabase mongoDatabase)
+internal sealed class ApplyGiftCodeHandler(
+    IMongoDatabase mongoDatabase,
+    IPremiumSubscriptionService premiumSubscriptionService,
+    IPremiumPurchaseGate premiumPurchaseGate)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestApplyGiftCode, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestApplyGiftCode obj)
@@ -30,7 +34,7 @@ internal sealed class ApplyGiftCodeHandler(IMongoDatabase mongoDatabase)
             RpcErrors.RpcErrors400.SlugInvalid.ThrowRpcError();
 
         // Check if code is for specific user
-        var toId = codeDoc.Contains("ToId") && !codeDoc["ToId"].IsBsonNull ? codeDoc["ToId"].AsInt64 : (long?)null;
+        var toId = codeDoc.Contains("ToId") && !codeDoc["ToId"].IsBsonNull ? codeDoc["ToId"].ToInt64() : (long?)null;
 
         if (toId.HasValue && toId.Value != input.UserId)
         {
@@ -39,27 +43,22 @@ internal sealed class ApplyGiftCodeHandler(IMongoDatabase mongoDatabase)
         }
 
         // Get months or stars from code
-        int months = codeDoc.Contains("Months") ? codeDoc["Months"].AsInt32 : 1;
-        var stars = codeDoc.Contains("Stars") && !codeDoc["Stars"].IsBsonNull ? codeDoc["Stars"].AsInt64 : (long?)null;
+        int months = codeDoc.Contains("Months") ? codeDoc["Months"].ToInt32() : 1;
+        var stars = codeDoc.Contains("Stars") && !codeDoc["Stars"].IsBsonNull ? codeDoc["Stars"].ToInt64() : (long?)null;
         var now = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         // Premium subscription - check if user already has active Premium BEFORE marking the slug as used,
         // so a wasted activation does not happen when the user already has Premium.
         if (!stars.HasValue)
         {
-            var subCol = mongoDatabase.GetCollection<BsonDocument>("premium_subscriptions");
-            var existingSub = await subCol.Find(
-                Builders<BsonDocument>.Filter.Eq("_id", $"premium-{input.UserId}")
-            ).FirstOrDefaultAsync();
+            // An account Premium is off sale for cannot redeem it from a code either.
+            await premiumPurchaseGate.EnsureAllowedAsync(input.UserId);
 
-            if (existingSub != null &&
-                existingSub.Contains("Active") && existingSub["Active"].AsBoolean &&
-                existingSub.Contains("ExpiresAt") && existingSub["ExpiresAt"].AsInt32 > now)
+            var existingExpiresAt = await premiumSubscriptionService.GetExpiresAtAsync(input.UserId);
+            if (existingExpiresAt > now)
             {
-                // User already has active Premium - throw error with expiration date.
                 // The gift code slug is NOT marked as used, so it remains valid for a different account.
-                var existingExpiresAt = existingSub["ExpiresAt"].AsInt32;
-                RpcErrors.RpcErrors420.PremiumSubActiveUntilX.ThrowRpcError(existingExpiresAt);
+                RpcErrors.RpcErrors420.PremiumSubActiveUntilX.ThrowRpcError(existingExpiresAt.Value);
             }
         }
 
@@ -109,35 +108,10 @@ internal sealed class ApplyGiftCodeHandler(IMongoDatabase mongoDatabase)
         }
         else
         {
-            // No active Premium - activate subscription
-            var subCol = mongoDatabase.GetCollection<BsonDocument>("premium_subscriptions");
-            var expiresAt = now + (months * 30 * 24 * 3600);
-
-            // Create premium subscription
-            await subCol.ReplaceOneAsync(
-                Builders<BsonDocument>.Filter.Eq("_id", $"premium-{input.UserId}"),
-                new BsonDocument
-                {
-                    ["_id"] = $"premium-{input.UserId}",
-                    ["UserId"] = input.UserId,
-                    ["Active"] = true,
-                    ["ExpiresAt"] = expiresAt,
-                    ["Months"] = months,
-                    ["GrantedAt"] = now,
-                    ["GrantedBy"] = "giftcode"
-                },
-                new ReplaceOptions { IsUpsert = true }
-            );
-
-            // Update user Premium flag
-            var userCol = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
-            await userCol.UpdateOneAsync(
-                Builders<BsonDocument>.Filter.Eq("UserId", input.UserId),
-                Builders<BsonDocument>.Update.Set("Premium", true)
-            );
-
-            // Grant boost slots (1 for recipient)
-            await GrantBoostSlotsAsync(input.UserId, 1);
+            // A redeemed code is a gift: the term plus the recipient's one boost slot.
+            var fromId = codeDoc.Contains("FromId") && codeDoc["FromId"].IsNumeric ? codeDoc["FromId"].ToInt64() : (long?)null;
+            await premiumSubscriptionService.GrantAsync(input.UserId, PremiumDuration.DaysFromMonths(months), "gift-code",
+                fromId, gift: true);
         }
 
         return new TUpdates
@@ -148,38 +122,5 @@ internal sealed class ApplyGiftCodeHandler(IMongoDatabase mongoDatabase)
             Date = now,
             Seq = 0
         };
-    }
-
-    private async Task GrantBoostSlotsAsync(long userId, int count)
-    {
-        var boostSlotCol = mongoDatabase.GetCollection<BsonDocument>("user-boost-slots");
-        var existingSlots = await boostSlotCol.Find(
-            Builders<BsonDocument>.Filter.Eq("UserId", userId)
-        ).ToListAsync();
-
-        var usedSlots = existingSlots.Select(b => b["Slot"].AsInt32).ToHashSet();
-
-        // Find available slot numbers
-        var slotsToCreate = new List<int>();
-        int slot = 1;
-        while (slotsToCreate.Count < count)
-        {
-            if (!usedSlots.Contains(slot))
-                slotsToCreate.Add(slot);
-            slot++;
-        }
-
-        // Insert new slots
-        foreach (var slotNum in slotsToCreate)
-        {
-            await boostSlotCol.InsertOneAsync(new BsonDocument
-            {
-                ["_id"] = $"boost-slot-{userId}-{slotNum}",
-                ["UserId"] = userId,
-                ["Slot"] = slotNum,
-                ["Cooldown"] = 0,
-                ["ChannelId"] = BsonNull.Value
-            });
-        }
     }
 }

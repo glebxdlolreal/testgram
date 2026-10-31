@@ -28,6 +28,13 @@ public interface IBotInvoicePaymentService
         IInputInvoice invoice,
         string? requestedInfoId,
         string? shippingOptionId);
+
+    /// <summary>
+    /// Records an invoice that was settled outside the Stars ledger (a card charge for a built-in bot's
+    /// invoice): the <c>messageActionPaymentSent</c> receipt, <c>receipt_msg_id</c> on the invoice
+    /// message and the stored receipt <c>payments.getPaymentReceipt</c> reads.
+    /// </summary>
+    Task CompleteExternalChargeAsync(IRequestInput input, BotInvoiceDocument storedInvoice, string chargeId);
 }
 
 public class BotInvoicePaymentService(
@@ -44,6 +51,12 @@ public class BotInvoicePaymentService(
     /// <summary>"Telegram must receive an answer within 10 seconds after the pre-checkout query was sent."</summary>
     private static readonly TimeSpan PrecheckoutTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan PrecheckoutPollInterval = TimeSpan.FromMilliseconds(500);
+
+    public Task CompleteExternalChargeAsync(IRequestInput input, BotInvoiceDocument storedInvoice, string chargeId)
+    {
+        return CompleteAsync(input, storedInvoice, BotInvoiceHelper.ReadInvoice(storedInvoice), chargeId,
+            requestedInfo: null, shippingOptionId: null);
+    }
 
     public async Task<bool> CanHandleAsync(IRequestInput input, IInputInvoice invoice)
     {

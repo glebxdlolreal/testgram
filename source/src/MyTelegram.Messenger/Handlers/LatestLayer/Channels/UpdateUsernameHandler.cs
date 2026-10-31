@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.Services.Fragment;
 using EventFlow.Queries;
 using MongoDB.Driver;
@@ -23,7 +24,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProcessor queryProcessor, IChannelAppService channelAppService, IUsernameHelper usernameHelper, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase, IFragmentCollectibleCatalog collectibleCatalog) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestUpdateUsername, IBool>
+internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProcessor queryProcessor, IChannelAppService channelAppService, IUsernameHelper usernameHelper, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase, IFragmentCollectibleCatalog collectibleCatalog, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestUpdateUsername, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Channels.RequestUpdateUsername obj)
     {
@@ -49,6 +50,12 @@ internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProces
             if (string.Equals(obj.Username, oldUserName, StringComparison.OrdinalIgnoreCase))
             {
                 RpcErrors.RpcErrors400.UsernameNotModified.ThrowRpcError();
+            }
+
+            // Making a private channel public counts against channels_public_limit_default / _premium.
+            if (string.IsNullOrEmpty(oldUserName) && !string.IsNullOrEmpty(obj.Username))
+            {
+                await premiumLimitGuard.EnsureCanOwnPublicChannelAsync(input.UserId);
             }
 
             var userNameForId = string.IsNullOrEmpty(obj.Username) ? oldUserName : obj.Username;

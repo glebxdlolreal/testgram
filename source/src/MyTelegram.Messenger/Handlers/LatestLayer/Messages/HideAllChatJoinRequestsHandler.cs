@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.Helpers;
 using MyTelegram.Messenger.Converters.ConverterServices;
 
@@ -20,7 +21,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class HideAllChatJoinRequestsHandler(IQueryProcessor queryProcessor, IPeerHelper peerHelper, IChannelAppService channelAppService, IChatConverterService chatConverterService, IChannelAdminRightsChecker channelAdminRightsChecker, ICommandBus commandBus, IChatInviteLinkHelper chatInviteLinkHelper, IChatInviteExportedConverterService chatInviteExportedConverterService, MongoDB.Driver.IMongoDatabase mongoDatabase) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestHideAllChatJoinRequests, MyTelegram.Schema.IUpdates>
+internal sealed class HideAllChatJoinRequestsHandler(IQueryProcessor queryProcessor, IPeerHelper peerHelper, IChannelAppService channelAppService, IChatConverterService chatConverterService, IChannelAdminRightsChecker channelAdminRightsChecker, ICommandBus commandBus, IChatInviteLinkHelper chatInviteLinkHelper, IChatInviteExportedConverterService chatInviteExportedConverterService, MongoDB.Driver.IMongoDatabase mongoDatabase, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestHideAllChatJoinRequests, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestHideAllChatJoinRequests obj)
     {
@@ -86,6 +87,13 @@ internal sealed class HideAllChatJoinRequestsHandler(IQueryProcessor queryProces
             foreach (var joinChannelRequestReadModel in chatInviteImporters)
             {
                 if (joinChannelRequestReadModel.IsJoinRequestProcessed)
+                {
+                    continue;
+                }
+
+                // A requester already in as many channels as channels_limit allows cannot be added; their
+                // request stays pending rather than failing the whole batch.
+                if (approved && await premiumLimitGuard.IsAtChannelLimitAsync(joinChannelRequestReadModel.UserId))
                 {
                     continue;
                 }

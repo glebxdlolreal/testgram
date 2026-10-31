@@ -33,7 +33,30 @@ public partial class AppConfigHelper : IAppConfigHelper, ISingletonDependency
         SetConfig("stars_gifts_enabled", new TJsonBool { Value = true });
         SetConfig("premium_gift_attach_menu_icon", new TJsonBool { Value = true });
         SetConfig("premium_gift_text_field_icon", new TJsonBool { Value = true });
+        // Must always be sent: tdlib and tdesktop both read a missing key as "blocked". Accounts Premium
+        // is off sale for get true in GetAppConfigHandler.
         SetConfig("premium_purchase_blocked", new TJsonBool { Value = false });
+
+        // Telegram Premium, matched to real Telegram's appConfig (measured 2026-10-31). Purchases go
+        // through @PremiumBot, which prod advertises with no premium_invoice_slug fallback and no
+        // premium_manage_subscription_url; the generated "abc" slug and premiumbot URL pointed nowhere.
+        // See https://corefork.telegram.org/api/premium
+        SetConfig("premium_bot_username", new TJsonString { Value = MyTelegramConsts.PremiumBotUserName });
+        RemoveConfig("premium_invoice_slug");
+        RemoveConfig("premium_manage_subscription_url");
+        SetConfig("premium_promo_order", new TJsonArray
+        {
+            Value = new TVector<IJSONValue>(new[]
+            {
+                "stories", "more_upload", "double_limits", "business", "last_seen", "voice_to_text",
+                "faster_download", "translations", "animated_emoji", "emoji_status", "saved_tags", "peer_colors",
+                "wallpapers", "profile_badge", "message_privacy", "pm_noforwards", "advanced_chat_management",
+                "no_ads", "app_icons", "infinite_reactions", "animated_userpics", "premium_stickers", "effects",
+                "ai_compose", "todo"
+            }.Select(feature => (IJSONValue)new TJsonString { Value = feature }))
+        });
+        SetConfig("bots_create_limit_default", new TJsonNumber { Value = 20 });
+        SetConfig("bots_create_limit_premium", new TJsonNumber { Value = 40 });
         SetConfig("giveaway_gifts_purchase_available", new TJsonBool { Value = true });
         SetConfig("settings_display_passkeys", new TJsonBool { Value = true });
         SetConfig("passkeys_account_passkeys_max", new TJsonNumber { Value = 20 });
@@ -60,6 +83,15 @@ public partial class AppConfigHelper : IAppConfigHelper, ISingletonDependency
         SetConfig("starref_connect_allowed", new TJsonBool { Value = true });
         SetConfig("starref_min_commission_permille", new TJsonNumber { Value = 10 });
         SetConfig("starref_max_commission_permille", new TJsonNumber { Value = 500 });
+    }
+
+    private void RemoveConfig(string key)
+    {
+        var oldValue = _jsonValue?.Value.FirstOrDefault(p => p.Key == key);
+        if (oldValue != null)
+        {
+            _jsonValue?.Value.Remove(oldValue);
+        }
     }
 
     private void SetConfig(string key, IJSONValue value)

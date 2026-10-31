@@ -1,5 +1,6 @@
 using MyTelegram.Messenger.Services.Emoji;
 using MyTelegram.Messenger.Services.Transcription;
+using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Help;
 /// <summary>
@@ -12,9 +13,13 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Help;
 internal sealed class GetAppConfigHandler(
     IAppConfigHelper appConfigHelper,
     IEmojiSoundAppConfigBuilder emojiSoundAppConfigBuilder,
-    ITranscriptionAppConfigBuilder transcriptionAppConfigBuilder)
+    ITranscriptionAppConfigBuilder transcriptionAppConfigBuilder,
+    IPremiumPurchaseGate premiumPurchaseGate)
     : RpcResultObjectHandler<Schema.Help.RequestGetAppConfig, Schema.Help.IAppConfig>
 {
+    private const string PremiumPurchaseBlockedKey = "premium_purchase_blocked";
+    private const int PremiumPurchaseBlockedHashSalt = 0x50524d42;
+
     protected override async Task<Schema.Help.IAppConfig> HandleCoreAsync(IRequestInput input,
         Schema.Help.RequestGetAppConfig obj)
     {
@@ -50,6 +55,22 @@ internal sealed class GetAppConfigHandler(
             };
 
             hash = unchecked(hash * 31 + transcription.Hash);
+        }
+
+        // premium_purchase_blocked is per account: the shared configuration always carries an explicit
+        // false (tdlib and tdesktop both treat a missing key as blocked), and an account Premium is off
+        // sale for gets true in its place. Clients then hide every Premium purchase and gift entry
+        // point. See https://corefork.telegram.org/api/config#premium-purchase-blocked
+        if (input.UserId != 0 && await premiumPurchaseGate.IsBlockedAsync(input.UserId) && config is TJsonObject sharedObject)
+        {
+            config = new TJsonObject
+            {
+                Value = new TVector<IJSONObjectValue>(sharedObject.Value
+                    .Where(p => p is not TJsonObjectValue { Key: PremiumPurchaseBlockedKey })
+                    .Append(new TJsonObjectValue { Key = PremiumPurchaseBlockedKey, Value = new TJsonBool { Value = true } }))
+            };
+
+            hash = unchecked(hash * 31 + PremiumPurchaseBlockedHashSalt);
         }
 
         if (obj.Hash == hash)

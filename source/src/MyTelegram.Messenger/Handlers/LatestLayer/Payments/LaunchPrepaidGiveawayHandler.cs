@@ -1,5 +1,6 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
+using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// <summary>
@@ -15,7 +16,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 internal sealed class LaunchPrepaidGiveawayHandler(
     IMongoDatabase mongoDatabase,
     IMessageAppService messageAppService,
-    IPeerHelper peerHelper)
+    IPeerHelper peerHelper,
+    IPremiumPurchaseGate premiumPurchaseGate)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestLaunchPrepaidGiveaway, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(
@@ -56,6 +58,8 @@ internal sealed class LaunchPrepaidGiveawayHandler(
 
         if (obj.Purpose is TInputStorePaymentPremiumGiveaway premiumPurpose)
         {
+            // Handing out Premium is still selling it: off for an account Premium is blocked for.
+            await premiumPurchaseGate.EnsureAllowedAsync(input.UserId);
             months = giveaway.Contains("Months") ? giveaway["Months"].AsInt32 : 12;
             prizeDescription = premiumPurpose.PrizeDescription;
             untilDateFromPurpose = premiumPurpose.UntilDate; // Use date from purpose

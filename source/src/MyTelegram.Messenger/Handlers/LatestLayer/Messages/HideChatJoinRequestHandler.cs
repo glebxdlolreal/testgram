@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.Helpers;
 using MyTelegram.Messenger.Converters.ConverterServices;
 
@@ -22,7 +23,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class HideChatJoinRequestHandler(IQueryProcessor queryProcessor, IPeerHelper peerHelper, IChannelAppService channelAppService, IChannelAdminRightsChecker channelAdminRightsChecker, ICommandBus commandBus, IChatInviteExportedConverterService chatInviteExportedConverterService, MongoDB.Driver.IMongoDatabase mongoDatabase) : RpcResultObjectHandler<RequestHideChatJoinRequest, IUpdates>
+internal sealed class HideChatJoinRequestHandler(IQueryProcessor queryProcessor, IPeerHelper peerHelper, IChannelAppService channelAppService, IChannelAdminRightsChecker channelAdminRightsChecker, ICommandBus commandBus, IChatInviteExportedConverterService chatInviteExportedConverterService, MongoDB.Driver.IMongoDatabase mongoDatabase, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<RequestHideChatJoinRequest, IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestHideChatJoinRequest obj)
     {
@@ -46,6 +47,9 @@ internal sealed class HideChatJoinRequestHandler(IQueryProcessor queryProcessor,
         var broadcast = false;
         if (obj.Approved)
         {
+            // Approving makes the requester a member, so their channels_limit applies.
+            await premiumLimitGuard.EnsureUserCanJoinChannelAsync(userPeer.PeerId);
+
             var channelReadModel = await channelAppService.GetAsync(channelId);
             if (channelReadModel.HiddenPreHistory)
             {

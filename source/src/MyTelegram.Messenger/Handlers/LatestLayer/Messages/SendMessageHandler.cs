@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.Services.Bots;
 using StackExchange.Redis;
 using MongoDB.Driver;
@@ -87,7 +88,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class SendMessageHandler(IMessageAppService messageAppService, IPeerHelper peerHelper, IChannelAppService channelAppService, IOptions<MyTelegramMessengerServerOptions> options, IQueryProcessor queryProcessor, IConnectionMultiplexer redis, IMongoDatabase mongoDatabase, IBotFatherBotService botFatherBotService, IObjectMessageSender objectMessageSender, IPrivacyAppService privacyAppService, IMessageEffectAppService messageEffectAppService, ILogger<SendMessageHandler> logger) : RpcResultObjectHandler<RequestSendMessage, IUpdates>
+internal sealed class SendMessageHandler(IMessageAppService messageAppService, IPeerHelper peerHelper, IChannelAppService channelAppService, IOptions<MyTelegramMessengerServerOptions> options, IQueryProcessor queryProcessor, IConnectionMultiplexer redis, IMongoDatabase mongoDatabase, IBotFatherBotService botFatherBotService, IPremiumBotService premiumBotService, IObjectMessageSender objectMessageSender, IPrivacyAppService privacyAppService, IMessageEffectAppService messageEffectAppService, ILogger<SendMessageHandler> logger) : RpcResultObjectHandler<RequestSendMessage, IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestSendMessage obj)
     {
@@ -228,6 +229,8 @@ internal sealed class SendMessageHandler(IMessageAppService messageAppService, I
 
         if (toPeer.PeerType == PeerType.User && toPeer.PeerId == BotFatherBotService.BotUserId)
             _ = Task.Run(() => botFatherBotService.HandleMessageAsync(input, input.UserId, obj.Message));
+        if (toPeer.PeerType == PeerType.User && toPeer.PeerId == PremiumBotService.BotUserId)
+            _ = Task.Run(() => premiumBotService.HandleMessageAsync(input, obj.Message));
         return null !;
     }
 

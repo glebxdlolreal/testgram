@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Premium;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// <summary>
 /// Checks whether a purchase is possible. Must be called before in-store purchase, official apps only.
@@ -9,16 +11,35 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// </summary>
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✔]
+///
+/// <para>Premium purposes are refused for an account Premium is off sale for
+/// (<see cref="IPremiumPurchaseGate"/>), and a gift for one whose recipient is. Official clients ask
+/// here before starting a store purchase, and tdlib reports a refusal as "Payment can't be completed".</para>
 /// </remarks>
-internal sealed class CanPurchaseStoreHandler : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestCanPurchaseStore, IBool>
+internal sealed class CanPurchaseStoreHandler(IPremiumPurchaseGate premiumPurchaseGate, IPeerHelper peerHelper)
+    : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestCanPurchaseStore, IBool>
 {
-    protected override Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestCanPurchaseStore obj)
+    protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestCanPurchaseStore obj)
     {
-        // Always allow Premium purchase in Testgram
-        // In production, you would check:
-        // - User's current subscription status
-        // - Payment provider availability
-        // - Regional restrictions
-        return Task.FromResult<IBool>(new TBoolTrue());
+        switch (obj.Purpose)
+        {
+            case TInputStorePaymentPremiumSubscription:
+            case TInputStorePaymentPremiumGiveaway:
+                await premiumPurchaseGate.EnsureAllowedAsync(input.UserId);
+                break;
+
+            case TInputStorePaymentGiftPremium gift:
+                await premiumPurchaseGate.EnsureAllowedAsync(input.UserId, ResolveUser(input, gift.UserId));
+                break;
+
+            case TInputStorePaymentPremiumGiftCode giftCode:
+                await premiumPurchaseGate.EnsureAllowedAsync([input.UserId, .. giftCode.Users.Select(u => ResolveUser(input, u))]);
+                break;
+        }
+
+        return new TBoolTrue();
     }
+
+    private long ResolveUser(IRequestInput input, IInputUser user) =>
+        user is TInputUserSelf ? input.UserId : peerHelper.GetPeer(user, input.UserId).PeerId;
 }

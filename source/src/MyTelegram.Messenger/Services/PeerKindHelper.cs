@@ -21,7 +21,8 @@ public static class PeerKindHelper
             || userId == MyTelegramConsts.RepliesServiceUserId
             || userId == MyTelegramConsts.ChatImporterBotUserId
             || userId == MyTelegramConsts.GifSearchBotUserId
-            || userId == MyTelegramConsts.AntiSpamBotUserId;
+            || userId == MyTelegramConsts.AntiSpamBotUserId
+            || userId == MyTelegramConsts.PremiumBotUserId;
     }
 
     /// <summary>

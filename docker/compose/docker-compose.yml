@@ -517,6 +517,8 @@ services:
       App__PasskeyRpName: ${App__PasskeyRpName}
       App__Stripe__PublishableKey: ${App__Stripe__PublishableKey}
       App__Stripe__SecretKey: ${App__Stripe__SecretKey}
+      # Telegram Premium prices are in this currency; the terms default to PremiumOptions.DefaultPeriods.
+      Premium__Currency: ${Premium__Currency:-USD}
       EmailSenderOptions__Enabled: ${EmailSenderOptions__Enabled}
       EmailSenderOptions__FromAddress: ${EmailSenderOptions__FromAddress}
       EmailSenderOptions__FromDisplayName: ${EmailSenderOptions__FromDisplayName}
@@ -643,6 +645,8 @@ services:
       App__PasskeyRpName: ${App__PasskeyRpName}
       App__Stripe__PublishableKey: ${App__Stripe__PublishableKey}
       App__Stripe__SecretKey: ${App__Stripe__SecretKey}
+      # Telegram Premium prices are in this currency; the terms default to PremiumOptions.DefaultPeriods.
+      Premium__Currency: ${Premium__Currency:-USD}
       EmailSenderOptions__Enabled: ${EmailSenderOptions__Enabled}
       EmailSenderOptions__FromAddress: ${EmailSenderOptions__FromAddress}
       EmailSenderOptions__FromDisplayName: ${EmailSenderOptions__FromDisplayName}

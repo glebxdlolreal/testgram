@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.Services.Dice;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
@@ -31,7 +32,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// </remarks>
 internal sealed class UploadMediaHandler(
     IMediaHelper mediaHelper,
-    MyTelegram.Messenger.Services.Stickers.IAttachedStickerRecorder attachedStickerRecorder)
+    MyTelegram.Messenger.Services.Stickers.IAttachedStickerRecorder attachedStickerRecorder, IPremiumLimitGuard premiumLimitGuard)
     : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestUploadMedia, MyTelegram.Schema.IMessageMedia>
 {
     protected override async Task<IMessageMedia> HandleCoreAsync(IRequestInput input, RequestUploadMedia obj)
@@ -40,6 +41,9 @@ internal sealed class UploadMediaHandler(
         // rolled before the message even exists.
         DiceMediaGuard.ThrowIfDice(obj.Media);
 
+        // upload_max_fileparts_default / _premium: 2 GB, or 4 GB with Premium.
+        // See https://corefork.telegram.org/api/premium#doubled-limits
+        await premiumLimitGuard.EnsureUploadPartsAsync(input.UserId, obj.Media);
         var media = await mediaHelper.SaveMediaAsync(obj.Media);
         if (media == null)
         {

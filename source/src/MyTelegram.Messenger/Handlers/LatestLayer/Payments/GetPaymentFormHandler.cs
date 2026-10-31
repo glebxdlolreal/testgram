@@ -5,6 +5,8 @@ using MyTelegram.Schema.Payments;
 using MyTelegram.Schema;
 using MyTelegram.Messenger.Services.PaidMedia;
 using MyTelegram.Messenger.Services.Payments;
+using MyTelegram.Messenger.Options;
+using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 
@@ -14,7 +16,11 @@ internal sealed class GetPaymentFormHandler(
     IPeerHelper peerHelper,
     IQueryProcessor queryProcessor,
     IUserConverterService userConverterService,
-    ILogger<GetPaymentFormHandler> logger)
+    ILogger<GetPaymentFormHandler> logger,
+    IOptions<PremiumOptions> premiumOptions,
+    IPremiumPurchaseGate premiumPurchaseGate,
+    IPremiumCardCheckout premiumCardCheckout,
+    IPremiumBotService premiumBotService)
     : RpcResultObjectHandler<RequestGetPaymentForm, IPaymentForm>
 {
     protected override async Task<IPaymentForm> HandleCoreAsync(IRequestInput input, RequestGetPaymentForm obj)
@@ -176,34 +182,7 @@ internal sealed class GetPaymentFormHandler(
 
         if (obj.Invoice is TInputInvoicePremiumGiftStars giftStarsInvoice)
         {
-            // Premium gift via Stars - use Stars balance
-            var recipientUserId = giftStarsInvoice.UserId is TInputUser inputUser
-                ? inputUser.UserId
-                : peerHelper.GetPeer(giftStarsInvoice.UserId, input.UserId).PeerId;
-
-            // Calculate Stars cost based on months
-            long starsCost = giftStarsInvoice.Months switch
-            {
-                1 => 2500,   // 1 month = 2500 stars
-                3 => 7000,   // 3 months = 7000 stars
-                6 => 13000,  // 6 months = 13000 stars
-                12 => 25000, // 12 months = 25000 stars
-                _ => 2500
-            };
-
-            return new TPaymentFormStars
-            {
-                FormId = Random.Shared.NextInt64(),
-                BotId = MyTelegramConsts.NotificationServiceUserId,
-                Title = $"Telegram Premium Gift",
-                Description = $"Gift {giftStarsInvoice.Months} months of Telegram Premium",
-                Invoice = new TInvoice
-                {
-                    Currency = "XTR",
-                    Prices = [new TLabeledPrice { Label = $"Telegram Premium ({giftStarsInvoice.Months} months)", Amount = starsCost }],
-                },
-                Users = new TVector<IUser>(),
-            };
+            return await HandlePremiumGiftStarsAsync(input, giftStarsInvoice);
         }
 
         // Bot invoice from message (inputInvoiceMessage)
@@ -222,6 +201,42 @@ internal sealed class GetPaymentFormHandler(
         return default!;
     }
 
+    /// <summary>
+    /// The Stars form for gifting Premium; the price comes from the same table sendStarsForm charges.
+    /// See https://corefork.telegram.org/constructor/inputInvoicePremiumGiftStars
+    /// </summary>
+    private async Task<IPaymentForm> HandlePremiumGiftStarsAsync(IRequestInput input, TInputInvoicePremiumGiftStars invoice)
+    {
+        var period = premiumOptions.Value.FindGift(invoice.Months);
+        if (period == null || period.AmountStars <= 0)
+        {
+            RpcErrors.RpcErrors400.MonthInvalid.ThrowRpcError();
+        }
+
+        var recipientUserId = invoice.UserId switch
+        {
+            TInputUserSelf => input.UserId,
+            TInputUser u => u.UserId,
+            _ => peerHelper.GetPeer(invoice.UserId, input.UserId).PeerId
+        };
+
+        await premiumPurchaseGate.EnsureAllowedAsync(input.UserId, recipientUserId);
+
+        return new TPaymentFormStars
+        {
+            FormId = Random.Shared.NextInt64(),
+            BotId = MyTelegramConsts.NotificationServiceUserId,
+            Title = "Telegram Premium Gift",
+            Description = $"Gift {invoice.Months} months of Telegram Premium",
+            Invoice = new TInvoice
+            {
+                Currency = "XTR",
+                Prices = [new TLabeledPrice { Label = $"Telegram Premium ({invoice.Months} months)", Amount = period!.AmountStars }],
+            },
+            Users = new TVector<IUser>(),
+        };
+    }
+
     private async Task<TVector<IPaymentSavedCredentials>?> GetSavedCredentialsAsync(long userId)
     {
         var col = mongoDatabase.GetCollection<SavedPaymentCredentialDocument>("saved-payment-credentials");
@@ -235,142 +250,100 @@ internal sealed class GetPaymentFormHandler(
             }).ToList());
     }
 
+    /// <summary>
+    /// The card form for Premium bought with money: gift codes for specific users, a giveaway, or a
+    /// subscription for oneself. Prices come from the server's period table, never from the
+    /// <c>premiumGiftCodeOption</c> the client echoes back.
+    /// See https://corefork.telegram.org/api/giveaways
+    /// </summary>
     private async Task<IPaymentForm> HandlePremiumGiftCodeAsync(IRequestInput input, TInputInvoicePremiumGiftCode invoice)
     {
-        Console.WriteLine($"[HandlePremiumGiftCode] Purpose type: {invoice.Purpose?.GetType().Name}");
-
-        var stripe = options.Value.Stripe;
-
-        // Get price from PremiumGiftCodeOption
-        // For now, use default pricing based on purpose
-        long amountCents = 0;
-        string description = "Telegram Premium Gift Code";
-
-        if (invoice.Purpose is TInputStorePaymentPremiumGiftCode giftCode)
+        var premium = premiumOptions.Value;
+        var months = invoice.Option.Months;
+        var period = invoice.Purpose is TInputStorePaymentPremiumSubscription
+            ? premium.FindSubscription(months)
+            : premium.FindGift(months);
+        if (period == null || period.Amount <= 0)
         {
-            // Calculate price based on users count and months
-            int usersCount = giftCode.Users.Count;
-            int months = invoice.Option.Months;
-
-            // Base price per user per month (in cents)
-            long pricePerUserMonth = 499; // $4.99
-            amountCents = pricePerUserMonth * usersCount * months;
-            description = $"Telegram Premium Gift Code ({usersCount} users, {months} months)";
-        }
-        else if (invoice.Purpose is TInputStorePaymentPremiumGiveaway giveaway)
-        {
-            // Premium giveaway - use amount from option
-            amountCents = invoice.Option.Amount;
-            description = $"Telegram Premium Giveaway ({invoice.Option.Users} winners, {invoice.Option.Months} months)";
-        }
-        else if (invoice.Purpose is TInputStorePaymentPremiumSubscription)
-        {
-            // Regular premium subscription
-            amountCents = invoice.Option.Amount;
-            description = $"Telegram Premium ({invoice.Option.Months} months)";
+            RpcErrors.RpcErrors400.MonthInvalid.ThrowRpcError();
         }
 
-        string nativeParamsJson;
-        long formId = Random.Shared.NextInt64();
-
-        if (!string.IsNullOrEmpty(stripe.SecretKey))
+        if (!string.Equals(invoice.Option.Currency, premium.Currency, StringComparison.OrdinalIgnoreCase))
         {
-            var (clientSecret, paymentIntentId) = await StripeHelper.CreatePaymentIntentAsync(
-                stripe.SecretKey, amountCents, invoice.Option.Currency.ToLower(), description);
+            RpcErrors.RpcErrors400.CurrencyTotalAmountInvalid.ThrowRpcError();
+        }
 
-            logger.LogInformation("[HandlePremiumGiftCode] Saving payment intent, GiveawayPurpose: {IsGiveaway}", invoice.Purpose is TInputStorePaymentPremiumGiveaway ? "YES" : "NO");
-
-            var giveawayPurposeBytes = invoice.Purpose is TInputStorePaymentPremiumGiveaway
-                ? invoice.Purpose.ToBytes()
-                : null;
-
-            logger.LogInformation("[HandlePremiumGiftCode] GiveawayPurpose bytes length: {Length}", giveawayPurposeBytes?.Length ?? 0);
-
-            // Store mapping formId -> paymentIntentId for later verification
-            logger.LogInformation("[HandlePremiumGiftCode] About to insert into MongoDB, FormId={FormId}", formId);
-            try
-            {
-                var col = mongoDatabase.GetCollection<StripePaymentIntentDocument>("stripe-payment-intents");
-                await col.InsertOneAsync(new StripePaymentIntentDocument
+        string kind;
+        List<long> recipients;
+        long quantity;
+        string description;
+        switch (invoice.Purpose)
+        {
+            case TInputStorePaymentPremiumGiftCode giftCode:
+                recipients = giftCode.Users
+                    .Select(u => u is TInputUserSelf ? input.UserId : peerHelper.GetPeer(u, input.UserId).PeerId)
+                    .Distinct()
+                    .ToList();
+                if (recipients.Count == 0)
                 {
-                    FormId = formId,
-                    PaymentIntentId = paymentIntentId,
-                    ClientSecret = clientSecret,
-                    UserId = input.UserId,
-                    RecipientUserId = 0,
-                    Stars = 0,
-                    CreatedAt = DateTime.UtcNow,
-                    GiveawayPurpose = giveawayPurposeBytes,
-                });
-                logger.LogInformation("[HandlePremiumGiftCode] Payment intent saved successfully, FormId={FormId}", formId);
-
-                // Verify it was saved
-                var saved = await col.Find(x => x.FormId == formId).FirstOrDefaultAsync();
-                if (saved == null)
-                {
-                    logger.LogError("[HandlePremiumGiftCode] VERIFICATION FAILED: Intent not found after insert!");
+                    RpcErrors.RpcErrors400.UsersTooFew.ThrowRpcError();
                 }
-                else
+
+                foreach (var recipient in recipients.Where(id => id != input.UserId))
                 {
-                    logger.LogInformation("[HandlePremiumGiftCode] VERIFICATION OK: Intent found, GiveawayPurpose length={Length}", saved.GiveawayPurpose?.Length ?? 0);
+                    await PeerKindHelper.EnsureNotBotOrSystemAsync(queryProcessor, recipient);
                 }
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "[HandlePremiumGiftCode] ERROR saving payment intent");
-                throw;
-            }
 
-            nativeParamsJson = System.Text.Json.JsonSerializer.Serialize(new
-            {
-                publishable_key = stripe.PublishableKey,
-                payment_intent_client_secret = clientSecret,
-                need_country = false,
-                need_zip = false,
-                need_cardholder_name = false,
-            });
+                kind = PremiumCardCheckout.KindGiftCode;
+                quantity = recipients.Count;
+                description = $"Telegram Premium Gift ({recipients.Count} users, {months} months)";
+                break;
+
+            case TInputStorePaymentPremiumGiveaway:
+                kind = PremiumCardCheckout.KindGiveaway;
+                recipients = [];
+                quantity = Math.Max(1, invoice.Option.Users);
+                description = $"Telegram Premium Giveaway ({quantity} winners, {months} months)";
+                break;
+
+            case TInputStorePaymentPremiumSubscription:
+                kind = PremiumCardCheckout.KindSubscription;
+                recipients = [input.UserId];
+                quantity = 1;
+                description = $"Telegram Premium ({months} months)";
+                break;
+
+            default:
+                RpcErrors.RpcErrors400.PurposeInvalid.ThrowRpcError();
+                return null!;
         }
-        else
+
+        await premiumPurchaseGate.EnsureAllowedAsync([input.UserId, .. recipients]);
+
+        var amount = period!.Amount * quantity;
+        var form = await premiumCardCheckout.CreateAsync(input.UserId, amount, premium.Currency, description, intent =>
         {
-            // No Stripe - store payment intent without real payment
-            await mongoDatabase.GetCollection<StripePaymentIntentDocument>("stripe-payment-intents")
-                .InsertOneAsync(new StripePaymentIntentDocument
-                {
-                    FormId = formId,
-                    PaymentIntentId = $"test_{formId}",
-                    ClientSecret = string.Empty,
-                    UserId = input.UserId,
-                    RecipientUserId = 0,
-                    Stars = 0,
-                    CreatedAt = DateTime.UtcNow,
-                    GiveawayPurpose = invoice.Purpose is TInputStorePaymentPremiumGiveaway
-                        ? invoice.Purpose.ToBytes()
-                        : null,
-                });
-
-            nativeParamsJson = System.Text.Json.JsonSerializer.Serialize(new
-            {
-                publishable_key = stripe.PublishableKey,
-                need_country = false,
-                need_zip = false,
-                need_cardholder_name = false,
-            });
-        }
+            intent.PremiumKind = kind;
+            intent.PremiumMonths = months;
+            intent.PremiumQuantity = (int)quantity;
+            intent.PremiumRecipientUserIds = recipients;
+            intent.GiveawayPurpose = invoice.Purpose is TInputStorePaymentPremiumGiveaway ? invoice.Purpose.ToBytes() : null;
+        });
 
         return new TPaymentForm
         {
-            FormId = formId,
+            FormId = form.FormId,
             BotId = MyTelegramConsts.NotificationServiceUserId,
             Title = description,
             Description = description,
-            NativeProvider = "stripe",
-            NativeParams = new TDataJSON { Data = nativeParamsJson },
+            NativeProvider = form.NativeProvider,
+            NativeParams = new TDataJSON { Data = form.NativeParamsJson },
             ProviderId = 0,
             Url = string.Empty,
             Invoice = new TInvoice
             {
-                Currency = invoice.Option.Currency,
-                Prices = [new TLabeledPrice { Label = description, Amount = amountCents }],
+                Currency = premium.Currency,
+                Prices = [new TLabeledPrice { Label = description, Amount = amount }],
             },
             SavedCredentials = await GetSavedCredentialsAsync(input.UserId),
             Users = new TVector<IUser>(),
@@ -625,6 +598,11 @@ internal sealed class GetPaymentFormHandler(
 
     private async Task<IPaymentForm> BuildBotInvoiceFormAsync(IRequestInput input, BotInvoiceDocument storedInvoice)
     {
+        if (premiumBotService.IsPremiumBotInvoice(storedInvoice))
+        {
+            return await premiumBotService.BuildPaymentFormAsync(input, storedInvoice);
+        }
+
         var botUser = await queryProcessor.ProcessAsync(new GetUserByIdQuery(storedInvoice.BotId));
         if (botUser == null || !botUser.Bot)
             RpcErrors.RpcErrors400.BotInvalid.ThrowRpcError();

@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using System.Text;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -72,7 +73,7 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
     IScheduledMessageDispatcher scheduledMessageDispatcher,
     IGeoProximityAlertService geoProximityAlertService,
     IUserAppService userAppService,
-    IMessageEncryptionHelper messageEncryptionHelper) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestEditMessage, MyTelegram.Schema.IUpdates>
+    IMessageEncryptionHelper messageEncryptionHelper, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestEditMessage, MyTelegram.Schema.IUpdates>
 {
     private static byte[]? _encryptionKey;
     private static KeyConfig? _keyConfig;
@@ -120,6 +121,9 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
             }
             else
             {
+                // upload_max_fileparts_default / _premium: 2 GB, or 4 GB with Premium.
+                // See https://corefork.telegram.org/api/premium#doubled-limits
+                await premiumLimitGuard.EnsureUploadPartsAsync(input.UserId, obj.Media);
                 media = await mediaHelper.SaveMediaAsync(obj.Media);
             }
         }

@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Premium;
+using MyTelegram.Messenger.Services.Bots;
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Start a conversation with a bot using a <a href="https://corefork.telegram.org/api/links#bot-links">deep linking parameter</a>
@@ -21,7 +23,9 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 internal sealed class StartBotHandler(
     IQueryProcessor queryProcessor,
     IMessageAppService messageAppService,
-    IPeerHelper peerHelper) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestStartBot, MyTelegram.Schema.IUpdates>
+    IPeerHelper peerHelper,
+    IBotFatherBotService botFatherBotService,
+    IPremiumBotService premiumBotService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestStartBot, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestStartBot obj)
     {
@@ -74,6 +78,17 @@ internal sealed class StartBotHandler(
         );
 
         await messageAppService.SendMessageAsync([sendInput]);
+
+        // Built-in bots have no session to receive the /start message through; they are answered
+        // in-process, the same way sendMessage hands them plain text. Clients open @PremiumBot with
+        // startBot and a start parameter. See https://corefork.telegram.org/api/premium
+        if (peer.PeerType == PeerType.User && peer.PeerId == botUserId)
+        {
+            if (botUserId == PremiumBotService.BotUserId)
+                _ = Task.Run(() => premiumBotService.HandleMessageAsync(input, messageText));
+            else if (botUserId == BotFatherBotService.BotUserId)
+                _ = Task.Run(() => botFatherBotService.HandleMessageAsync(input, input.UserId, messageText));
+        }
 
         // Return empty Updates (message will arrive via push)
         return new TUpdates

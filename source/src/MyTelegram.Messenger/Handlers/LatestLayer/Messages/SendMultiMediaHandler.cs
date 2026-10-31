@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using StackExchange.Redis;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Handlers.LatestLayer.Payments;
@@ -48,7 +49,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
 internal sealed class SendMultiMediaHandler(IMessageAppService messageAppService, IMediaHelper mediaHelper, //IRequestCacheAppService requestCacheAppService,
- IPeerHelper peerHelper, IRandomHelper randomHelper, IQueryProcessor queryProcessor, IMongoDatabase mongoDatabase, IPrivacyAppService privacyAppService, IMessageEffectAppService messageEffectAppService, IUserAppService userAppService, MyTelegram.Messenger.Services.Gifs.ISentGifProcessor sentGifProcessor, MyTelegram.Messenger.Services.Stickers.ISentStickerProcessor sentStickerProcessor, MyTelegram.Messenger.Services.Stickers.IAttachedStickerRecorder attachedStickerRecorder, IFileReferenceHelper fileReferenceHelper) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendMultiMedia, MyTelegram.Schema.IUpdates>
+ IPeerHelper peerHelper, IRandomHelper randomHelper, IQueryProcessor queryProcessor, IMongoDatabase mongoDatabase, IPrivacyAppService privacyAppService, IMessageEffectAppService messageEffectAppService, IUserAppService userAppService, MyTelegram.Messenger.Services.Gifs.ISentGifProcessor sentGifProcessor, MyTelegram.Messenger.Services.Stickers.ISentStickerProcessor sentStickerProcessor, MyTelegram.Messenger.Services.Stickers.IAttachedStickerRecorder attachedStickerRecorder, IFileReferenceHelper fileReferenceHelper, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendMultiMedia, MyTelegram.Schema.IUpdates>
 {
     //private readonly IRequestCacheAppService _requestCacheAppService;
     //_requestCacheAppService = requestCacheAppService;
@@ -172,6 +173,9 @@ internal sealed class SendMultiMediaHandler(IMessageAppService messageAppService
         var inputs = new List<SendMessageInput>();
         foreach (var inputSingleMedia in obj.MultiMedia)
         {
+            // upload_max_fileparts_default / _premium: 2 GB, or 4 GB with Premium.
+            // See https://corefork.telegram.org/api/premium#doubled-limits
+            await premiumLimitGuard.EnsureUploadPartsAsync(input.UserId, inputSingleMedia.Media);
             var media = await mediaHelper.SaveMediaAsync(inputSingleMedia.Media);
 
             // Same GIF handling as the single-media path: convert to MPEG4 when needed and add the

@@ -3,6 +3,7 @@ using MongoDB.Driver;
 using MyTelegram.Messenger.Services.StarGifts;
 using MyTelegram.Services.Services;
 using System.Text.Json;
+using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 
@@ -29,7 +30,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 internal sealed class AssignPlayMarketTransactionHandler(
     IMongoDatabase mongoDatabase,
     IOptions<MyTelegramMessengerServerOptions> options,
-    IObjectMessageSender objectMessageSender)
+    IObjectMessageSender objectMessageSender,
+    IPremiumStorePurchaseService premiumStorePurchaseService)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestAssignPlayMarketTransaction, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(
@@ -48,7 +50,8 @@ internal sealed class AssignPlayMarketTransactionHandler(
         if (legacyPurpose == "premium" ||
             obj.Purpose is TInputStorePaymentPremiumSubscription or TInputStorePaymentGiftPremium)
         {
-            await StoreTransactionHelper.ActivatePremiumAsync(mongoDatabase, input.UserId);
+            await premiumStorePurchaseService.SettleAsync(input, "playmarket", System.Text.Encoding.UTF8.GetBytes(receiptJson!),
+                obj.Purpose, ReadProductId(receiptJson!));
             return StoreTransactionHelper.EmptyUpdates();
         }
 
@@ -97,6 +100,22 @@ internal sealed class AssignPlayMarketTransactionHandler(
         await collection.DeleteOneAsync(x => x.Id == intent.Id);
 
         return StoreTransactionHelper.EmptyUpdates();
+    }
+
+    /// <summary>The <c>productId</c> of a Google Play purchase receipt, if it is one.</summary>
+    private static string? ReadProductId(string receiptJson)
+    {
+        try
+        {
+            var root = JsonDocument.Parse(receiptJson).RootElement;
+            return root.ValueKind == JsonValueKind.Object && root.TryGetProperty("productId", out var product)
+                ? product.GetString()
+                : null;
+        }
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        {
+            return null;
+        }
     }
 
     private static (string? PaymentIntentId, long FormId, string? Purpose) ParseReceipt(string receiptJson)

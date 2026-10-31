@@ -7,6 +7,7 @@ using MyTelegram.Messenger.Services.StarGifts;
 using MyTelegram.Messenger.Services.PaidMedia;
 using MyTelegram.Messenger.Services.Payments;
 using MyTelegram.Messenger.Services.StarsSubscriptions;
+using MyTelegram.Messenger.Services.Premium;
 using System.Net.Http.Headers;
 using System.Text.Json;
 
@@ -21,7 +22,12 @@ internal sealed class SendPaymentFormHandler(
     IObjectMessageSender objectMessageSender,
     IPrivacyAppService privacyAppService,
     IBotInvoicePaymentService botInvoicePaymentService,
-    ILogger<SendPaymentFormHandler> logger)
+    ILogger<SendPaymentFormHandler> logger,
+    IPremiumPurchaseGate premiumPurchaseGate,
+    IPremiumCardCheckout premiumCardCheckout,
+    IPremiumGiftService premiumGiftService,
+    IPremiumSubscriptionService premiumSubscriptionService,
+    IPremiumBotService premiumBotService)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestSendPaymentForm, MyTelegram.Schema.Payments.IPaymentResult>
 {
     protected override async Task<MyTelegram.Schema.Payments.IPaymentResult> HandleCoreAsync(
@@ -151,7 +157,9 @@ internal sealed class SendPaymentFormHandler(
                 logger.LogInformation("[SendPaymentForm] Launching Premium giveaway");
                 // Launch Premium giveaway immediately
                 var premiumGiveaway = (TInputStorePaymentPremiumGiveaway)purpose;
-                return await LaunchPremiumGiveawayAsync(input, premiumGiveaway);
+                // A Premium giveaway is paid through inputInvoicePremiumGiftCode; one arriving with a Stars
+                // top-up form carries no quote, so it gets the smallest one.
+                return await LaunchPremiumGiveawayAsync(input, premiumGiveaway, winners: 1, months: 1);
             }
         }
 
@@ -609,8 +617,11 @@ internal sealed class SendPaymentFormHandler(
         };
     }
 
-    private async Task<IPaymentResult> LaunchPremiumGiveawayAsync(IRequestInput input, TInputStorePaymentPremiumGiveaway giveaway)
+    private async Task<IPaymentResult> LaunchPremiumGiveawayAsync(IRequestInput input, TInputStorePaymentPremiumGiveaway giveaway,
+        int winners, int months)
     {
+        await premiumPurchaseGate.EnsureAllowedAsync(input.UserId);
+
         logger.LogInformation("[LaunchPremiumGiveaway] START - UserId={UserId}", input.UserId);
         logger.LogInformation("[LaunchPremiumGiveaway] BoostPeer type: {Type}", giveaway.BoostPeer?.GetType().Name);
 
@@ -621,10 +632,8 @@ internal sealed class SendPaymentFormHandler(
         if (targetPeer.PeerType != PeerType.Channel)
             RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
 
-        // For Premium giveaway, we need to get winners/months from the payment form
-        // Since they're not in TInputStorePaymentPremiumGiveaway, use defaults
-        int winners = 10; // Default winner count
-        int months = 12; // Default premium duration
+        // Winners and months are not part of TInputStorePaymentPremiumGiveaway; they come from the
+        // premiumGiftCodeOption the payment form was issued for.
         var untilDate = giveaway.UntilDate;
         var onlyNewSubscribers = giveaway.OnlyNewSubscribers;
         var winnersAreVisible = giveaway.WinnersAreVisible;
@@ -726,191 +735,61 @@ internal sealed class SendPaymentFormHandler(
         };
     }
 
+    /// <summary>
+    /// Settles a card payment for Premium issued by getPaymentForm: gift codes for named users, a
+    /// giveaway, or a subscription for oneself. What is granted is what the form quoted and stored
+    /// with the intent, not what the client restates in <paramref name="invoice"/>.
+    /// </summary>
     private async Task<IPaymentResult> HandlePremiumGiftCodeAsync(IRequestInput input, TInputInvoicePremiumGiftCode invoice, RequestSendPaymentForm obj)
     {
-        // This is Stripe payment for premium gift code
-        var col = mongoDatabase.GetCollection<StripePaymentIntentDocument>("stripe-payment-intents");
-        var intent = await col.Find(x => x.FormId == obj.FormId).FirstOrDefaultAsync();
-
-        if (intent == null)
+        var intent = await premiumCardCheckout.FindAsync(obj.FormId, input.UserId);
+        if (intent.PremiumKind == null || intent.PremiumMonths <= 0)
+        {
             RpcErrors.RpcErrors400.PaymentProviderInvalid.ThrowRpcError();
+        }
 
-        var stripe = options.Value.Stripe;
-        var credentialsJson = (obj.Credentials as TInputPaymentCredentials)?.Data?.Data ?? "{}";
+        var recipients = intent.PremiumRecipientUserIds ?? [];
 
-        if (!string.IsNullOrEmpty(stripe.SecretKey))
+        // Re-checked at settlement: the switch may have been thrown after the form was issued.
+        await premiumPurchaseGate.EnsureAllowedAsync([input.UserId, .. recipients]);
+
+        await premiumCardCheckout.ChargeAsync(intent, obj.Credentials);
+
+        var currency = intent.Currency ?? invoice.Option.Currency;
+        switch (intent.PremiumKind)
         {
-            string? stripeTokenId = null;
-            try { var doc = JsonDocument.Parse(credentialsJson).RootElement; if (doc.TryGetProperty("id", out var idProp)) stripeTokenId = idProp.GetString(); } catch { }
-
-            if (!string.IsNullOrEmpty(stripeTokenId))
-            {
-                var (existingStatus, _, _) = await StripeHelper.GetPaymentIntentAsync(stripe.SecretKey, intent!.PaymentIntentId);
-                if (existingStatus != "succeeded" && existingStatus != "requires_capture")
+            case PremiumCardCheckout.KindGiftCode:
+                var amountPerUser = recipients.Count == 0 ? intent.Amount : intent.Amount / recipients.Count;
+                foreach (var recipientUserId in recipients)
                 {
-                    await ConfirmPaymentIntentAsync(stripe.SecretKey, intent.PaymentIntentId, stripeTokenId!);
-                    var (status, _, _) = await StripeHelper.GetPaymentIntentAsync(stripe.SecretKey, intent.PaymentIntentId);
-                    if (status != "succeeded" && status != "requires_capture")
-                        RpcErrors.RpcErrors400.PaymentProviderInvalid.ThrowRpcError();
+                    await premiumGiftService.DeliverAsync(input, recipientUserId, intent.PremiumMonths, currency, amountPerUser,
+                        message: null, source: "gift-card");
                 }
-            }
-        }
 
-        // Grant premium based on purpose
-        if (invoice.Purpose is TInputStorePaymentPremiumGiftCode giftCode)
-        {
-            // Gift code for multiple users
-            var userCol = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
-            var expireDate = DateTime.UtcNow.AddMonths(invoice.Option.Months).ToTimestamp();
+                logger.LogInformation("Premium gift purchased: from={From} users={Count} months={Months}",
+                    input.UserId, recipients.Count, intent.PremiumMonths);
+                break;
 
-            // Create boost slots for gifter (3 boosts per gift)
-            var boostCol = mongoDatabase.GetCollection<BsonDocument>("channel_boosts");
-            var gifterBoosts = new List<BsonDocument>();
-            var recipientBoosts = new List<BsonDocument>();
-            var expiresTimestamp = (int)DateTimeOffset.UtcNow.AddMonths(invoice.Option.Months).ToUnixTimeSeconds();
+            case PremiumCardCheckout.KindSubscription:
+                await premiumSubscriptionService.GrantAsync(input.UserId, PremiumDuration.DaysFromMonths(intent.PremiumMonths),
+                    "card", input.UserId);
+                break;
 
-            for (int i = 0; i < giftCode.Users.Count; i++)
-            {
-                var userId = giftCode.Users[i];
-                var recipientUserId = userId is TInputUser inputUser ? inputUser.UserId : 0;
-                if (recipientUserId > 0)
+            case PremiumCardCheckout.KindGiveaway when intent.GiveawayPurpose != null:
+                var purposeBuffer = new ReadOnlyMemory<byte>(intent.GiveawayPurpose);
+                var purpose = purposeBuffer.Read<IInputStorePaymentPurpose>();
+                if (purpose is TInputStorePaymentPremiumGiveaway premiumGiveaway)
                 {
-                    // Premium gifting is not allowed to bots / system users.
-                    if (recipientUserId != input.UserId)
-                    {
-                        await PeerKindHelper.EnsureNotBotOrSystemAsync(queryProcessor, recipientUserId);
-                    }
-
-                    await userCol.UpdateOneAsync(
-                        Builders<BsonDocument>.Filter.Eq("UserId", recipientUserId),
-                        Builders<BsonDocument>.Update.Set("Premium", true).Set("PremiumExpireDate", expireDate)
-                    );
-
-                    // Send service message
-                    var messageAction = new TMessageActionGiftPremium
-                    {
-                        Currency = invoice.Option.Currency,
-                        Amount = invoice.Option.Amount / giftCode.Users.Count,
-                        Days = invoice.Option.Months * 30, // Convert months to days
-                    };
-
-                    await messageAppService.SendMessageAsync([new SendMessageInput(
-                        input.ToRequestInfo() with { ReqMsgId = 0 },
-                        input.UserId,
-                        new Peer(PeerType.User, recipientUserId),
-                        string.Empty,
-                        Random.Shared.NextInt64(),
-                        sendMessageType: SendMessageType.MessageService,
-                        messageType: MessageType.Text,
-                        messageAction: messageAction
-                    )]);
-
-                    // Create 3 boost slots for gifter
-                    for (int slot = 0; slot < 3; slot++)
-                    {
-                        gifterBoosts.Add(new BsonDocument
-                        {
-                            ["_id"] = $"boost-gift-{input.UserId}-{recipientUserId}-{slot}-{Guid.NewGuid():N}",
-                            ["ChannelId"] = 0, // Not assigned to any channel yet
-                            ["UserId"] = input.UserId,
-                            ["Slot"] = gifterBoosts.Count + slot,
-                            ["Date"] = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                            ["Expires"] = expiresTimestamp,
-                            ["Multiplier"] = 1,
-                            ["Gift"] = true,
-                            ["Giveaway"] = false,
-                            ["Unclaimed"] = false
-                        });
-                    }
-
-                    // Create 1 boost slot for recipient
-                    recipientBoosts.Add(new BsonDocument
-                    {
-                        ["_id"] = $"boost-gift-recipient-{recipientUserId}-{Guid.NewGuid():N}",
-                        ["ChannelId"] = 0, // Not assigned to any channel yet
-                        ["UserId"] = recipientUserId,
-                        ["Slot"] = 0,
-                        ["Date"] = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                        ["Expires"] = expiresTimestamp,
-                        ["Multiplier"] = 1,
-                        ["Gift"] = true,
-                        ["Giveaway"] = false,
-                        ["Unclaimed"] = false
-                    });
+                    return await LaunchPremiumGiveawayAsync(input, premiumGiveaway, Math.Max(1, intent.PremiumQuantity), intent.PremiumMonths);
                 }
-            }
 
-            // Insert boost slots
-            if (gifterBoosts.Count > 0)
-            {
-                await boostCol.InsertManyAsync(gifterBoosts);
-                logger.LogInformation("Created {Count} boost slots for gifter {UserId}",
-                    gifterBoosts.Count, input.UserId);
-            }
-            if (recipientBoosts.Count > 0)
-            {
-                await boostCol.InsertManyAsync(recipientBoosts);
-                logger.LogInformation("Created {Count} boost slots for recipients",
-                    recipientBoosts.Count);
-            }
+                RpcErrors.RpcErrors400.PurposeInvalid.ThrowRpcError();
+                break;
 
-            logger.LogInformation("Premium gift code purchased: from={From} users={Count} months={Months}",
-                input.UserId, giftCode.Users.Count, invoice.Option.Months);
+            default:
+                RpcErrors.RpcErrors400.PurposeInvalid.ThrowRpcError();
+                break;
         }
-        else if (invoice.Purpose is TInputStorePaymentPremiumSubscription)
-        {
-            // Regular premium subscription for self - 4 boosts
-            var userCol = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
-            var expireDate = DateTime.UtcNow.AddMonths(invoice.Option.Months).ToTimestamp();
-            await userCol.UpdateOneAsync(
-                Builders<BsonDocument>.Filter.Eq("UserId", input.UserId),
-                Builders<BsonDocument>.Update.Set("Premium", true).Set("PremiumExpireDate", expireDate)
-            );
-
-            // Create 4 boost slots for self-purchase
-            var boostCol = mongoDatabase.GetCollection<BsonDocument>("channel_boosts");
-            var boosts = new List<BsonDocument>();
-            var expiresTimestamp = (int)DateTimeOffset.UtcNow.AddMonths(invoice.Option.Months).ToUnixTimeSeconds();
-
-            for (int slot = 0; slot < 4; slot++)
-            {
-                boosts.Add(new BsonDocument
-                {
-                    ["_id"] = $"boost-self-{input.UserId}-{slot}-{Guid.NewGuid():N}",
-                    ["ChannelId"] = 0, // Not assigned to any channel yet
-                    ["UserId"] = input.UserId,
-                    ["Slot"] = slot,
-                    ["Date"] = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                    ["Expires"] = expiresTimestamp,
-                    ["Multiplier"] = 1,
-                    ["Gift"] = false,
-                    ["Giveaway"] = false,
-                    ["Unclaimed"] = false
-                });
-            }
-
-            await boostCol.InsertManyAsync(boosts);
-
-            logger.LogInformation("Premium subscription purchased: userId={UserId} months={Months} boosts=4",
-                input.UserId, invoice.Option.Months);
-        }
-        else if (intent!.GiveawayPurpose != null)
-        {
-            // Premium giveaway - launch immediately
-            logger.LogInformation("Premium giveaway payment confirmed, launching giveaway...");
-
-            var purposeBytes = intent.GiveawayPurpose;
-            var buffer = new ReadOnlyMemory<byte>(purposeBytes);
-            var purpose = buffer.Read<IInputStorePaymentPurpose>();
-
-            if (purpose is TInputStorePaymentPremiumGiveaway premiumGiveaway)
-            {
-                await col.DeleteOneAsync(x => x.Id == intent.Id);
-                return await LaunchPremiumGiveawayAsync(input, premiumGiveaway);
-            }
-        }
-
-        await col.DeleteOneAsync(x => x.Id == intent!.Id);
 
         return new TPaymentResult
         {
@@ -1023,8 +902,15 @@ internal sealed class SendPaymentFormHandler(
         };
     }
 
-    private Task<IPaymentResult> HandleBotInvoicePaymentAsync(IRequestInput input, RequestSendPaymentForm obj)
+    private async Task<IPaymentResult> HandleBotInvoicePaymentAsync(IRequestInput input, RequestSendPaymentForm obj)
     {
-        return botInvoicePaymentService.PayAsync(input, obj.Invoice, obj.RequestedInfoId, obj.ShippingOptionId);
+        // @PremiumBot's invoices are charged to a card rather than to a Stars balance.
+        var storedInvoice = await BotInvoiceHelper.ResolveAsync(mongoDatabase, peerHelper, input, obj.Invoice);
+        if (storedInvoice != null && premiumBotService.IsPremiumBotInvoice(storedInvoice))
+        {
+            return await premiumBotService.PayAsync(input, storedInvoice, obj);
+        }
+
+        return await botInvoicePaymentService.PayAsync(input, obj.Invoice, obj.RequestedInfoId, obj.ShippingOptionId);
     }
 }

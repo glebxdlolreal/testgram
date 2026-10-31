@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MyTelegram.Messenger.Helpers;
 
 namespace MyTelegram.Messenger.Services.Folders;
@@ -26,11 +27,19 @@ public class ChatlistMembershipService(
     ICommandBus commandBus,
     IChannelAppService channelAppService,
     IQueryProcessor queryProcessor,
+    IPremiumLimitGuard premiumLimitGuard,
     ILogger<ChatlistMembershipService> logger) : IChatlistMembershipService, ITransientDependency
 {
     public async Task JoinAsync(IRequestInput input, IReadOnlyCollection<Peer> peers)
     {
-        foreach (var (channelReadModel, isMember) in await GetChannelsAsync(input, peers))
+        var channels = await GetChannelsAsync(input, peers);
+
+        // Every outright join counts against channels_limit; checked for the whole folder up front so a
+        // link is either joined completely or not at all. Join requests count only once approved.
+        await premiumLimitGuard.EnsureCanJoinChannelsAsync(input.UserId,
+            channels.Count(c => !c.IsMember && !c.Channel.JoinRequest));
+
+        foreach (var (channelReadModel, isMember) in channels)
         {
             if (isMember)
             {

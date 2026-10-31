@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using StackExchange.Redis;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Handlers.LatestLayer.Payments;
@@ -125,7 +126,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class SendMediaHandler(IMediaHelper mediaHelper, IMessageAppService messageAppService, IPeerHelper peerHelper, IRandomHelper randomHelper, ICommandBus commandBus, IPrivacyAppService privacyAppService, IQueryProcessor queryProcessor, IMongoDatabase mongoDatabase, IIdGenerator idGenerator, IUserAppService userAppService, IMessageEffectAppService messageEffectAppService, IBotFatherBotService botFatherBotService, IMessageEntityService messageEntityService, MyTelegram.Messenger.Services.Gifs.ISentGifProcessor sentGifProcessor, MyTelegram.Messenger.Services.Stickers.ISentStickerProcessor sentStickerProcessor, MyTelegram.Messenger.Services.Stickers.IAttachedStickerRecorder attachedStickerRecorder, IFileReferenceHelper fileReferenceHelper) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendMedia, MyTelegram.Schema.IUpdates>
+internal sealed class SendMediaHandler(IMediaHelper mediaHelper, IMessageAppService messageAppService, IPeerHelper peerHelper, IRandomHelper randomHelper, ICommandBus commandBus, IPrivacyAppService privacyAppService, IQueryProcessor queryProcessor, IMongoDatabase mongoDatabase, IIdGenerator idGenerator, IUserAppService userAppService, IMessageEffectAppService messageEffectAppService, IBotFatherBotService botFatherBotService, IMessageEntityService messageEntityService, MyTelegram.Messenger.Services.Gifs.ISentGifProcessor sentGifProcessor, MyTelegram.Messenger.Services.Stickers.ISentStickerProcessor sentStickerProcessor, MyTelegram.Messenger.Services.Stickers.IAttachedStickerRecorder attachedStickerRecorder, IFileReferenceHelper fileReferenceHelper, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestSendMedia, MyTelegram.Schema.IUpdates>
 {
     /// <summary>Official poll text limits: 255 chars for the question, 100 per option.</summary>
     private const int PollQuestionMaxLength = 255;
@@ -137,6 +138,10 @@ internal sealed class SendMediaHandler(IMediaHelper mediaHelper, IMessageAppServ
         // resolve to media, and the client's own repair loop is waiting for this error.
         // See https://corefork.telegram.org/api/file-references
         InputMediaFileReferenceChecker.Check(fileReferenceHelper, obj.Media);
+
+        // upload_max_fileparts_default / _premium: 2 GB, or 4 GB with Premium.
+        // See https://corefork.telegram.org/api/premium#doubled-limits
+        await premiumLimitGuard.EnsureUploadPartsAsync(input.UserId, obj.Media);
 
         await ValidateCaptionLengthAsync(input.UserId, obj.Message);
 
@@ -289,7 +294,7 @@ internal sealed class SendMediaHandler(IMediaHelper mediaHelper, IMessageAppServ
         // it. The first button of the keyboard will always be a keyboardButtonBuy button."
         // https://corefork.telegram.org/api/payments#2-order-information
         var replyMarkup = obj.Media is TInputMediaInvoice
-            ? WithBuyButton(obj.ReplyMarkup)
+            ? BotInvoiceHelper.WithBuyButton(obj.ReplyMarkup)
             : obj.ReplyMarkup;
 
         // A dice carries no caption: TDLib's can_have_message_content_caption is false for it, and Android
@@ -380,33 +385,6 @@ internal sealed class SendMediaHandler(IMediaHelper mediaHelper, IMessageAppServ
         {
             RpcErrors.RpcErrors400.InvoicePayloadInvalid.ThrowRpcError();
         }
-    }
-
-    /// <summary>Prepends a keyboardButtonBuy row to whatever keyboard the bot supplied.</summary>
-    private static IReplyMarkup WithBuyButton(IReplyMarkup? replyMarkup)
-    {
-        var existingRows = replyMarkup is TReplyInlineMarkup { Rows.Count: > 0 } inlineMarkup
-            ? inlineMarkup.Rows.ToList()
-            : [];
-
-        // A bot may have placed the Pay button itself; the rule is that it comes first, not that
-        // there are two of them.
-        var existingBuyRow = existingRows.FindIndex(row => row.Buttons?.Any(b => b is TKeyboardButtonBuy) == true);
-        if (existingBuyRow >= 0)
-        {
-            var buyRow = existingRows[existingBuyRow];
-            existingRows.RemoveAt(existingBuyRow);
-            existingRows.Insert(0, buyRow);
-        }
-        else
-        {
-            existingRows.Insert(0, new TKeyboardButtonRow
-            {
-                Buttons = new TVector<IKeyboardButton>(new TKeyboardButtonBuy { Text = "Pay" })
-            });
-        }
-
-        return new TReplyInlineMarkup { Rows = new TVector<IKeyboardButtonRow>(existingRows) };
     }
 
     private async Task<(IMessageMedia MessageMedia, List<IMessageMedia> RevealedMedia)> CreatePaidMediaAsync(

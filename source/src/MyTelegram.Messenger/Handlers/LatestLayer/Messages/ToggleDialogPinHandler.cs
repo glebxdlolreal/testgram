@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Premium;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Pin/unpin a dialog
@@ -16,7 +18,11 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// what decides whether <c>messages.getDialogs</c> carries a <c>dialogFolder</c> row at all: the live service
 /// sends none for an unpinned archive (measured), and Android builds its own row locally in that case.</para>
 /// </remarks>
-internal sealed class ToggleDialogPinHandler(ICommandBus commandBus, IPeerHelper peerHelper) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestToggleDialogPin, IBool>
+internal sealed class ToggleDialogPinHandler(
+    ICommandBus commandBus,
+    IPeerHelper peerHelper,
+    IQueryProcessor queryProcessor,
+    IPremiumLimitResolver premiumLimitResolver) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestToggleDialogPin, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, RequestToggleDialogPin obj)
     {
@@ -24,7 +30,11 @@ internal sealed class ToggleDialogPinHandler(ICommandBus commandBus, IPeerHelper
         {
             case TInputDialogPeer inputDialogPeer:
                 var peer = peerHelper.GetPeer(inputDialogPeer.Peer, input.UserId);
-                //var ownerUid = peer.PeerType == PeerType.Channel ? peer.PeerId : input.UserId;
+                if (obj.Pinned)
+                {
+                    await EnsurePinnedLimitAsync(input.UserId, peer);
+                }
+
                 var command = new ToggleDialogPinnedCommand(DialogId.Create(input.UserId, peer), input.ToRequestInfo(), obj.Pinned);
                 await commandBus.PublishAsync(command, CancellationToken.None);
                 return null!;
@@ -44,6 +54,31 @@ internal sealed class ToggleDialogPinHandler(ICommandBus commandBus, IPeerHelper
             default:
                 RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
                 return null!;
+        }
+    }
+
+    /// <summary>
+    /// Refuses a pin past <c>dialogs_pinned_limit_*</c> (main list) or
+    /// <c>dialogs_folder_pinned_limit_*</c> (archive), the limits tdlib reads as
+    /// <c>pinned_chat_count_max</c> / <c>pinned_archived_chat_count_max</c>.
+    /// See https://corefork.telegram.org/api/premium#doubled-limits
+    /// </summary>
+    private async Task EnsurePinnedLimitAsync(long userId, Peer peer)
+    {
+        var dialog = await queryProcessor.ProcessAsync(new GetDialogByIdQuery(DialogId.Create(userId, peer).Value));
+        if (dialog?.Pinned == true)
+        {
+            return;
+        }
+
+        var folderId = dialog?.FolderId ?? 0;
+        var limit = await premiumLimitResolver.GetLimitAsync(userId,
+            folderId == MyTelegramConsts.ArchiveFolderId ? PremiumLimit.DialogsFolderPinned : PremiumLimit.DialogsPinned);
+        var pinned = await queryProcessor.ProcessAsync(
+            new GetDialogsQuery(userId, true, null, new OffsetInfo(), limit + 1, null, folderId));
+        if (pinned.Count >= limit)
+        {
+            RpcErrors.RpcErrors400.PinnedDialogsTooMuch.ThrowRpcError();
         }
     }
 }

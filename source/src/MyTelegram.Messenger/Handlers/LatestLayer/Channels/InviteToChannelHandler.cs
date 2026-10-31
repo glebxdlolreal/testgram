@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
 
@@ -31,7 +32,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class InviteToChannelHandler(ICommandBus commandBus, IPeerHelper peerHelper, IPrivacyAppService privacyAppService, IChannelAppService channelAppService, IUserAppService userAppService, IQueryProcessor queryProcessor, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase) : RpcResultObjectHandler<RequestInviteToChannel, IInvitedUsers>
+internal sealed class InviteToChannelHandler(ICommandBus commandBus, IPeerHelper peerHelper, IPrivacyAppService privacyAppService, IChannelAppService channelAppService, IUserAppService userAppService, IQueryProcessor queryProcessor, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<RequestInviteToChannel, IInvitedUsers>
 {
     protected override async Task<IInvitedUsers> HandleCoreAsync(IRequestInput input, RequestInviteToChannel obj)
     {
@@ -62,6 +63,22 @@ internal sealed class InviteToChannelHandler(ICommandBus commandBus, IPeerHelper
             var privacyRestrictedUserIdList = new List<long>();
             await privacyAppService.ApplyPrivacyListAsync(input.UserId, userIds, (_, restrictedUserId) => privacyRestrictedUserIdList.Add(restrictedUserId), new List<PrivacyType> { PrivacyType.ChatInvite });
             userIds.RemoveAll(privacyRestrictedUserIdList.Contains);
+
+            // Users already in as many channels as their channels_limit allows cannot be added.
+            var atChannelLimit = new List<long>();
+            foreach (var userId in userIds)
+            {
+                if (await premiumLimitGuard.IsAtChannelLimitAsync(userId))
+                {
+                    atChannelLimit.Add(userId);
+                }
+            }
+
+            userIds.RemoveAll(atChannelLimit.Contains);
+            if (userIds.Count == 0 && atChannelLimit.Count > 0)
+            {
+                RpcErrors.RpcErrors400.UserChannelsTooMuch.ThrowRpcError();
+            }
 
             // Nothing left to do means the caller learns nothing from an empty success.
             if (userIds.Count == 0)

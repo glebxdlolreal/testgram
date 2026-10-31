@@ -29,6 +29,7 @@ public class UserDataSeeder(
             // behind the "users were created" flag.
             await CreateChatImporterBotUserAsync();
             await CreateGifSearchBotUserAsync();
+            await CreatePremiumBotUserAsync();
 
             return;
         }
@@ -40,6 +41,7 @@ public class UserDataSeeder(
         await CreateGroupAnonymousBotUserAsync();
         await CreateBotFatherUserAsync();
         await CreateGifSearchBotUserAsync();
+        await CreatePremiumBotUserAsync();
 
         if (options.CurrentValue.CreateTestUsers)
         {
@@ -300,6 +302,138 @@ public class UserDataSeeder(
                 .SetOnInsert("OwnerId", 0L)
                 .SetOnInsert("CreatedAt", DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
             new UpdateOptions { IsUpsert = true });
+    }
+
+    /// <summary>
+    /// Creates <c>@PremiumBot</c>, the bot <c>premium_bot_username</c> names and clients open with
+    /// <c>messages.startBot</c> to buy Premium. It is answered in-process by <c>PremiumBotService</c>.
+    /// See https://corefork.telegram.org/api/premium
+    /// </summary>
+    private async Task CreatePremiumBotUserAsync()
+    {
+        var userId = MyTelegramConsts.PremiumBotUserId;
+        var userName = MyTelegramConsts.PremiumBotUserName;
+
+        // Installs that predate this bot may have let a user register the name through BotFather. That
+        // bot keeps its owner and everything else; only the name moves, so the official one can have it.
+        if (!await FreeServiceUserNameAsync(userName, userId))
+        {
+            return;
+        }
+
+        var created = await CreateUserIfNeededAsync(userId, string.Empty, "Premium Bot", null, userName, true);
+        if (!created)
+        {
+            var existing = await queryProcessor.ProcessAsync(new GetUserByIdQuery(userId));
+            if (existing != null && !string.IsNullOrEmpty(existing.UserName) &&
+                !string.Equals(existing.UserName, userName, StringComparison.OrdinalIgnoreCase))
+            {
+                logger.LogWarning("User id {UserId} is reserved for @{BotUserName} but is held by {UserName}",
+                    userId, userName, existing.UserName);
+
+                return;
+            }
+        }
+
+        await EnsureServiceUserNameAsync(userId, userName);
+
+        var user = await queryProcessor.ProcessAsync(new GetUserByIdQuery(userId));
+        if (user is { Verified: false })
+        {
+            await commandBus.PublishAsync(new SetVerifiedCommand(UserId.Create(userId), true));
+        }
+
+        if (string.IsNullOrEmpty(user?.About))
+        {
+            await UpdateUserBioAsync(userId, "I can help you subscribe to Telegram Premium. Send /start to see the options.");
+        }
+
+        await database.GetCollection<BsonDocument>("botfather-bot-state").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotUserId", userId),
+            Builders<BsonDocument>.Update
+                .Set("BotUserId", userId)
+                .Set("Username", userName)
+                .Set("Name", "Premium Bot")
+                .SetOnInsert("OwnerId", 0L)
+                .SetOnInsert("CreatedAt", DateTimeOffset.UtcNow.ToUnixTimeSeconds()),
+            new UpdateOptions { IsUpsert = true });
+    }
+
+    /// <summary>
+    /// Makes <paramref name="userName"/> available to the service account <paramref name="ownerId"/>.
+    /// A user-created bot holding it is renamed to <c>legacy{id}_{name}</c> (still ending in "bot");
+    /// anything else holding it is left alone and false is returned.
+    /// </summary>
+    private async Task<bool> FreeServiceUserNameAsync(string userName, long ownerId)
+    {
+        var holder = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(userName.ToLowerInvariant()));
+        if (holder == null || (holder.PeerType == PeerType.User && holder.PeerId == ownerId))
+        {
+            return true;
+        }
+
+        var holderUser = holder.PeerType == PeerType.User
+            ? await queryProcessor.ProcessAsync(new GetUserByIdQuery(holder.PeerId))
+            : null;
+        if (holderUser is not { Bot: true } || MyTelegramConsts.IsReservedSystemBotUserId(holder.PeerId))
+        {
+            logger.LogWarning("The username @{UserName} is held by {PeerType} {PeerId}, which is not a user-created bot; " +
+                              "it is not taken over", userName, holder.PeerType, holder.PeerId);
+
+            return false;
+        }
+
+        var newUserName = $"legacy{holder.PeerId}_{userName.ToLowerInvariant()}";
+        await commandBus.PublishAsync(new UpdateUserNameCommand(
+            UserNameId.Create(newUserName.ToLowerInvariant()),
+            RequestInfo.Empty with
+            {
+                RequestId = Guid.NewGuid(),
+                ReqMsgId = Random.Shared.NextInt64(1, long.MaxValue) | 1,
+                Date = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
+            },
+            new Peer(PeerType.User, holder.PeerId),
+            newUserName,
+            holderUser.UserName));
+
+        await database.GetCollection<BsonDocument>("botfather-bot-state").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotUserId", holder.PeerId),
+            Builders<BsonDocument>.Update.Set("Username", newUserName));
+
+        var after = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(userName.ToLowerInvariant()));
+        if (after != null && after.PeerId == holder.PeerId)
+        {
+            logger.LogWarning("Moving @{UserName} off bot {BotUserId} did not take effect; retry seeding", userName, holder.PeerId);
+
+            return false;
+        }
+
+        logger.LogInformation("Moved @{UserName} off user-created bot {BotUserId}; it is now @{NewUserName}",
+            userName, holder.PeerId, newUserName);
+
+        return true;
+    }
+
+    private async Task EnsureServiceUserNameAsync(long userId, string userName)
+    {
+        var existing = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(userName.ToLowerInvariant()));
+        if (existing != null && existing.PeerId == userId)
+        {
+            return;
+        }
+
+        if (existing != null)
+        {
+            logger.LogWarning("The username @{UserName} is held by {PeerType} {PeerId}", userName, existing.PeerType, existing.PeerId);
+
+            return;
+        }
+
+        await commandBus.PublishAsync(new CreateUserNameCommand(UserNameId.Create(userName.ToLowerInvariant()),
+            new Peer(PeerType.User, userId), userName,
+            (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds()));
+
+        logger.LogInformation("Registered the username @{UserName} for {UserId}", userName, userId);
     }
 
     private async Task EnsureGifUserNameAsync(long userId)

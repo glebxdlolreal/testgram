@@ -3,6 +3,7 @@ using MongoDB.Driver;
 using MyTelegram.Messenger.Services.StarGifts;
 using MyTelegram.Services.Services;
 using System.Text;
+using MyTelegram.Messenger.Services.Premium;
 using System.Text.Json;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
@@ -20,7 +21,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 internal sealed class AssignAppStoreTransactionHandler(
     IMongoDatabase mongoDatabase,
     IOptions<MyTelegramMessengerServerOptions> options,
-    IObjectMessageSender objectMessageSender)
+    IObjectMessageSender objectMessageSender,
+    IPremiumStorePurchaseService premiumStorePurchaseService)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestAssignAppStoreTransaction, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(
@@ -37,7 +39,8 @@ internal sealed class AssignAppStoreTransactionHandler(
         {
             case TInputStorePaymentPremiumSubscription:
             case TInputStorePaymentGiftPremium:
-                await StoreTransactionHelper.ActivatePremiumAsync(mongoDatabase, input.UserId);
+                // An App Store receipt is an opaque blob that names no product this server can read.
+                await premiumStorePurchaseService.SettleAsync(input, "appstore", obj.Receipt, obj.Purpose, storeProduct: null);
                 return StoreTransactionHelper.EmptyUpdates();
 
             case TInputStorePaymentStarsTopup topup:

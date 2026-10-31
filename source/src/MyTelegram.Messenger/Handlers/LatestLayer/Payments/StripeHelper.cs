@@ -45,6 +45,24 @@ internal static class StripeHelper
         );
     }
 
+    /// <summary>
+    /// Confirms a PaymentIntent with the card token the client's Stripe SDK produced and returns the
+    /// PaymentMethod id it was charged to.
+    /// </summary>
+    public static async Task<string> ConfirmPaymentIntentAsync(string secretKey, string paymentIntentId, string tokenId)
+    {
+        var paymentMethodId = await CreatePaymentMethodAsync(secretKey, tokenId);
+        var request = new HttpRequestMessage(HttpMethod.Post, $"https://api.stripe.com/v1/payment_intents/{paymentIntentId}/confirm");
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", secretKey);
+        request.Content = new FormUrlEncodedContent(new Dictionary<string, string> { ["payment_method"] = paymentMethodId });
+        var response = await Http.SendAsync(request);
+        var json = await response.Content.ReadAsStringAsync();
+        var doc = JsonDocument.Parse(json).RootElement;
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Stripe confirm error: {doc.GetProperty("error").GetProperty("message").GetString()}");
+        return paymentMethodId;
+    }
+
     /// <summary>Creates a PaymentMethod from a card token and returns its id.</summary>
     public static async Task<string> CreatePaymentMethodAsync(string secretKey, string tokenId)
     {

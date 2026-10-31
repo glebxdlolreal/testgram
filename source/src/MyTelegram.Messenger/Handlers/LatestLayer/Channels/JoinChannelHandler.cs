@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
 
@@ -30,7 +31,8 @@ internal sealed class JoinChannelHandler(
     ICommandBus commandBus,
     IChannelAppService channelAppService,
     IQueryProcessor queryProcessor,
-    IMongoDatabase mongoDatabase)
+    IMongoDatabase mongoDatabase,
+    IPremiumLimitGuard premiumLimitGuard)
     : RpcResultObjectHandler<RequestJoinChannel, IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestJoinChannel obj)
@@ -69,6 +71,9 @@ internal sealed class JoinChannelHandler(
             }
             else
             {
+                // channels_limit_default / _premium. See https://corefork.telegram.org/api/premium#doubled-limits
+                await premiumLimitGuard.EnsureCanJoinChannelAsync(input.UserId);
+
                 var command = new StartJoinChannelCommand(TempId.New, input.ToRequestInfo(), channelReadModel.ChannelId, channelReadModel.Broadcast, channelReadModel.TopMessageId, channelHistoryMinId);
                 await commandBus.PublishAsync(command);
 

@@ -167,6 +167,38 @@ public static class BotInvoiceHelper
         };
     }
 
+    /// <summary>
+    /// "For invoice messages, the message will also have a replyInlineMarkup keyboard attached to it.
+    /// The first button of the keyboard will always be a keyboardButtonBuy button."
+    /// https://corefork.telegram.org/api/payments#2-order-information
+    /// </summary>
+    /// <remarks>Prepends a keyboardButtonBuy row to whatever keyboard the bot supplied.</remarks>
+    public static IReplyMarkup WithBuyButton(IReplyMarkup? replyMarkup)
+    {
+        var existingRows = replyMarkup is TReplyInlineMarkup { Rows.Count: > 0 } inlineMarkup
+            ? inlineMarkup.Rows.ToList()
+            : [];
+
+        // A bot may have placed the Pay button itself; the rule is that it comes first, not that
+        // there are two of them.
+        var existingBuyRow = existingRows.FindIndex(row => row.Buttons?.Any(b => b is TKeyboardButtonBuy) == true);
+        if (existingBuyRow >= 0)
+        {
+            var buyRow = existingRows[existingBuyRow];
+            existingRows.RemoveAt(existingBuyRow);
+            existingRows.Insert(0, buyRow);
+        }
+        else
+        {
+            existingRows.Insert(0, new TKeyboardButtonRow
+            {
+                Buttons = new TVector<IKeyboardButton>(new TKeyboardButtonBuy { Text = "Pay" })
+            });
+        }
+
+        return new TReplyInlineMarkup { Rows = new TVector<IKeyboardButtonRow>(existingRows) };
+    }
+
     public static async Task SaveAsync(IMongoDatabase db, BotInvoiceDocument document)
     {
         var collection = db.GetCollection<BotInvoiceDocument>(CollectionName);

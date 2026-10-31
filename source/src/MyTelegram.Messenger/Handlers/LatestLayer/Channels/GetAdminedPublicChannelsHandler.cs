@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <summary>
 /// Get <a href="https://corefork.telegram.org/api/channel">channels/supergroups/geogroups</a> we're admin in. Usually called when the user exceeds the <a href="https://corefork.telegram.org/constructor/config">limit</a> for owned public <a href="https://corefork.telegram.org/api/channel">channels/supergroups/geogroups</a>, and the user is given the choice to remove one of his channels/supergroups/geogroups.
@@ -10,10 +11,17 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetAdminedPublicChannelsHandler(IQueryProcessor queryProcessor, IPhotoAppService photoAppService, IChatConverterService chatConverterService) : RpcResultObjectHandler<RequestGetAdminedPublicChannels, IChats>
+internal sealed class GetAdminedPublicChannelsHandler(IQueryProcessor queryProcessor, IPhotoAppService photoAppService, IChatConverterService chatConverterService, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<RequestGetAdminedPublicChannels, IChats>
 {
     protected override async Task<IChats> HandleCoreAsync(IRequestInput input, RequestGetAdminedPublicChannels obj)
     {
+        // check_limit: "if the user has reached the limit of owned public channels ... instead of
+        // returning the channel list one of the specified errors will be returned".
+        if (obj.CheckLimit)
+        {
+            await premiumLimitGuard.EnsureCanOwnPublicChannelAsync(input.UserId);
+        }
+
         var channelReadModels = await queryProcessor.ProcessAsync(new GetAdminedPublicChannelsQuery(input.UserId));
         var photoReadModels = await photoAppService.GetPhotosAsync(channelReadModels);
         var channelMemberReadModels = await queryProcessor.ProcessAsync(new GetChannelMemberListByChannelIdListQuery(input.UserId, channelReadModels.Select(p => p.ChannelId).ToList()));

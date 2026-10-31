@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Premium;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Passport;
@@ -23,7 +24,8 @@ public class BotFatherBotService(
     IConnectionMultiplexer redis,
     ICommandBus commandBus,
     IQueryProcessor queryProcessor,
-    IPassportBotResolver passportBotResolver) : IBotFatherBotService, ISingletonDependency
+    IPassportBotResolver passportBotResolver,
+    IPremiumLimitResolver premiumLimitResolver) : IBotFatherBotService, ISingletonDependency
 {
     public const long BotUserId = MyTelegramConsts.BotFatherUserId;
     private const string BotCollection = "botfather-bot-state";
@@ -128,6 +130,12 @@ public class BotFatherBotService(
                 break;
             case "/newbot":
                 await ClearStateAsync(fromUserId);
+                if (await IsAtBotLimitAsync(fromUserId) is { } botLimit)
+                {
+                    await SendAsync(input, fromUserId, BotLimitText(botLimit));
+                    break;
+                }
+
                 await SetStateAsync(fromUserId, "newbot:name");
                 await SendAsync(input, fromUserId, "Alright, a new bot. How are we going to call it? Please choose a name for your bot.");
                 break;
@@ -326,6 +334,14 @@ public class BotFatherBotService(
                     var name = extra;
                     var username = text.TrimStart('@').ToLower();
                     await ClearStateAsync(fromUserId);
+
+                    // Checked again at creation: bots may have been made in another session meanwhile.
+                    if (await IsAtBotLimitAsync(fromUserId) is { } limitAtCreation)
+                    {
+                        await SendAsync(input, fromUserId, BotLimitText(limitAtCreation));
+                        break;
+                    }
+
                     var result = await DoCreateBotAsync(input, fromUserId, name, username);
                     if (result != null) await SendAsync(input, fromUserId, result);
                 }
@@ -828,6 +844,22 @@ public class BotFatherBotService(
     private async Task<BsonDocument?> GetBotAsync(long fromUserId, string username)
         => await mongoDatabase.GetCollection<BsonDocument>(BotCollection)
             .Find(new BsonDocument { { "OwnerId", fromUserId }, { "Username", username } }).FirstOrDefaultAsync();
+
+    /// <summary>
+    /// The account's bots_create_limit_default / _premium when it already owns that many bots, else null.
+    /// See https://corefork.telegram.org/api/premium#doubled-limits
+    /// </summary>
+    private async Task<int?> IsAtBotLimitAsync(long fromUserId)
+    {
+        var limit = await premiumLimitResolver.GetLimitAsync(fromUserId, PremiumLimit.BotsCreate);
+        var bots = await GetUserBotsAsync(fromUserId);
+        return bots.Count >= limit ? limit : null;
+    }
+
+    private static string BotLimitText(int limit) =>
+        $"That I cannot do.\n\nYou come to me asking for more than {limit} bots. But you don't ask with respect. " +
+        "You don't offer friendship. You don't even think to call me Botfather.\n\n" +
+        "Delete one of your bots with /deletebot to create a new one.";
 
     private async Task<List<BsonDocument>> GetUserBotsAsync(long fromUserId)
         => await mongoDatabase.GetCollection<BsonDocument>(BotCollection)

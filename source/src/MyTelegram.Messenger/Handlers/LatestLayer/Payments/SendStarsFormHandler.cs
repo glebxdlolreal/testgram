@@ -9,6 +9,8 @@ using MyTelegram.Messenger.Services.StarsSubscriptions;
 using MyTelegram.Schema.Payments;
 using MyTelegram.Services.Services;
 using MyTelegram.Domain.Aggregates.ChatInvite;
+using MyTelegram.Messenger.Options;
+using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 
@@ -21,7 +23,10 @@ internal sealed class SendStarsFormHandler(
     ICommandBus commandBus,
     IQueryProcessor queryProcessor,
     IBotInvoicePaymentService botInvoicePaymentService,
-    IStarsSubscriptionService starsSubscriptionService) : RpcResultObjectHandler<RequestSendStarsForm, IPaymentResult>
+    IStarsSubscriptionService starsSubscriptionService,
+    IOptions<PremiumOptions> premiumOptions,
+    IPremiumPurchaseGate premiumPurchaseGate,
+    IPremiumGiftService premiumGiftService) : RpcResultObjectHandler<RequestSendStarsForm, IPaymentResult>
 {
     protected override async Task<IPaymentResult> HandleCoreAsync(IRequestInput input, RequestSendStarsForm obj)
     {
@@ -40,120 +45,9 @@ internal sealed class SendStarsFormHandler(
         if (obj.Invoice is TInputInvoiceChatInviteSubscription subscriptionInvoice)
             return await HandleChatInviteSubscriptionAsync(input, subscriptionInvoice);
 
-        // Handle Premium purchase with Stars
         if (obj.Invoice is TInputInvoicePremiumGiftStars premiumStars)
         {
-            // Get Stars price based on months (matching PremiumPromoConverter)
-            long starsPrice = premiumStars.Months switch
-            {
-                1 => 2500,   // 1 month = 2500 stars
-                3 => 7000,   // 3 months = 7000 stars
-                6 => 13000,  // 6 months = 13000 stars
-                12 => 25000, // 12 months = 25000 stars
-                _ => 0
-            };
-
-            if (starsPrice == 0)
-                RpcErrors.RpcErrors400.BotInvoiceInvalid.ThrowRpcError();
-
-            // Check Stars balance
-            var premiumBalance = await StarsBalanceHelper.GetBalanceAsync(mongoDatabase, input.UserId);
-            if (premiumBalance < starsPrice)
-                RpcErrors.RpcErrors400.BalanceTooLow.ThrowRpcError();
-
-            // Get target user
-            var targetUserId = premiumStars.UserId switch
-            {
-                TInputUserSelf => input.UserId,
-                TInputUser u => u.UserId,
-                _ => peerHelper.GetPeer(premiumStars.UserId, input.UserId).PeerId
-            };
-
-            // Premium gifting is not allowed to bots/system users (Telegram clients also reject this UI-side).
-            if (targetUserId != input.UserId)
-            {
-                var queryProcessor0 = services.GetRequiredService<IQueryProcessor>();
-                await PeerKindHelper.EnsureNotBotOrSystemAsync(queryProcessor0, targetUserId);
-            }
-
-            // Deduct Stars from sender
-            await StarsBalanceHelper.AddBalanceAsync(mongoDatabase, input.UserId, -starsPrice);
-            await StarsBalanceHelper.AddTransactionAsync(mongoDatabase, input.UserId, -starsPrice,
-                title: $"Premium gift ({premiumStars.Months} months)", peerUserId: targetUserId, premiumGiftMonths: premiumStars.Months);
-
-            // Activate Premium subscription for target user
-            await ActivatePremiumAsync(targetUserId, premiumStars.Months);
-
-            // Create boost slots for sender (boosts_per_sent_gift = 3)
-            // Sender gets 3 boost slots when gifting Premium to another user
-            if (targetUserId != input.UserId)
-            {
-                var boostSlotCol = mongoDatabase.GetCollection<UserBoostSlotDocument>("user-boost-slots");
-
-                // Find next available slot numbers for sender
-                var existingSlots = await boostSlotCol.Find(x => x.UserId == input.UserId)
-                    .SortByDescending(x => x.Slot)
-                    .Limit(1)
-                    .ToListAsync();
-
-                int nextSlot = existingSlots.Count > 0 ? existingSlots[0].Slot + 1 : 0;
-
-                // Create 3 new boost slots for sender
-                for (int i = 0; i < 3; i++)
-                {
-                    await boostSlotCol.InsertOneAsync(new UserBoostSlotDocument
-                    {
-                        Id = $"boost-slot-{input.UserId}-{nextSlot + i}",
-                        UserId = input.UserId,
-                        Slot = nextSlot + i,
-                        Cooldown = 0,
-                        ChannelId = null
-                    });
-                }
-            }
-
-            // Create 1 boost slot for recipient
-            {
-                var boostSlotCol = mongoDatabase.GetCollection<UserBoostSlotDocument>("user-boost-slots");
-
-                var existingSlots = await boostSlotCol.Find(x => x.UserId == targetUserId)
-                    .SortByDescending(x => x.Slot)
-                    .Limit(1)
-                    .ToListAsync();
-
-                int nextSlot = existingSlots.Count > 0 ? existingSlots[0].Slot + 1 : 0;
-
-                await boostSlotCol.InsertOneAsync(new UserBoostSlotDocument
-                {
-                    Id = $"boost-slot-{targetUserId}-{nextSlot}",
-                    UserId = targetUserId,
-                    Slot = nextSlot,
-                    Cooldown = 0,
-                    ChannelId = null
-                });
-            }
-
-            // Send gift message to recipient
-            var action = new TMessageActionGiftPremium
-            {
-                Currency = "XTR",
-                Amount = starsPrice,
-                Days = premiumStars.Months * 30,
-                Message = premiumStars.Message,
-            };
-
-            await messageAppService.SendMessageAsync([new SendMessageInput(
-                input.ToRequestInfo() with { ReqMsgId = 0 },
-                input.UserId,
-                new Peer(PeerType.User, targetUserId),
-                string.Empty,
-                Random.Shared.NextInt64(),
-                sendMessageType: SendMessageType.MessageService,
-                messageType: MessageType.Text,
-                messageAction: action
-            )]);
-
-            return new TPaymentResult { Updates = new TUpdates { Updates = new TVector<IUpdate>(), Users = new TVector<IUser>(), Chats = new TVector<IChat>(), Date = DateTime.UtcNow.ToTimestamp(), Seq = 0 } };
+            return await HandlePremiumGiftStarsAsync(input, premiumStars);
         }
 
         if (obj.Invoice is TInputInvoiceStarGiftAuctionBid auctionBid)
@@ -986,70 +880,73 @@ internal sealed class SendStarsFormHandler(
         };
     }
 
-    private async Task ActivatePremiumAsync(long userId, int months)
+    /// <summary>
+    /// Gifts Telegram Premium paid for with Stars, the flow unofficial clients are told to use.
+    /// See https://corefork.telegram.org/api/premium#gifting-telegram-premium
+    /// </summary>
+    private async Task<IPaymentResult> HandlePremiumGiftStarsAsync(IRequestInput input, TInputInvoicePremiumGiftStars invoice)
     {
-        var userCol = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
-
-        // Check if user already has Premium
-        var userFilter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-        var user = await userCol.Find(userFilter).FirstOrDefaultAsync();
-
-        if (user == null)
-            RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
-
-        bool alreadyHasPremium = user.Contains("Premium") && user["Premium"].AsBoolean;
-
-        // Set Premium flag
-        var update = Builders<BsonDocument>.Update.Set("Premium", true);
-        await userCol.UpdateOneAsync(userFilter, update);
-
-        // Create/update premium subscription
-        var now = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        var expiresAt = now + (months * 30 * 24 * 3600);
-
-        var subCol = mongoDatabase.GetCollection<BsonDocument>("premium_subscriptions");
-        await subCol.ReplaceOneAsync(
-            Builders<BsonDocument>.Filter.Eq("UserId", userId),
-            new BsonDocument
-            {
-                ["UserId"] = userId,
-                ["Months"] = months,
-                ["ActivatedAt"] = now,
-                ["ExpiresAt"] = expiresAt,
-                ["Currency"] = "XTR"
-            },
-            new ReplaceOptions { IsUpsert = true });
-
-        // Grant 4 boosts ONLY if user didn't have Premium before
-        if (!alreadyHasPremium)
+        var period = premiumOptions.Value.FindGift(invoice.Months);
+        if (period == null || period.AmountStars <= 0)
         {
-            var boostCol = mongoDatabase.GetCollection<BsonDocument>("channel_boosts");
-            var expires = now + (86400 * 365); // 1 year
+            RpcErrors.RpcErrors400.MonthInvalid.ThrowRpcError();
+        }
 
-            // Find next available slot
-            var existingBoosts = await boostCol.Find(Builders<BsonDocument>.Filter.Eq("UserId", userId))
-                .ToListAsync();
+        var recipientUserId = invoice.UserId switch
+        {
+            TInputUserSelf => input.UserId,
+            TInputUser u => u.UserId,
+            _ => peerHelper.GetPeer(invoice.UserId, input.UserId).PeerId
+        };
 
-            int nextSlot = 1;
-            if (existingBoosts.Count > 0)
+        if (recipientUserId != input.UserId)
+        {
+            // Premium cannot be gifted to bots or system accounts (official clients refuse this UI-side too).
+            await PeerKindHelper.EnsureNotBotOrSystemAsync(queryProcessor, recipientUserId);
+
+            // globalPrivacySettings.disallowed_gifts.disallow_premium_gifts, shown to others in userFull.
+            var privacy = await queryProcessor.ProcessAsync(new GetGlobalPrivacySettingsQuery(recipientUserId));
+            if (privacy?.DisallowPremiumGifts == true)
             {
-                var usedSlots = existingBoosts.Select(b => b["Slot"].AsInt32).ToHashSet();
-                while (usedSlots.Contains(nextSlot))
-                    nextSlot++;
-            }
-
-            // Add 4 boosts
-            for (int i = 0; i < 4; i++)
-            {
-                await boostCol.InsertOneAsync(new BsonDocument
-                {
-                    ["UserId"] = userId,
-                    ["Slot"] = nextSlot + i,
-                    ["ChannelId"] = 0L,
-                    ["Date"] = now,
-                    ["Expires"] = expires
-                });
+                RpcErrors.RpcErrors403.UserPrivacyRestricted.ThrowRpcError();
             }
         }
+
+        // Neither side may be one Premium is off sale for: a blocked account cannot be gifted to either.
+        await premiumPurchaseGate.EnsureAllowedAsync(input.UserId, recipientUserId);
+
+        var price = period!.AmountStars;
+        if (!await StarsBalanceHelper.TryDebitAsync(mongoDatabase, input.UserId, price))
+        {
+            RpcErrors.RpcErrors400.BalanceTooLow.ThrowRpcError();
+        }
+
+        try
+        {
+            await premiumGiftService.DeliverAsync(input, recipientUserId, invoice.Months, "XTR", price, invoice.Message, "gift-stars");
+        }
+        catch
+        {
+            // Nothing was delivered, so nothing is owed.
+            await StarsBalanceHelper.AddBalanceAsync(mongoDatabase, input.UserId, price);
+            throw;
+        }
+
+        await StarsBalanceHelper.AddTransactionAsync(mongoDatabase, input.UserId, -price,
+            title: $"Premium gift ({invoice.Months} months)", peerUserId: recipientUserId, premiumGiftMonths: invoice.Months);
+        await BalancePushHelper.PushStarsBalanceAsync(objectMessageSender, mongoDatabase, input.UserId);
+
+        // The service message reaches the chat through the usual push once it is created.
+        return new TPaymentResult
+        {
+            Updates = new TUpdates
+            {
+                Updates = new TVector<IUpdate>(),
+                Users = new TVector<IUser>(),
+                Chats = new TVector<IChat>(),
+                Date = DateTime.UtcNow.ToTimestamp(),
+                Seq = 0
+            }
+        };
     }
 }

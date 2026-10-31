@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Premium;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <summary>
 /// Updates user profile.
@@ -11,10 +13,18 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class UpdateProfileHandler(ICommandBus commandBus) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestUpdateProfile, MyTelegram.Schema.IUser>
+internal sealed class UpdateProfileHandler(ICommandBus commandBus, IPremiumLimitResolver premiumLimitResolver) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestUpdateProfile, MyTelegram.Schema.IUser>
 {
     protected override async Task<IUser> HandleCoreAsync(IRequestInput input, RequestUpdateProfile obj)
     {
+        // about_length_limit_default / _premium, counted in code points as tdlib's set_bio does
+        // (utf8_length). See https://corefork.telegram.org/api/premium#doubled-limits
+        if (!string.IsNullOrEmpty(obj.About) &&
+            obj.About.EnumerateRunes().Count() > await premiumLimitResolver.GetLimitAsync(input.UserId, PremiumLimit.AboutLength))
+        {
+            RpcErrors.RpcErrors400.AboutTooLong.ThrowRpcError();
+        }
+
         var userId = UserId.Create(input.UserId);
         var command = new UpdateProfileCommand(userId, input.ToRequestInfo(), obj.FirstName, obj.LastName, obj.About);
         await commandBus.PublishAsync(command);

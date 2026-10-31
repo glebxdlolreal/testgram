@@ -14,6 +14,7 @@ Usage:
        python3 seed_premium_promo.py --import
 """
 import asyncio
+import base64
 import argparse
 import io
 import json
@@ -98,6 +99,36 @@ def build_primary_attribute(doc: Dict[str, Any]) -> Dict[str, Any] | None:
     }
 
 
+def build_video_attributes(doc: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """documentAttributeVideo + documentAttributeFilename, in the shape the C# driver reads back."""
+    attributes: List[Dict[str, Any]] = []
+    video = doc.get("video")
+    if video:
+        attributes.append({
+            "_t": "TDocumentAttributeVideo",
+            "RoundMessage": video.get("round_message", False),
+            "SupportsStreaming": video.get("supports_streaming", False),
+            "Nosound": video.get("nosound", False),
+            "Duration": float(video.get("duration", 0)),
+            "W": int(video.get("w", 0)),
+            "H": int(video.get("h", 0)),
+            "PreloadPrefixSize": None,
+            "VideoStartTs": None,
+            "VideoCodec": None,
+        })
+    if doc.get("file_name"):
+        attributes.append({"_t": "TDocumentAttributeFilename", "FileName": doc["file_name"]})
+    return attributes
+
+
+def build_stripped_thumbs(doc: Dict[str, Any]) -> List[Dict[str, Any]] | None:
+    """The inline photoStrippedSize clients show while the promo video loads."""
+    if not doc.get("stripped_thumb"):
+        return None
+    data = base64.b64decode(doc["stripped_thumb"])
+    return [{"W": 0, "H": 0, "Size": len(data), "Type": "i", "StrippedThumb": data, "Bytes": None}]
+
+
 def merge_attributes(existing_attributes: Any, new_primary_attribute: Dict[str, Any] | None) -> List[Dict[str, Any]]:
     if new_primary_attribute is None:
         if isinstance(existing_attributes, list):
@@ -122,7 +153,7 @@ async def cmd_download():
         raise RuntimeError("Set TG_API_ID, TG_API_HASH, TG_PHONE env vars")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient("premium_promo_seeder", TG_API_ID, TG_API_HASH)
+    client = TelegramClient(os.environ.get("TG_SESSION", "premium_promo_seeder"), TG_API_ID, TG_API_HASH)
     await client.start(phone=TG_PHONE)
 
     promo = await client(functions.help.GetPremiumPromoRequest())
@@ -147,6 +178,28 @@ async def cmd_download():
             print(f"  Downloaded {section}: {doc.id}.{ext}")
         else:
             print(f"  Reused {section}: {doc.id}.{ext}")
+
+        # Since 2024 the promo sections are mp4 screen recordings, not stickers: the client plays them
+        # as videos, so their documentAttributeVideo (size, duration, streaming) has to travel too.
+        video = None
+        file_name = ""
+        stripped = None
+        for thumb in getattr(doc, "thumbs", None) or []:
+            if thumb.__class__.__name__ == "PhotoStrippedSize":
+                stripped = base64.b64encode(thumb.bytes).decode()
+        for attr in getattr(doc, "attributes", []):
+            class_name = attr.__class__.__name__
+            if class_name == "DocumentAttributeVideo":
+                video = {
+                    "duration": float(getattr(attr, "duration", 0) or 0),
+                    "w": int(getattr(attr, "w", 0) or 0),
+                    "h": int(getattr(attr, "h", 0) or 0),
+                    "supports_streaming": bool(getattr(attr, "supports_streaming", False)),
+                    "round_message": bool(getattr(attr, "round_message", False)),
+                    "nosound": bool(getattr(attr, "nosound", False)),
+                }
+            elif class_name == "DocumentAttributeFilename":
+                file_name = attr.file_name
 
         sticker_set = None
         alt = ""
@@ -202,6 +255,9 @@ async def cmd_download():
                 "free": free,
                 "text_color": text_color,
                 "sticker_set": sticker_set,
+                "video": video,
+                "file_name": file_name,
+                "stripped_thumb": stripped,
             },
         })
 
@@ -270,13 +326,15 @@ def cmd_import() -> int:
                 if path.exists():
                     data = path.read_bytes()
                     minio.put_object(MINIO_BUCKET, str(doc_id), io.BytesIO(data), length=len(data), content_type=mime)
-            merged_attributes = merge_attributes(existing_doc.get("Attributes2"), primary_attribute)
+            merged_attributes = build_video_attributes(doc) or merge_attributes(existing_doc.get("Attributes2"), primary_attribute)
             update_fields = {
                 "Attributes2": merged_attributes,
                 "Version": max(int(existing_doc.get("Version", 1) or 1), 1),
             }
             if doc.get("is_custom_emoji"):
                 update_fields["Attributes"] = None
+            if doc.get("stripped_thumb"):
+                update_fields["Thumbs"] = build_stripped_thumbs(doc)
             doc_col.update_one({"DocumentId": doc_id}, {"$set": update_fields})
         else:
             if not path.exists():
@@ -297,10 +355,10 @@ def cmd_import() -> int:
                 "MimeType": mime,
                 "Size": doc.get("size", path.stat().st_size),
                 "Name": path.name,
-                "Thumbs": None,
+                "Thumbs": build_stripped_thumbs(doc),
                 "VideoThumbs": None,
                 "Attributes": None,
-                "Attributes2": merge_attributes(None, primary_attribute),
+                "Attributes2": build_video_attributes(doc) or merge_attributes(None, primary_attribute),
                 "CreatorId": None,
                 "Fingerprint": None,
                 "Md5CheckSum": None,
