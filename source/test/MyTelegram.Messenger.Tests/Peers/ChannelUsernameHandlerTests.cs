@@ -1,12 +1,11 @@
 using System.Reflection;
 using EventFlow.Queries;
-using MongoDB.Bson;
-using MongoDB.Driver;
 using Moq;
-using MyTelegram.Messenger.Services;
+using MyTelegram.Domain.Aggregates.Channel;
 using MyTelegram.Messenger.Services.Impl;
 using MyTelegram.Messenger.Services.Interfaces;
-using MyTelegram.Messenger.Tests.Stats;
+using MyTelegram.Messenger.Tests.SecretChat;
+using MyTelegram.Queries;
 using MyTelegram.ReadModel.Interfaces;
 using MyTelegram.Schema;
 using MyTelegram.Services.Services;
@@ -18,12 +17,10 @@ namespace MyTelegram.Messenger.Tests.Peers;
 /// <c>channels.reorderUsernames</c> and <c>channels.deactivateAllUsernames</c>.
 ///
 /// <para>
-/// All three answer with a plain <c>Bool</c>, so members only learn about the change from an
-/// <c>updateChannel</c>; without it their
-/// <a href="https://corefork.telegram.org/api/peers#peer-info-database">peer info database</a> keeps
-/// the old username list. They also used to take the channel id straight from the request and edit
-/// the read model without asking who the caller was, which let anybody deactivate the usernames of
-/// any channel on the server.
+/// They used to take the channel id straight from the request and edit the read model without asking
+/// who the caller was, which let anybody deactivate the usernames of any channel on the server. They
+/// now validate the caller and the edit, then hand the whole new list to the channel aggregate, whose
+/// event carries <c>updateChannel</c> and the admin log entry.
 /// </para>
 /// </summary>
 public class ChannelUsernameHandlerTests
@@ -32,13 +29,11 @@ public class ChannelUsernameHandlerTests
     private const long StrangerUserId = 2_000_002;
     private const long ChannelId = 800_000_000_001;
 
-    [RequiresMongoDbFact]
-    public async Task toggleUsername_deactivates_a_fragment_username_and_notifies()
+    [Fact]
+    public async Task toggleUsername_deactivates_a_fragment_username_through_the_aggregate()
     {
-        using var mongo = EmbeddedMongoServer.Start();
-        await SeedChannelAsync(mongo.Database);
-        var notifier = new Mock<IChannelUpdateNotifier>(MockBehavior.Loose);
-        var handler = CreateHandler(mongo.Database, "ToggleUsernameHandler", notifier, OwnerUserId);
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("ToggleUsernameHandler", commandBus);
 
         var result = await InvokeAsync(handler, OwnerUserId, new MyTelegram.Schema.Channels.RequestToggleUsername
         {
@@ -48,17 +43,34 @@ public class ChannelUsernameHandlerTests
         });
 
         result.ShouldBeOfType<TBoolTrue>();
-        (await ActiveUsernamesAsync(mongo.Database)).ShouldBe(["basic"]);
-        notifier.Verify(p => p.NotifyChannelChangedAsync(It.IsAny<IRequestInput>(), ChannelId), Times.Once);
+        var command = commandBus.Published.OfType<SetChannelUsernamesCommand>().Single();
+        command.Usernames.ShouldBe([new UsernameItem("basic", true, true), new UsernameItem("collectible", false, false)]);
+        command.OldUsernames!.Count(p => p.Active).ShouldBe(2);
     }
 
-    [RequiresMongoDbFact]
+    [Fact]
+    public async Task toggleUsername_of_the_basic_username_is_USERNAME_INVALID()
+    {
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("ToggleUsernameHandler", commandBus);
+
+        var exception = await Should.ThrowAsync<RpcException>(() =>
+            InvokeAsync(handler, OwnerUserId, new MyTelegram.Schema.Channels.RequestToggleUsername
+            {
+                Channel = InputChannel(),
+                Username = "basic",
+                Active = false
+            }));
+
+        exception.RpcError.Message.ShouldBe("USERNAME_INVALID");
+        commandBus.Published.ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task toggleUsername_by_someone_who_is_not_the_owner_is_CHAT_ADMIN_REQUIRED()
     {
-        using var mongo = EmbeddedMongoServer.Start();
-        await SeedChannelAsync(mongo.Database);
-        var notifier = new Mock<IChannelUpdateNotifier>(MockBehavior.Loose);
-        var handler = CreateHandler(mongo.Database, "ToggleUsernameHandler", notifier, OwnerUserId);
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("ToggleUsernameHandler", commandBus);
 
         var exception = await Should.ThrowAsync<RpcException>(() =>
             InvokeAsync(handler, StrangerUserId, new MyTelegram.Schema.Channels.RequestToggleUsername
@@ -69,19 +81,14 @@ public class ChannelUsernameHandlerTests
             }));
 
         exception.RpcError.Message.ShouldBe("CHAT_ADMIN_REQUIRED");
-        // The rejection has to happen before the read model is touched.
-        (await ActiveUsernamesAsync(mongo.Database)).ShouldBe(["basic", "collectible"]);
-        notifier.Verify(p => p.NotifyChannelChangedAsync(It.IsAny<IRequestInput>(), It.IsAny<long>()), Times.Never);
+        commandBus.Published.ShouldBeEmpty();
     }
 
-    [RequiresMongoDbFact]
+    [Fact]
     public async Task toggleUsername_with_a_forged_access_hash_is_rejected()
     {
-        using var mongo = EmbeddedMongoServer.Start();
-        await SeedChannelAsync(mongo.Database);
-        var notifier = new Mock<IChannelUpdateNotifier>(MockBehavior.Loose);
-        var handler = CreateHandler(mongo.Database, "ToggleUsernameHandler", notifier, OwnerUserId,
-            validAccessHash: 4242);
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("ToggleUsernameHandler", commandBus);
 
         var exception = await Should.ThrowAsync<RpcException>(() =>
             InvokeAsync(handler, OwnerUserId, new MyTelegram.Schema.Channels.RequestToggleUsername
@@ -92,16 +99,14 @@ public class ChannelUsernameHandlerTests
             }));
 
         exception.RpcError.Message.ShouldBe("CHANNEL_INVALID");
-        notifier.Verify(p => p.NotifyChannelChangedAsync(It.IsAny<IRequestInput>(), It.IsAny<long>()), Times.Never);
+        commandBus.Published.ShouldBeEmpty();
     }
 
-    [RequiresMongoDbFact]
-    public async Task reorderUsernames_reorders_and_notifies()
+    [Fact]
+    public async Task reorderUsernames_reorders_through_the_aggregate()
     {
-        using var mongo = EmbeddedMongoServer.Start();
-        await SeedChannelAsync(mongo.Database);
-        var notifier = new Mock<IChannelUpdateNotifier>(MockBehavior.Loose);
-        var handler = CreateHandler(mongo.Database, "ReorderUsernamesHandler", notifier, OwnerUserId);
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("ReorderUsernamesHandler", commandBus);
 
         var result = await InvokeAsync(handler, OwnerUserId, new MyTelegram.Schema.Channels.RequestReorderUsernames
         {
@@ -110,17 +115,32 @@ public class ChannelUsernameHandlerTests
         });
 
         result.ShouldBeOfType<TBoolTrue>();
-        (await ActiveUsernamesAsync(mongo.Database)).ShouldBe(["collectible", "basic"]);
-        notifier.Verify(p => p.NotifyChannelChangedAsync(It.IsAny<IRequestInput>(), ChannelId), Times.Once);
+        commandBus.Published.OfType<SetChannelUsernamesCommand>().Single().Usernames.Select(p => p.Username)
+            .ShouldBe(["collectible", "basic"]);
     }
 
-    [RequiresMongoDbFact]
+    [Fact]
+    public async Task reorderUsernames_with_a_duplicate_is_ORDER_INVALID()
+    {
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("ReorderUsernamesHandler", commandBus);
+
+        var exception = await Should.ThrowAsync<RpcException>(() =>
+            InvokeAsync(handler, OwnerUserId, new MyTelegram.Schema.Channels.RequestReorderUsernames
+            {
+                Channel = InputChannel(),
+                Order = new TVector<string>("basic", "basic")
+            }));
+
+        exception.RpcError.Message.ShouldBe("ORDER_INVALID");
+        commandBus.Published.ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task reorderUsernames_by_someone_who_is_not_the_owner_is_CHAT_ADMIN_REQUIRED()
     {
-        using var mongo = EmbeddedMongoServer.Start();
-        await SeedChannelAsync(mongo.Database);
-        var notifier = new Mock<IChannelUpdateNotifier>(MockBehavior.Loose);
-        var handler = CreateHandler(mongo.Database, "ReorderUsernamesHandler", notifier, OwnerUserId);
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("ReorderUsernamesHandler", commandBus);
 
         var exception = await Should.ThrowAsync<RpcException>(() =>
             InvokeAsync(handler, StrangerUserId, new MyTelegram.Schema.Channels.RequestReorderUsernames
@@ -130,98 +150,67 @@ public class ChannelUsernameHandlerTests
             }));
 
         exception.RpcError.Message.ShouldBe("CHAT_ADMIN_REQUIRED");
-        (await ActiveUsernamesAsync(mongo.Database)).ShouldBe(["basic", "collectible"]);
-        notifier.Verify(p => p.NotifyChannelChangedAsync(It.IsAny<IRequestInput>(), It.IsAny<long>()), Times.Never);
+        commandBus.Published.ShouldBeEmpty();
     }
 
-    [RequiresMongoDbFact]
-    public async Task deactivateAllUsernames_keeps_the_basic_username_and_notifies()
+    [Fact]
+    public async Task deactivateAllUsernames_keeps_the_basic_username()
     {
-        using var mongo = EmbeddedMongoServer.Start();
-        await SeedChannelAsync(mongo.Database);
-        var notifier = new Mock<IChannelUpdateNotifier>(MockBehavior.Loose);
-        var handler = CreateHandler(mongo.Database, "DeactivateAllUsernamesHandler", notifier, OwnerUserId);
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("DeactivateAllUsernamesHandler", commandBus);
 
         var result = await InvokeAsync(handler, OwnerUserId,
             new MyTelegram.Schema.Channels.RequestDeactivateAllUsernames { Channel = InputChannel() });
 
         result.ShouldBeOfType<TBoolTrue>();
-        (await ActiveUsernamesAsync(mongo.Database)).ShouldBe(["basic"]);
-        notifier.Verify(p => p.NotifyChannelChangedAsync(It.IsAny<IRequestInput>(), ChannelId), Times.Once);
+        commandBus.Published.OfType<SetChannelUsernamesCommand>().Single().Usernames
+            .Where(p => p.Active).Select(p => p.Username).ShouldBe(["basic"]);
     }
 
-    [RequiresMongoDbFact]
+    [Fact]
     public async Task deactivateAllUsernames_by_someone_who_is_not_the_owner_is_CHAT_ADMIN_REQUIRED()
     {
-        using var mongo = EmbeddedMongoServer.Start();
-        await SeedChannelAsync(mongo.Database);
-        var notifier = new Mock<IChannelUpdateNotifier>(MockBehavior.Loose);
-        var handler = CreateHandler(mongo.Database, "DeactivateAllUsernamesHandler", notifier, OwnerUserId);
+        var commandBus = new RecordingCommandBus();
+        var handler = CreateHandler("DeactivateAllUsernamesHandler", commandBus);
 
         var exception = await Should.ThrowAsync<RpcException>(() =>
             InvokeAsync(handler, StrangerUserId,
                 new MyTelegram.Schema.Channels.RequestDeactivateAllUsernames { Channel = InputChannel() }));
 
         exception.RpcError.Message.ShouldBe("CHAT_ADMIN_REQUIRED");
-        (await ActiveUsernamesAsync(mongo.Database)).ShouldBe(["basic", "collectible"]);
-        notifier.Verify(p => p.NotifyChannelChangedAsync(It.IsAny<IRequestInput>(), It.IsAny<long>()), Times.Never);
+        commandBus.Published.ShouldBeEmpty();
     }
 
     // ---- Fixtures ------------------------------------------------------------------------------------
 
     private static TInputChannel InputChannel() => new() { ChannelId = ChannelId, AccessHash = 4242 };
 
-    private static Task SeedChannelAsync(IMongoDatabase database)
-    {
-        var channel = new BsonDocument
-        {
-            { "ChannelId", ChannelId },
-            { "CreatorId", OwnerUserId },
-            {
-                "Usernames", new BsonArray
-                {
-                    new BsonDocument { { "Username", "basic" }, { "Editable", true }, { "Active", true } },
-                    new BsonDocument { { "Username", "collectible" }, { "Editable", false }, { "Active", true } }
-                }
-            }
-        };
-
-        return database.GetCollection<BsonDocument>("eventflow-channelreadmodel").InsertOneAsync(channel);
-    }
-
-    private static async Task<List<string>> ActiveUsernamesAsync(IMongoDatabase database)
-    {
-        var channel = await database.GetCollection<BsonDocument>("eventflow-channelreadmodel")
-            .Find(Builders<BsonDocument>.Filter.Eq("ChannelId", ChannelId))
-            .FirstAsync();
-
-        return channel["Usernames"].AsBsonArray
-            .Select(p => p.AsBsonDocument)
-            .Where(p => p["Active"].AsBoolean)
-            .Select(p => p["Username"].AsString)
-            .ToList();
-    }
-
-    private static object CreateHandler(IMongoDatabase database,
-        string handlerName,
-        Mock<IChannelUpdateNotifier> notifier,
-        long creatorUserId,
-        long validAccessHash = 4242)
+    private static object CreateHandler(string handlerName, RecordingCommandBus commandBus)
     {
         var channelReadModel = new Mock<IChannelReadModel>(MockBehavior.Loose);
         channelReadModel.SetupGet(p => p.ChannelId).Returns(ChannelId);
-        channelReadModel.SetupGet(p => p.CreatorId).Returns(creatorUserId);
+        channelReadModel.SetupGet(p => p.CreatorId).Returns(OwnerUserId);
         channelReadModel.SetupGet(p => p.AdminList).Returns([]);
+        channelReadModel.SetupGet(p => p.UserName).Returns("basic");
+        channelReadModel.SetupGet(p => p.Usernames).Returns(
+        [
+            new UsernameInfo { Username = "basic", Editable = true, Active = true },
+            new UsernameInfo { Username = "collectible", Editable = false, Active = true }
+        ]);
 
         var channelAppService = new Mock<IChannelAppService>(MockBehavior.Loose);
         channelAppService.Setup(p => p.GetAsync(It.IsAny<long?>())).ReturnsAsync(channelReadModel.Object);
         channelAppService.Setup(p => p.GetAsync(It.IsAny<long>())).ReturnsAsync(channelReadModel.Object);
 
+        var queryProcessor = new Mock<IQueryProcessor>(MockBehavior.Loose);
+        queryProcessor.Setup(p => p.ProcessAsync(It.IsAny<GetChannelByIdQuery>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(channelReadModel.Object);
+
         var accessHashHelper = new Mock<IAccessHashHelper2>(MockBehavior.Loose);
         accessHashHelper
             .Setup(p => p.CheckAccessHashAsync(It.IsAny<IRequestWithAccessHashKeyId>(), It.IsAny<IInputChannel>()))
             .Returns((IRequestWithAccessHashKeyId _, IInputChannel channel) =>
-                channel is TInputChannel { } inputChannel && inputChannel.AccessHash == validAccessHash
+                channel is TInputChannel { AccessHash: 4242 }
                     ? Task.CompletedTask
                     : throw new RpcException(RpcErrors.RpcErrors400.ChannelInvalid));
 
@@ -234,11 +223,11 @@ public class ChannelUsernameHandlerTests
         return Activator.CreateInstance(handlerType,
             BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
             binder: null,
-            args: [database, accessHashHelper.Object, checker, notifier.Object],
+            args: [queryProcessor.Object, accessHashHelper.Object, checker, commandBus],
             culture: null)!;
     }
 
-    private static async Task<object?> InvokeAsync(object handler, long callerUserId, IObject request)
+    internal static async Task<object?> InvokeAsync(object handler, long callerUserId, IObject request)
     {
         var input = new Mock<IRequestInput>(MockBehavior.Loose);
         input.SetupGet(p => p.UserId).Returns(callerUserId);

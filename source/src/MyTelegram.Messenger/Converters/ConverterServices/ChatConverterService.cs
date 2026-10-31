@@ -9,6 +9,8 @@ using IChatFull = MyTelegram.Schema.IChatFull;
 using TChannelParticipant = MyTelegram.Schema.Channels.TChannelParticipant;
 using TChatFull = MyTelegram.Schema.Messages.TChatFull;
 
+using MyTelegram.Converters.Mappers;
+
 namespace MyTelegram.Messenger.Converters.ConverterServices;
 
 public class ChatConverterService(
@@ -288,6 +290,14 @@ public class ChatConverterService(
 
         if (channel is TChannel tChannel)
         {
+            if (!channel.Creator)
+            {
+                // Disabled Fragment collectibles are visible to the owner only.
+                // See https://corefork.telegram.org/api/fragment
+                (tChannel.Username, tChannel.Usernames) = UsernameVectorBuilder.Build(channelReadModel.Usernames,
+                    channelReadModel.UserName, includeDisabled: false);
+            }
+
             tChannel.Forum = channelReadModel.Forum;
             tChannel.ForumTabs = channelReadModel.ForumTabs;
             // subscription_until_date describes the *requesting user's* Star subscription, so it

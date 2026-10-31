@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Fragment;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <summary>
 /// Validates a username and checks availability.
@@ -11,7 +13,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUsernameHelper usernameHelper) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestCheckUsername, IBool>
+internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUsernameHelper usernameHelper,
+    IFragmentCollectibleCatalog collectibleCatalog) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestCheckUsername, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Account.RequestCheckUsername obj)
     {
@@ -27,9 +30,14 @@ internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUser
         var userNameReadModel = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(obj.Username.ToLower()));
         if (userNameReadModel == null)
         {
+            if (await collectibleCatalog.IsUsernameForSaleAsync(obj.Username))
+            {
+                RpcErrors.RpcErrors400.UsernamePurchaseAvailable.ThrowRpcError();
+            }
+
             return new TBoolTrue();
         }
 
         return new TBoolFalse();
     }
-}
+}

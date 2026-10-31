@@ -91,7 +91,7 @@ public class ChannelUpdateNotifierTests
     {
         var input = new Mock<IRequestInput>(MockBehavior.Loose);
         input.SetupGet(p => p.UserId).Returns(CallerUserId);
-        input.SetupGet(p => p.AuthKeyId).Returns(CallerAuthKeyId);
+        input.SetupGet(p => p.PermAuthKeyId).Returns(CallerAuthKeyId);
 
         return input.Object;
     }

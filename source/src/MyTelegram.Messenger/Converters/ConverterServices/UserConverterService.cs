@@ -9,6 +9,8 @@ using MyTelegram.Messenger.Services.Stories;
 using MyTelegram.Schema;
 using TPeerSettings = MyTelegram.Schema.TPeerSettings;
 
+using MyTelegram.Converters.Mappers;
+
 namespace MyTelegram.Messenger.Converters.ConverterServices;
 
 public class UserConverterService(
@@ -385,6 +387,14 @@ public class UserConverterService(
         if (request.UserId == userReadModel.UserId)
         {
             user.Self = true;
+        }
+
+        // Disabled Fragment collectibles are visible to their owner only (the bot's owner, for a bot).
+        // See https://corefork.telegram.org/api/fragment
+        if (!user.Self && user is TUser { BotCanEdit: not true } visibleUser)
+        {
+            (visibleUser.Username, visibleUser.Usernames) = UsernameVectorBuilder.Build(userReadModel.Usernames,
+                userReadModel.UserName, includeDisabled: false);
         }
 
         user.Status = userStatusCacheAppService.GetUserStatus(user.Id);

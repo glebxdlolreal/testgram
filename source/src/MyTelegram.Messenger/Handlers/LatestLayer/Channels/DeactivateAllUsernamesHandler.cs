@@ -1,31 +1,23 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Messenger.Helpers;
-
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 
 /// <summary>
-/// Deactivate all collectible usernames for a channel
-/// See https://core.telegram.org/method/channels.deactivateAllUsernames
+/// Disable all purchased usernames of a supergroup or channel we own; the editable username is kept.
+/// Together with clearing the editable username through <c>channels.updateUsername</c> this makes
+/// the chat private.
+/// Possible errors
+/// Code Type Description
+/// 400 CHANNEL_INVALID The provided channel is invalid.
+/// 400 CHAT_ADMIN_REQUIRED You must be an admin in this chat to do this.
+/// See https://corefork.telegram.org/method/channels.deactivateAllUsernames and
+/// https://corefork.telegram.org/api/fragment
 /// </summary>
-internal sealed class DeactivateAllUsernamesHandler : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestDeactivateAllUsernames, IBool>
+internal sealed class DeactivateAllUsernamesHandler(
+    IQueryProcessor queryProcessor,
+    IAccessHashHelper2 accessHashHelper,
+    IChannelAdminRightsChecker channelAdminRightsChecker,
+    ICommandBus commandBus)
+    : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestDeactivateAllUsernames, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IAccessHashHelper2 _accessHashHelper;
-    private readonly IChannelAdminRightsChecker _channelAdminRightsChecker;
-    private readonly IChannelUpdateNotifier _channelUpdateNotifier;
-
-    public DeactivateAllUsernamesHandler(IMongoDatabase database,
-        IAccessHashHelper2 accessHashHelper,
-        IChannelAdminRightsChecker channelAdminRightsChecker,
-        IChannelUpdateNotifier channelUpdateNotifier)
-    {
-        _database = database;
-        _accessHashHelper = accessHashHelper;
-        _channelAdminRightsChecker = channelAdminRightsChecker;
-        _channelUpdateNotifier = channelUpdateNotifier;
-    }
-
     protected override async Task<IBool> HandleCoreAsync(
         IRequestInput input,
         MyTelegram.Schema.Channels.RequestDeactivateAllUsernames obj)
@@ -36,53 +28,23 @@ internal sealed class DeactivateAllUsernamesHandler : RpcResultObjectHandler<MyT
             return null!;
         }
 
-        await _accessHashHelper.CheckAccessHashAsync(input, inputChannel);
-        await _channelAdminRightsChecker.ThrowIfNotChannelOwnerAsync(inputChannel.ChannelId, input.UserId);
+        await accessHashHelper.CheckAccessHashAsync(input, inputChannel);
+        await channelAdminRightsChecker.ThrowIfNotChannelOwnerAsync(inputChannel.ChannelId, input.UserId);
 
-        var channelId = inputChannel.ChannelId;
-
-        // Get channel from MongoDB
-        var channelCollection = _database.GetCollection<BsonDocument>("eventflow-channelreadmodel");
-        var channelFilter = Builders<BsonDocument>.Filter.Eq("ChannelId", channelId);
-        var channel = await channelCollection.Find(channelFilter).FirstOrDefaultAsync();
-
+        var channel = await queryProcessor.ProcessAsync(new GetChannelByIdQuery(inputChannel.ChannelId));
         if (channel == null)
         {
             RpcErrors.RpcErrors400.ChannelInvalid.ThrowRpcError();
             return null!;
         }
 
-        // Get current usernames
-        var usernamesV2 = channel.Contains("Usernames") && !channel["Usernames"].IsBsonNull
-            ? channel["Usernames"].AsBsonArray
-            : new BsonArray();
-
-        var prevActiveUsernames = AdminLogHelper.ActiveUsernames(usernamesV2);
-
-        // Deactivate all non-editable (Fragment) usernames
-        foreach (var item in usernamesV2)
+        var current = UsernameListEditor.Effective(channel.Usernames.ToUsernameItems(), channel.UserName);
+        var updated = UsernameListEditor.DeactivateAll(current);
+        if (updated != null)
         {
-            if (item.IsBsonDocument)
-            {
-                var doc = item.AsBsonDocument;
-                var isEditable = doc.Contains("Editable") && doc["Editable"].AsBoolean;
-                
-                // Only deactivate Fragment usernames (non-editable)
-                if (!isEditable)
-                {
-                    doc["Active"] = false;
-                }
-            }
+            await commandBus.PublishAsync(new SetChannelUsernamesCommand(ChannelId.Create(channel.ChannelId),
+                input.ToRequestInfo(), updated.ToList(), current));
         }
-
-        // Save back to MongoDB
-        var update = Builders<BsonDocument>.Update.Set("Usernames", usernamesV2);
-        await channelCollection.UpdateOneAsync(channelFilter, update);
-
-        await AdminLogHelper.LogChangeUsernames(_database, channelId, input.UserId,
-            prevActiveUsernames, AdminLogHelper.ActiveUsernames(usernamesV2));
-
-        await _channelUpdateNotifier.NotifyChannelChangedAsync(input, channelId);
 
         return new TBoolTrue();
     }

@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Fragment;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <summary>
 /// Changes username for the current user.
@@ -12,7 +14,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProcessor queryProcessor, IUserAppService userAppService, IUsernameHelper usernameHelper) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestUpdateUsername, MyTelegram.Schema.IUser>
+internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProcessor queryProcessor, IUserAppService userAppService, IUsernameHelper usernameHelper, IFragmentCollectibleCatalog collectibleCatalog) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestUpdateUsername, MyTelegram.Schema.IUser>
 {
     protected override async Task<IUser> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Account.RequestUpdateUsername obj)
     {
@@ -21,6 +23,12 @@ internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProces
             if (!usernameHelper.IsValidUsername(obj.Username))
             {
                 RpcErrors.RpcErrors400.UsernameInvalid.ThrowRpcError();
+            }
+
+            // A username listed on Fragment that nobody holds can only be bought there.
+            if (await collectibleCatalog.IsUsernameForSaleAsync(obj.Username))
+            {
+                RpcErrors.RpcErrors400.UsernamePurchaseAvailable.ThrowRpcError();
             }
         }
 
@@ -38,4 +46,4 @@ internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProces
         await commandBus.PublishAsync(command);
         return null !;
     }
-}
+}

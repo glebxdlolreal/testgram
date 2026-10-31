@@ -1,148 +1,34 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
+using MyTelegram.Messenger.Services.Bots;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Bots;
 
 /// <summary>
-/// Reorder usernames associated with a bot
-/// See https://core.telegram.org/method/bots.reorderUsernames
+/// Reorder usernames associated to a bot we own. The order must list every active username exactly
+/// once.
+/// Possible errors
+/// Code Type Description
+/// 400 BOT_INVALID This is not a valid bot.
+/// 400 ORDER_INVALID The specified username order is invalid.
+/// See https://corefork.telegram.org/method/bots.reorderUsernames and
+/// https://corefork.telegram.org/api/fragment
 /// </summary>
-internal sealed class ReorderUsernamesHandler : RpcResultObjectHandler<MyTelegram.Schema.Bots.RequestReorderUsernames, IBool>
+internal sealed class ReorderUsernamesHandler(IOwnedBotResolver ownedBotResolver, ICommandBus commandBus)
+    : RpcResultObjectHandler<MyTelegram.Schema.Bots.RequestReorderUsernames, IBool>
 {
-    private readonly IMongoDatabase _database;
-
-    public ReorderUsernamesHandler(IMongoDatabase database)
-    {
-        _database = database;
-    }
-
     protected override async Task<IBool> HandleCoreAsync(
         IRequestInput input,
         MyTelegram.Schema.Bots.RequestReorderUsernames obj)
     {
-        if (obj.Bot is not TInputUser inputUser)
+        var bot = await ownedBotResolver.GetOwnedBotAsync(input, obj.Bot);
+
+        var current = UsernameListEditor.Effective(bot.Usernames.ToUsernameItems(), bot.UserName);
+        var updated = UsernameListEditor.Reorder(current, obj.Order);
+        if (updated != null)
         {
-            RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
-            return null!;
+            await commandBus.PublishAsync(new SetUsernamesCommand(UserId.Create(bot.UserId),
+                input.ToRequestInfo(), updated.ToList(), current));
         }
-
-        var botUserId = inputUser.UserId;
-
-        // Get bot from MongoDB
-        var userCollection = _database.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var botFilter = Builders<BsonDocument>.Filter.Eq("UserId", botUserId);
-        var bot = await userCollection.Find(botFilter).FirstOrDefaultAsync();
-
-        if (bot == null)
-        {
-            RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
-            return null!;
-        }
-
-        if (!bot.Contains("Bot") || !bot["Bot"].AsBoolean)
-        {
-            RpcErrors.RpcErrors400.UserBotInvalid.ThrowRpcError();
-            return null!;
-        }
-
-        // Only the bot's owner may reorder its usernames. The first active+editable entry is the
-        // primary handle, so without this check any user could change which handle another
-        // account presents as primary.
-        if (!await IsBotOwnerAsync(botUserId, input.UserId))
-        {
-            RpcErrors.RpcErrors400.BotInvalid.ThrowRpcError();
-            return null!;
-        }
-
-        // Get current usernames
-        var usernamesV2 = bot.Contains("Usernames") && !bot["Usernames"].IsBsonNull
-            ? bot["Usernames"].AsBsonArray
-            : new BsonArray();
-
-        // Build username map
-        var usernameMap = new Dictionary<string, BsonDocument>(StringComparer.OrdinalIgnoreCase);
-        var activeUsernames = new List<string>();
-        
-        foreach (var item in usernamesV2)
-        {
-            if (item.IsBsonDocument)
-            {
-                var doc = item.AsBsonDocument;
-                if (doc.Contains("Username"))
-                {
-                    var username = doc["Username"].AsString;
-                    usernameMap[username] = doc;
-                    
-                    if (doc.Contains("Active") && doc["Active"].AsBoolean)
-                    {
-                        activeUsernames.Add(username.ToLower());
-                    }
-                }
-            }
-        }
-
-        // Validate order
-        var orderLower = obj.Order.Select(u => u.ToLower()).ToList();
-        var activeSet = new HashSet<string>(activeUsernames);
-        var orderSet = new HashSet<string>(orderLower);
-
-        if (!activeSet.SetEquals(orderSet))
-        {
-            RpcErrors.RpcErrors400.OrderInvalid.ThrowRpcError();
-            return null!;
-        }
-
-        // Reorder usernames
-        var reorderedUsernames = new BsonArray();
-        
-        foreach (var username in obj.Order)
-        {
-            if (usernameMap.TryGetValue(username, out var doc))
-            {
-                reorderedUsernames.Add(doc);
-            }
-        }
-        
-        foreach (var item in usernamesV2)
-        {
-            if (item.IsBsonDocument)
-            {
-                var doc = item.AsBsonDocument;
-                if (doc.Contains("Username"))
-                {
-                    var isActive = doc.Contains("Active") && doc["Active"].AsBoolean;
-                    if (!isActive)
-                    {
-                        reorderedUsernames.Add(doc);
-                    }
-                }
-            }
-        }
-
-        // Save back to MongoDB
-        var update = Builders<BsonDocument>.Update.Set("Usernames", reorderedUsernames);
-        await userCollection.UpdateOneAsync(botFilter, update);
 
         return new TBoolTrue();
-    }
-
-    private async Task<bool> IsBotOwnerAsync(long botUserId, long ownerUserId)
-    {
-        if (botUserId == ownerUserId)
-            return true;
-
-        var ownedViaBotOwners = await _database.GetCollection<BsonDocument>("bot-owners")
-            .Find(Builders<BsonDocument>.Filter.Eq("BotId", botUserId) &
-                  Builders<BsonDocument>.Filter.Eq("OwnerId", ownerUserId))
-            .Limit(1)
-            .AnyAsync();
-        if (ownedViaBotOwners)
-            return true;
-
-        return await _database.GetCollection<BsonDocument>("eventflow-userreadmodel")
-            .Find(Builders<BsonDocument>.Filter.Eq("UserId", botUserId) &
-                  Builders<BsonDocument>.Filter.Eq("CreatorUserId", ownerUserId))
-            .Limit(1)
-            .AnyAsync();
     }
 }

@@ -18,6 +18,7 @@ public class ChannelReadModel : IChannelReadModel,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelAdminRightsEditedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelPhotoEditedEvent>,
     IAmReadModelFor<ChannelAggregate, ChannelId, ChannelUserNameChangedEvent>,
+    IAmReadModelFor<ChannelAggregate, ChannelId, ChannelUsernamesChangedEvent>,
     IAmReadModelFor<ChannelMemberAggregate, ChannelMemberId, ChannelMemberLeftEvent>,
     IAmReadModelFor<ChannelMemberAggregate, ChannelMemberId, ChannelMemberBannedRightsChangedEvent>,
     //IAmReadModelFor<ChannelMemberAggregate, ChannelMemberId, ChannelMemberJoinedEvent>,
@@ -255,6 +256,17 @@ public class ChannelReadModel : IChannelReadModel,
         CancellationToken cancellationToken)
     {
         UserName = domainEvent.AggregateEvent.UserName;
+        // Keeps the editable entry of the usernames vector in step; otherwise clearing the public
+        // link left the old username active and the channel public.
+        Usernames = UsernameListEditor.ChangeEditable(Usernames.ToUsernameItems(), UserName).ToUsernameInfos();
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<ChannelAggregate, ChannelId, ChannelUsernamesChangedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        Usernames = domainEvent.AggregateEvent.Usernames.ToUsernameInfos();
         return Task.CompletedTask;
     }
 

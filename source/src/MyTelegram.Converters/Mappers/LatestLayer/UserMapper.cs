@@ -44,33 +44,10 @@ internal sealed class UserMapper
         destination.BotHasMainApp = source.BotHasMainApp;
         destination.BotActiveUsers = source.BotActiveUsers;
 
-        // Map Usernames to TVector<IUsername>
-        if (source.Usernames != null && source.Usernames.Count > 0)
-        {
-            destination.Usernames = new TVector<IUsername>();
-            foreach (var usernameInfo in source.Usernames)
-            {
-                destination.Usernames.Add(new TUsername
-                {
-                    Username = usernameInfo.Username,
-                    Editable = usernameInfo.Editable,
-                    Active = usernameInfo.Active
-                });
-            }
-
-            // Set primary username (first active editable, or first active)
-            var primary = source.Usernames.FirstOrDefault(u => u.Active && u.Editable)
-                          ?? source.Usernames.FirstOrDefault(u => u.Active);
-            if (primary != null)
-            {
-                destination.Username = primary.Username;
-            }
-        }
-        else
-        {
-            // Fallback to legacy UserName field
-            destination.Username = source.UserName;
-        }
+        // The owner's view, disabled collectibles included; the converter service hides those from
+        // everyone else.
+        (destination.Username, destination.Usernames) =
+            UsernameVectorBuilder.Build(source.Usernames, source.UserName, includeDisabled: true);
 
         // Read BotBusiness from MongoDB directly since it's not in IUserReadModel
         // This is a temporary solution until BotBusiness is added to the read model

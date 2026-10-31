@@ -253,14 +253,15 @@ public static class AdminLogHelper
         long channelId,
         long adminUserId,
         IEnumerable<string> prevValue,
-        IEnumerable<string> newValue)
+        IEnumerable<string> newValue,
+        string? operationKey = null)
     {
         var action = new TChannelAdminLogEventActionChangeUsernames
         {
             PrevValue = new TVector<string>(prevValue),
             NewValue = new TVector<string>(newValue)
         };
-        await LogEventAsync(database, channelId, adminUserId, action);
+        await LogEventAsync(database, channelId, adminUserId, action, operationKey);
     }
 
     /// <summary>

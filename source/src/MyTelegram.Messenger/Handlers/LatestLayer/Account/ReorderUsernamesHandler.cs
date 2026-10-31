@@ -1,119 +1,35 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 
 /// <summary>
-/// Reorder usernames associated with the currently logged-in user
-/// See https://core.telegram.org/method/account.reorderUsernames
+/// Reorder usernames associated with the currently logged-in user. The order must list every active
+/// username exactly once.
+/// Possible errors
+/// Code Type Description
+/// 400 ORDER_INVALID The specified username order is invalid.
+/// See https://corefork.telegram.org/method/account.reorderUsernames and
+/// https://corefork.telegram.org/api/fragment
 /// </summary>
-internal sealed class ReorderUsernamesHandler : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestReorderUsernames, IBool>
+internal sealed class ReorderUsernamesHandler(IQueryProcessor queryProcessor, ICommandBus commandBus)
+    : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestReorderUsernames, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IUsernameUpdateNotifier _usernameUpdateNotifier;
-
-    public ReorderUsernamesHandler(IMongoDatabase database, IUsernameUpdateNotifier usernameUpdateNotifier)
-    {
-        _database = database;
-        _usernameUpdateNotifier = usernameUpdateNotifier;
-    }
-
     protected override async Task<IBool> HandleCoreAsync(
         IRequestInput input,
         MyTelegram.Schema.Account.RequestReorderUsernames obj)
     {
-        var userId = input.UserId;
-
-        // Get user from MongoDB
-        var userCollection = _database.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var userFilter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-        var user = await userCollection.Find(userFilter).FirstOrDefaultAsync();
-
+        var user = await queryProcessor.ProcessAsync(new GetUserByIdQuery(input.UserId));
         if (user == null)
         {
             RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
-        }
-
-        // Get current usernames from Usernames
-        var usernamesV2 = user.Contains("Usernames") && !user["Usernames"].IsBsonNull
-            ? user["Usernames"].AsBsonArray
-            : new BsonArray();
-
-        if (usernamesV2.Count == 0)
-        {
-            RpcErrors.RpcErrors400.UsernameInvalid.ThrowRpcError();
             return null!;
         }
 
-        // Build username map
-        var usernameMap = new Dictionary<string, BsonDocument>(StringComparer.OrdinalIgnoreCase);
-        var activeUsernames = new List<string>();
-
-        foreach (var item in usernamesV2)
+        var current = UsernameListEditor.Effective(user.Usernames.ToUsernameItems(), user.UserName);
+        var updated = UsernameListEditor.Reorder(current, obj.Order);
+        if (updated != null)
         {
-            if (item.IsBsonDocument)
-            {
-                var doc = item.AsBsonDocument;
-                if (doc.Contains("Username"))
-                {
-                    var username = doc["Username"].AsString;
-                    usernameMap[username] = doc;
-
-                    if (doc.Contains("Active") && doc["Active"].AsBoolean)
-                    {
-                        activeUsernames.Add(username.ToLower());
-                    }
-                }
-            }
+            await commandBus.PublishAsync(new SetUsernamesCommand(UserId.Create(user.UserId),
+                input.ToRequestInfo(), updated.ToList(), current));
         }
-
-        // Validate order contains all active usernames
-        var orderLower = obj.Order.Select(u => u.ToLower()).ToList();
-        var activeSet = new HashSet<string>(activeUsernames);
-        var orderSet = new HashSet<string>(orderLower);
-
-        if (!activeSet.SetEquals(orderSet))
-        {
-            RpcErrors.RpcErrors400.OrderInvalid.ThrowRpcError();
-            return null!;
-        }
-
-        // Reorder usernames: active ones first in specified order, then inactive ones
-        var reorderedUsernames = new BsonArray();
-
-        // Add active usernames in new order
-        foreach (var username in obj.Order)
-        {
-            if (usernameMap.TryGetValue(username, out var doc))
-            {
-                reorderedUsernames.Add(doc);
-            }
-        }
-
-        // Add inactive usernames (keep their original order)
-        foreach (var item in usernamesV2)
-        {
-            if (item.IsBsonDocument)
-            {
-                var doc = item.AsBsonDocument;
-                if (doc.Contains("Username"))
-                {
-                    var username = doc["Username"].AsString;
-                    var isActive = doc.Contains("Active") && doc["Active"].AsBoolean;
-
-                    if (!isActive)
-                    {
-                        reorderedUsernames.Add(doc);
-                    }
-                }
-            }
-        }
-
-        // Save back to MongoDB
-        var update = Builders<BsonDocument>.Update.Set("Usernames", reorderedUsernames);
-        await userCollection.UpdateOneAsync(userFilter, update);
-
-        await _usernameUpdateNotifier.NotifyUserNameChangedAsync(input, userId);
 
         return new TBoolTrue();
     }

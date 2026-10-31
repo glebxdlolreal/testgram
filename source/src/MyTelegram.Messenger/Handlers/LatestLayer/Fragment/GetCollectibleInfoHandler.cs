@@ -1,79 +1,124 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
+using MyTelegram.Messenger.Services.Bots;
+using MyTelegram.Messenger.Services.Fragment;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Fragment;
 
 /// <summary>
-/// Fetch information about a fragment collectible (username or phone number purchased on Fragment.com)
-/// See https://core.telegram.org/method/fragment.getCollectibleInfo
+/// Fetch information about a fragment collectible (username or phone number purchased on Fragment.com).
+/// It only answers for collectibles the caller can see: their own, a username its holder has activated,
+/// or a phone number the holder's privacy settings show to the caller.
+/// Possible errors
+/// Code Type Description
+/// 400 COLLECTIBLE_INVALID The specified collectible is invalid.
+/// 400 COLLECTIBLE_NOT_FOUND The specified collectible could not be found.
+/// See https://core.telegram.org/method/fragment.getCollectibleInfo and
+/// https://corefork.telegram.org/api/fragment
 /// </summary>
-internal sealed class GetCollectibleInfoHandler : RpcResultObjectHandler<MyTelegram.Schema.Fragment.RequestGetCollectibleInfo, MyTelegram.Schema.Fragment.ICollectibleInfo>
+internal sealed class GetCollectibleInfoHandler(
+    IFragmentCollectibleCatalog collectibleCatalog,
+    IQueryProcessor queryProcessor,
+    IUserAppService userAppService,
+    IChannelAppService channelAppService,
+    IUserConverterService userConverterService,
+    IBotOwnershipChecker botOwnershipChecker)
+    : RpcResultObjectHandler<MyTelegram.Schema.Fragment.RequestGetCollectibleInfo, MyTelegram.Schema.Fragment.ICollectibleInfo>
 {
-    private readonly IMongoDatabase _database;
-
-    public GetCollectibleInfoHandler(IMongoDatabase database)
-    {
-        _database = database;
-    }
-
     protected override async Task<MyTelegram.Schema.Fragment.ICollectibleInfo> HandleCoreAsync(
         IRequestInput input,
         MyTelegram.Schema.Fragment.RequestGetCollectibleInfo obj)
     {
-        var collection = _database.GetCollection<BsonDocument>("fragment_collectibles");
-        BsonDocument? doc = null;
-
-        // Check if it's a username or phone collectible
-        if (obj.Collectible is TInputCollectibleUsername usernameInput)
+        FragmentCollectible? collectible;
+        bool visible;
+        switch (obj.Collectible)
         {
-            if (string.IsNullOrWhiteSpace(usernameInput.Username))
-            {
+            case TInputCollectibleUsername { Username: { Length: > 0 } username }:
+                collectible = await collectibleCatalog.FindUsernameAsync(username);
+                visible = collectible != null && await IsUsernameVisibleAsync(input, username);
+                break;
+            case TInputCollectiblePhone { Phone: { Length: > 0 } phone }
+                when FragmentCollectibleCatalog.NormalizePhone(phone).Length > 0:
+                collectible = await collectibleCatalog.FindPhoneAsync(phone);
+                visible = collectible != null && await IsPhoneVisibleAsync(input, collectible.Phone!);
+                break;
+            default:
                 RpcErrors.RpcErrors400.CollectibleInvalid.ThrowRpcError();
-            }
-
-            var filter = Builders<BsonDocument>.Filter.Eq("username", usernameInput.Username.ToLower());
-            doc = await collection.Find(filter).FirstOrDefaultAsync();
-        }
-        else if (obj.Collectible is TInputCollectiblePhone phoneInput)
-        {
-            if (string.IsNullOrWhiteSpace(phoneInput.Phone))
-            {
-                RpcErrors.RpcErrors400.CollectibleInvalid.ThrowRpcError();
-            }
-
-            var filter = Builders<BsonDocument>.Filter.Eq("phone", phoneInput.Phone);
-            doc = await collection.Find(filter).FirstOrDefaultAsync();
-        }
-        else
-        {
-            RpcErrors.RpcErrors400.CollectibleInvalid.ThrowRpcError();
+                return null!;
         }
 
-        if (doc == null)
+        if (!visible)
         {
             RpcErrors.RpcErrors400.CollectibleNotFound.ThrowRpcError();
         }
 
-        // Build response with safe type conversion
         return new MyTelegram.Schema.Fragment.TCollectibleInfo
         {
-            PurchaseDate = doc["purchase_date"].AsInt32,
-            Currency = doc["currency"].AsString,
-            Amount = GetInt64(doc["amount"]),
-            CryptoCurrency = doc["crypto_currency"].AsString,
-            CryptoAmount = GetInt64(doc["crypto_amount"]),
-            Url = doc["url"].AsString
+            PurchaseDate = collectible!.PurchaseDate,
+            Currency = collectible.Currency,
+            Amount = collectible.Amount,
+            CryptoCurrency = collectible.CryptoCurrency,
+            CryptoAmount = collectible.CryptoAmount,
+            Url = collectible.Url
         };
     }
 
-    private static long GetInt64(BsonValue value)
+    private async Task<bool> IsUsernameVisibleAsync(IRequestInput input, string username)
     {
-        return value.BsonType switch
+        var holder = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(username.ToLowerInvariant()));
+        switch (holder?.PeerType)
         {
-            BsonType.Int64 => value.AsInt64,
-            BsonType.Int32 => value.AsInt32,
-            BsonType.Double => (long)value.AsDouble,
-            _ => throw new InvalidCastException($"Cannot convert {value.BsonType} to Int64")
-        };
+            case PeerType.User:
+                if (holder.PeerId == input.UserId)
+                {
+                    return true;
+                }
+
+                var user = await userAppService.GetAsync((long?)holder.PeerId);
+                if (user == null || !IsAttached(user.Usernames, username, out var userActive))
+                {
+                    return false;
+                }
+
+                return userActive || (user.Bot && await botOwnershipChecker.IsOwnerAsync(user.UserId, input.UserId));
+            case PeerType.Channel:
+                var channel = await channelAppService.GetAsync((long?)holder.PeerId);
+                if (channel == null || !IsAttached(channel.Usernames, username, out var channelActive))
+                {
+                    return false;
+                }
+
+                return channelActive || channel.CreatorId == input.UserId;
+            default:
+                // Listed on Fragment but held by nobody.
+                return false;
+        }
+    }
+
+    private async Task<bool> IsPhoneVisibleAsync(IRequestInput input, string phone)
+    {
+        var holder = await queryProcessor.ProcessAsync(new GetUserByPhoneNumberQuery(phone));
+        if (holder == null)
+        {
+            return false;
+        }
+
+        if (holder.UserId == input.UserId)
+        {
+            return true;
+        }
+
+        // The converter applies the holder's phone number privacy rules for this caller.
+        var user = await userConverterService.GetUserAsync(input, holder.UserId, skipSetContactProperties: false,
+            layer: input.Layer);
+
+        return user is TUser { Phone.Length: > 0 };
+    }
+
+    private static bool IsAttached(IEnumerable<UsernameInfo>? usernames, string username, out bool active)
+    {
+        var item = usernames?.FirstOrDefault(p =>
+            !p.Editable && string.Equals(p.Username, username, StringComparison.OrdinalIgnoreCase));
+        active = item?.Active == true;
+
+        return item != null;
     }
 }

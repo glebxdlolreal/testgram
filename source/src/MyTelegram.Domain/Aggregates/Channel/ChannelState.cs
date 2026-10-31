@@ -17,6 +17,7 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     IApply<NewMsgIdPinnedEvent>,
     IApply<ChannelPhotoEditedEvent>,
     IApply<ChannelUserNameChangedEvent>,
+    IApply<ChannelUsernamesChangedEvent>,
     IApply<CheckChannelStateCompletedEvent>,
     IApply<ChannelNoForwardsChangedEvent>,
     //IApply<ChatJoinRequestHiddenEvent>,
@@ -200,6 +201,13 @@ public class ChannelState : AggregateState<ChannelAggregate, ChannelId, ChannelS
     }
 
     public void Apply(ChannelTitleEditedEvent aggregateEvent)
+    {
+    }
+
+    /// <summary>
+    /// The usernames vector lives in the read model only; the aggregate keeps no copy of it.
+    /// </summary>
+    public void Apply(ChannelUsernamesChangedEvent aggregateEvent)
     {
     }
 

@@ -9,6 +9,7 @@ using MyTelegram.Messenger.Services.Email;
 using MyTelegram.Messenger.CommandServer.BackgroundServices;
 using MyTelegram.Messenger.CommandServer.Extensions;
 using MyTelegram.Messenger.Services.HistoryTTL;
+using MyTelegram.Messenger.Services.Fragment;
 using MyTelegram.Messenger.Services.Impl;
 using Serilog;
 using Serilog.Sinks.SystemConsole.Themes;
@@ -125,6 +126,7 @@ builder.ConfigureServices((ctx,
     services.AddHostedService<MessageQueueDataProcessorBackgroundService<ISessionMessage>>();
     services.AddHostedService<MessageAutoDeleteService>();
     services.AddHostedService<EmojiStatusExpirationService>();
+    services.AddHostedService<FragmentCollectibleAssignmentService>();
     services.AddHostedService<MessageQueueDataProcessorBackgroundService<IDomainEvent>>();
     services.AddHostedService<QueuedCommandExecutorBackgroundService<DeviceAggregate, DeviceId>>();
     services.AddHostedService<QueuedCommandExecutorBackgroundService<PtsAggregate, PtsId>>();

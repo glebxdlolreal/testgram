@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Fragment;
 using EventFlow.Queries;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
@@ -22,7 +23,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProcessor queryProcessor, IChannelAppService channelAppService, IUsernameHelper usernameHelper, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestUpdateUsername, IBool>
+internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProcessor queryProcessor, IChannelAppService channelAppService, IUsernameHelper usernameHelper, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase, IFragmentCollectibleCatalog collectibleCatalog) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestUpdateUsername, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Channels.RequestUpdateUsername obj)
     {
@@ -33,6 +34,12 @@ internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProces
                 if (!usernameHelper.IsValidUsername(obj.Username))
                 {
                     RpcErrors.RpcErrors400.UsernameInvalid.ThrowRpcError();
+                }
+
+                // A username listed on Fragment that nobody holds can only be bought there.
+                if (await collectibleCatalog.IsUsernameForSaleAsync(obj.Username))
+                {
+                    RpcErrors.RpcErrors400.UsernamePurchaseAvailable.ThrowRpcError();
                 }
             }
 
@@ -54,6 +61,7 @@ internal sealed class UpdateUsernameHandler(ICommandBus commandBus, IQueryProces
             return new TBoolTrue();
         }
 
-        throw new NotImplementedException();
+        RpcErrors.RpcErrors400.ChannelInvalid.ThrowRpcError();
+        return null!;
     }
-}
+}

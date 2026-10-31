@@ -95,6 +95,33 @@ public class ContactAppService(
         return GetContactType(selfUserId, targetUserId, contactReadModels);
     }
 
+    /// <summary>
+    /// Drops matches on a Fragment collectible its holder has not activated: it is visible to the owner
+    /// only. See https://corefork.telegram.org/api/fragment
+    /// </summary>
+    private async Task<List<IUserNameReadModel>> ExcludeDisabledCollectiblesAsync(long selfUserId,
+        IReadOnlyCollection<IUserNameReadModel> matches)
+    {
+        var users = (await userAppService.GetListAsync(matches
+                .Where(p => p.PeerType == PeerType.User && p.PeerId != selfUserId)
+                .Select(p => p.PeerId).Distinct()))
+            .ToDictionary(p => p.UserId);
+        var channels = (await channelAppService.GetListAsync(matches
+                .Where(p => p.PeerType == PeerType.Channel)
+                .Select(p => p.PeerId).Distinct()))
+            .ToDictionary(p => p.ChannelId);
+
+        return matches.Where(p => p.PeerType switch
+        {
+            PeerType.User => !users.TryGetValue(p.PeerId, out var user) ||
+                             !user.Usernames.IsDisabledCollectible(p.UserName),
+            PeerType.Channel => !channels.TryGetValue(p.PeerId, out var channel) ||
+                                channel.CreatorId == selfUserId ||
+                                !channel.Usernames.IsDisabledCollectible(p.UserName),
+            _ => true
+        }).ToList();
+    }
+
     public async Task<SearchContactOutput> SearchAsync(long selfUserId,
         string keyword, int limit)
     {
@@ -105,8 +132,8 @@ public class ContactAppService(
 
             var contactReadModels = await queryProcessor
                 .ProcessAsync(new SearchContactQuery(selfUserId, searchKeyword, defaultLimit));
-            var userNameReadModels = await queryProcessor
-                .ProcessAsync(new SearchUserNameQuery(searchKeyword));
+            var userNameReadModels = await ExcludeDisabledCollectiblesAsync(selfUserId,
+                await queryProcessor.ProcessAsync(new SearchUserNameQuery(searchKeyword)));
 
             // Collect channel IDs from username search and keyword search
             var channelIdList = userNameReadModels.Where(p => p.PeerType == PeerType.Channel).Select(p => p.PeerId)

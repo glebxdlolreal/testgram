@@ -444,6 +444,20 @@ public class ChannelAggregate : MyInMemorySnapshotAggregateRoot<ChannelAggregate
         Emit(new ChannelEmojiStatusUpdatedEvent(requestInfo, _state.ChannelId, emojiStatus, oldEmojiStatus));
     }
 
+    /// <summary>
+    /// Replaces the <a href="https://corefork.telegram.org/api/fragment">usernames vector</a>
+    /// (<c>channels.toggleUsername</c>, <c>channels.reorderUsernames</c>,
+    /// <c>channels.deactivateAllUsernames</c>, attaching or detaching a Fragment collectible). The
+    /// caller validates the edit with <see cref="UsernameListEditor"/>; <paramref name="oldUsernames"/>
+    /// is the list it edited.
+    /// </summary>
+    public void SetChannelUsernames(RequestInfo requestInfo, List<UsernameItem> usernames,
+        List<UsernameItem>? oldUsernames)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        Emit(new ChannelUsernamesChangedEvent(requestInfo, _state.ChannelId, usernames, oldUsernames));
+    }
+
     public void UpdateChannelUserName(RequestInfo requestInfo,
             string userName)
     {

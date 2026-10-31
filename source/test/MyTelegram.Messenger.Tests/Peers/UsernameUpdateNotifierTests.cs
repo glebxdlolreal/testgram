@@ -19,8 +19,8 @@ namespace MyTelegram.Messenger.Tests.Peers;
 /// every contact kept the previous username in their
 /// <a href="https://corefork.telegram.org/api/peers#peer-info-database">peer info database</a>.
 /// It is announced from a domain event handler, which runs alongside the read model update, so the
-/// name is taken from the event rather than re-read — while the Fragment usernames, which only ever
-/// change through methods that notify on their own, come from the read model.
+/// name is taken from the event rather than re-read, and the usernames vector too when the event
+/// carries it. Disabled Fragment collectibles go to the owner's own sessions only.
 /// </para>
 /// </summary>
 public class UsernameUpdateNotifierTests
@@ -80,13 +80,28 @@ public class UsernameUpdateNotifierTests
     [Fact]
     public async Task The_cached_user_is_dropped_first()
     {
-        // account.toggleUsername writes to the read model collection directly, so the cached copy
+        // Commands executed in this process never reach the cached read model, so the cached copy
         // would otherwise still hold the previous username list.
         var (notifier, _, userAppService) = CreateNotifierWithServices();
 
         await notifier.NotifyUserNameChangedAsync(UserId, AuthKeyId);
 
         userAppService.Verify(p => p.InvalidateCache(UserId), Times.Once);
+    }
+
+    [Fact]
+    public async Task A_disabled_collectible_reaches_the_owner_but_not_the_contacts()
+    {
+        var (notifier, sender) = CreateNotifier();
+
+        await notifier.NotifyUserNameChangedAsync(UserId, AuthKeyId, usernames:
+        [
+            new UsernameItem("basic", true, true),
+            new UsernameItem("hidden", false, false)
+        ]);
+
+        sender.UpdateFor(UserId).Usernames!.Select(p => ((TUsername)p).Username).ShouldBe(["basic", "hidden"]);
+        sender.UpdateFor(ContactUserId).Usernames!.Select(p => ((TUsername)p).Username).ShouldBe(["basic"]);
     }
 
     // ---- Fixtures ------------------------------------------------------------------------------------

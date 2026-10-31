@@ -1855,65 +1855,71 @@ App__WebRtcConnections__0__Password=testgram123
 
 ## Fragment / multiple usernames
 
-Users and channels may have several usernames:
-- **Basic** (`Editable=true`) — the regular one, always active, cannot be disabled
-- **Fragment NFT** (`Editable=false`) — bought on Fragment.com, can be toggled on/off
+See https://corefork.telegram.org/api/fragment. Users, bots and channels may have several usernames:
+- **Basic** (`Editable=true`): changed with `account.updateUsername` / `channels.updateUsername`;
+  users and channels can never disable it, a bot may while another username stays active.
+- **Fragment collectible** (`Editable=false`): attached by the administrator (there is no Fragment
+  marketplace here), starts **disabled** and is visible only to its owner until activated.
 
-```csharp
-public class UsernameInfo   // read model
-{
-    public string Username { get; set; }
-    public bool Editable { get; set; }   // true = basic, false = Fragment NFT
-    public bool Active { get; set; }
-}
-// TL: TUsername { Editable (flag 0), Active (flag 1), Username }
-```
+### Storage and edits
+- `Usernames` (`List<UsernameInfo>`) in the user/channel read model is written **only** by
+  `UserUsernamesChangedEvent` / `ChannelUsernamesChangedEvent` (aggregate methods `SetUsernames` /
+  `SetChannelUsernames`), plus `UserNameUpdatedEvent` / `ChannelUserNameChangedEvent`, which replace
+  the editable entry in place (empty name removes it, a new one goes first). Never `$set` it.
+- `UsernameListEditor` (Domain.Shared) holds the rules, mirroring tdlib `Usernames.cpp`: the list is
+  active usernames in display order, then disabled ones; enabling appends to the active ones,
+  disabling moves to the front of the disabled ones; at most 10 active (`USERNAMES_ACTIVE_TOO_MUCH`);
+  reorder must name every active username exactly once (`ORDER_INVALID`); `deactivateAll` keeps the
+  editable entry. Handlers validate against the read model with it, then publish the whole new list.
+- `UsernamesDomainEventHandler` (query server) pushes `updateUserName` (owner's other sessions get
+  the full list, contacts only active entries; excludes `PermAuthKeyId`) or `updateChannel` + the
+  `channelAdminLogEventActionChangeUsernames` entry.
 
-`UserMapper` / `ChannelMapper` convert `Usernames` into a `TVector<IUsername>` and set the
-primary `Username` to the first active+editable one, otherwise the first active one; when the
-list is empty they fall back to the legacy `UserName` field. The primary username always comes first.
+### Wire shape
+`UsernameVectorBuilder`: as soon as the visible list holds a collectible, `username` is **unset** and
+`usernames` carries everything (first = main). tdlib logs an error and drops *all* usernames when both
+are set. With only the basic username visible, it goes in `username` with no vector. The mapper
+builds the owner's view; `UserConverterService` (non-self, not the bot's creator) and
+`ChatConverterService` (non-creator) rebuild it without disabled collectibles.
+`contacts.resolveUsername` treats a disabled collectible as not occupied for everyone but its owner.
 
-**Handlers:** `account.toggleUsername` / `reorderUsernames` (limit of 10 active, the basic one
-cannot be disabled), `channels.toggleUsername` / `reorderUsernames` / `deactivateAllUsernames`,
-`bots.toggleUsername` / `reorderUsernames`.
-
-### fragment.getCollectibleInfo
-
-`Handlers/LatestLayer/Fragment/GetCollectibleInfoHandler.cs` — looks up `fragment_collectibles`
-by `TInputCollectibleUsername` (username in lowercase) or `TInputCollectiblePhone`.
-Errors: `COLLECTIBLE_INVALID`, `COLLECTIBLE_NOT_FOUND`.
+### Catalogue and assignment
+`fragment_collectibles` (configuration, not EventFlow; read through `IFragmentCollectibleCatalog`):
 
 ```javascript
 {
-  _id: "fragment-username-testgram",
-  type: "username",            // "username" | "phone" (phone starts with 888)
-  username: "testgram",
-  purchase_date: 1704067200,   // unixtime
-  currency: "USD",
-  amount: 14500,               // Int32, minor units: 145.00 USD
-  crypto_currency: "TON",
-  crypto_amount: NumberLong("50000000000"),  // Int64, minor units of TON
-  url: "https://fragment.com/username/testgram"
+  _id: "fragment-username-blockchain",
+  type: "username",            // "username" | "phone" (phone = bare digits, 888...)
+  username: "blockchain",
+  purchase_date: 1712160000,   // unixtime; numbers may be Int32/Int64/Double
+  currency: "USD", amount: 14500,                              // minor units
+  crypto_currency: "TON", crypto_amount: NumberLong("50000000000"),
+  url: "https://fragment.com/username/blockchain",
+  // set by scripts/assign-nft-username.sh, consumed by the command server:
+  owner_peer_type: "user",     // "user" | "channel"
+  owner_peer_id: NumberLong("2010001"),
+  assign_state: "applied"      // pending | applied | failed (+assign_error) | revoke_pending | revoked
 }
 ```
 
-The client (`ProfileActivity` → `FragmentUsernameBottomSheet`) calls this method when a username
-with `!editable` is clicked, or a phone number starting with `888`, and shows the purchase date
-and price.
+- `scripts/init-fragment-nft.sh` upserts catalogue fields only (owners survive a re-run).
+- `scripts/assign-nft-username.sh [--channel] [--revoke] <peer_id> <username>` marks the entry
+  `pending` / `revoke_pending` and waits. `FragmentCollectibleAssignmentService` (command server,
+  every 5 s) reserves the name via `CreateUserNameCommand` (fails if another peer holds it), sends
+  `SetUsernames`, and marks the entry. On first start it also replays collectibles that the old
+  script had written straight into read models (flag in `fragment_migrations`).
+- A username listed in the catalogue that nobody holds makes `checkUsername` / `updateUsername`
+  answer `USERNAME_PURCHASE_AVAILABLE`.
+- Phone collectibles are catalogue entries only; nothing is created at sign-up. Logging in with an
+  888 number uses the normal SMS code (real Telegram sends `auth.sentCodeTypeFragmentSms`, which
+  needs a Fragment site this deployment does not have).
 
-### Granting an NFT username manually
-```bash
-docker compose -p mytelegram exec -T mongodb mongosh tg --quiet --eval '
-db["eventflow-userreadmodel"].updateOne(
-  { UserId: NumberLong("2010001") },
-  { $set: { Usernames: [
-      { Username: "glebxdlol",  Editable: true,  Active: true },
-      { Username: "blockchain", Editable: false, Active: true }
-  ] } })'
-
-docker compose -p mytelegram restart messenger-command-server messenger-query-server
-# In the client: kill the process, clear the cache, log in again
-```
+### fragment.getCollectibleInfo
+`Handlers/LatestLayer/Fragment/GetCollectibleInfoHandler.cs`. Answers only for collectibles the
+caller can see: own (or own channel / owned bot), a username its holder activated, or a phone
+number the holder's privacy shows to the caller (checked through `UserConverterService`).
+Otherwise `COLLECTIBLE_NOT_FOUND`; empty input `COLLECTIBLE_INVALID`. The Android client calls it
+from `FragmentUsernameBottomSheet` when a non-editable username or an 888 number is tapped.
 
 ---
 

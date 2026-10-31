@@ -7,6 +7,7 @@ public class UserState : AggregateState<UserAggregate, UserId, UserState>,
     IApply<UserSupportHasSetEvent>,
     IApply<UserVerifiedHasSetEvent>,
     IApply<UserNameUpdatedEvent>,
+    IApply<UserUsernamesChangedEvent>,
     IApply<UserProfilePhotoChangedEvent>,
     IApply<UserProfilePhotoUploadedEvent>,
     IApply<UserColorUpdatedEvent>,
@@ -87,6 +88,13 @@ public class UserState : AggregateState<UserAggregate, UserId, UserState>,
         {
             UserNameUpdateDate = aggregateEvent.CreationTime.ToTimestamp();
         }
+    }
+
+    /// <summary>
+    /// The usernames vector lives in the read model only; the aggregate keeps no copy of it.
+    /// </summary>
+    public void Apply(UserUsernamesChangedEvent aggregateEvent)
+    {
     }
 
     public void Apply(UserNameUpdatedEvent aggregateEvent)

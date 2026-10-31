@@ -1,120 +1,41 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 
 /// <summary>
-/// Activate or deactivate a purchased fragment.com username
-/// See https://core.telegram.org/method/account.toggleUsername
+/// Activate or deactivate a purchased <a href="https://fragment.com">fragment.com</a> username
+/// associated to the currently logged-in user.
+/// Possible errors
+/// Code Type Description
+/// 400 USERNAME_INVALID The provided username is not valid.
+/// 400 USERNAME_NOT_MODIFIED The username was not modified.
+/// 400 USERNAMES_ACTIVE_TOO_MUCH The maximum number of active usernames was reached.
+/// See https://corefork.telegram.org/method/account.toggleUsername and
+/// https://corefork.telegram.org/api/fragment
 /// </summary>
-internal sealed class ToggleUsernameHandler : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestToggleUsername, IBool>
+internal sealed class ToggleUsernameHandler(IQueryProcessor queryProcessor, ICommandBus commandBus)
+    : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestToggleUsername, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IUsernameUpdateNotifier _usernameUpdateNotifier;
-
-    public ToggleUsernameHandler(IMongoDatabase database, IUsernameUpdateNotifier usernameUpdateNotifier)
-    {
-        _database = database;
-        _usernameUpdateNotifier = usernameUpdateNotifier;
-    }
-
     protected override async Task<IBool> HandleCoreAsync(
         IRequestInput input,
         MyTelegram.Schema.Account.RequestToggleUsername obj)
     {
-        var userId = input.UserId;
-        var username = obj.Username.ToLower();
-
-        // Get user from MongoDB
-        var userCollection = _database.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var userFilter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-        var user = await userCollection.Find(userFilter).FirstOrDefaultAsync();
-
+        var user = await queryProcessor.ProcessAsync(new GetUserByIdQuery(input.UserId));
         if (user == null)
         {
             RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
-        }
-
-        // Get current usernames from Usernames
-        var usernames = user.Contains("Usernames") && !user["Usernames"].IsBsonNull
-            ? user["Usernames"].AsBsonArray
-            : new BsonArray();
-
-        if (usernames.Count == 0)
-        {
-            RpcErrors.RpcErrors400.UsernameInvalid.ThrowRpcError();
             return null!;
         }
 
-        // Find the username
-        BsonDocument? targetUsername = null;
-        int targetIndex = -1;
-        for (int i = 0; i < usernames.Count; i++)
-        {
-            if (usernames[i].IsBsonDocument)
-            {
-                var doc = usernames[i].AsBsonDocument;
-                if (doc.Contains("Username") && doc["Username"].AsString.ToLower() == username)
-                {
-                    targetUsername = doc;
-                    targetIndex = i;
-                    break;
-                }
-            }
-        }
-
-        if (targetUsername == null)
-        {
-            RpcErrors.RpcErrors400.UsernameInvalid.ThrowRpcError();
-            return null!;
-        }
-
-        // Check if it's editable (basic username cannot be deactivated)
-        var isEditable = targetUsername.Contains("Editable") && targetUsername["Editable"].AsBoolean;
-        if (isEditable && !obj.Active)
+        var current = UsernameListEditor.Effective(user.Usernames.ToUsernameItems(), user.UserName);
+        var updated = UsernameListEditor.Toggle(current, obj.Username, obj.Active, forBot: false);
+        if (updated == null)
         {
             RpcErrors.RpcErrors400.UsernameNotModified.ThrowRpcError();
             return null!;
         }
 
-        // Check current active state
-        var currentActive = targetUsername.Contains("Active") && targetUsername["Active"].AsBoolean;
-        if (currentActive == obj.Active)
-        {
-            RpcErrors.RpcErrors400.UsernameNotModified.ThrowRpcError();
-            return null!;
-        }
-
-        // Count active usernames
-        var activeCount = 0;
-        foreach (var item in usernames)
-        {
-            if (item.IsBsonDocument)
-            {
-                var doc = item.AsBsonDocument;
-                if (doc.Contains("Active") && doc["Active"].AsBoolean)
-                {
-                    activeCount++;
-                }
-            }
-        }
-
-        // Check max active usernames (10)
-        if (obj.Active && activeCount >= 10)
-        {
-            RpcErrors.RpcErrors400.UsernamesActiveTooMuch.ThrowRpcError();
-            return null!;
-        }
-
-        // Update username active state
-        targetUsername["Active"] = obj.Active;
-        usernames[targetIndex] = targetUsername;
-
-        // Save back to MongoDB
-        var update = Builders<BsonDocument>.Update.Set("Usernames", usernames);
-        await userCollection.UpdateOneAsync(userFilter, update);
-
-        await _usernameUpdateNotifier.NotifyUserNameChangedAsync(input, userId);
+        // updateUserName reaches the other sessions and the contacts from the event handler.
+        await commandBus.PublishAsync(new SetUsernamesCommand(UserId.Create(user.UserId), input.ToRequestInfo(),
+            updated.ToList(), current));
 
         return new TBoolTrue();
     }

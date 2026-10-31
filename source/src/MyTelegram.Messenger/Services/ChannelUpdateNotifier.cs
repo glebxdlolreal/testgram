@@ -3,8 +3,8 @@ using MyTelegram.Messenger.Converters.ConverterServices;
 namespace MyTelegram.Messenger.Services;
 
 /// <summary>
-/// Pushes <c>updateChannel</c> after a channel entry changed through a handler that writes to the
-/// read model directly, such as <c>channels.toggleUsername</c>, <c>channels.reorderUsernames</c> and
+/// Pushes <c>updateChannel</c> after a channel entry changed, such as its usernames vector through
+/// <c>channels.toggleUsername</c>, <c>channels.reorderUsernames</c> and
 /// <c>channels.deactivateAllUsernames</c>.
 /// <para>
 /// Those methods answer with a plain <c>Bool</c>, so the only way the change reaches anybody other
@@ -20,6 +20,9 @@ public interface IChannelUpdateNotifier
     /// calling session is skipped: it already learns the outcome from the rpc result.
     /// </summary>
     Task NotifyChannelChangedAsync(IRequestInput input, long channelId);
+
+    /// <inheritdoc cref="NotifyChannelChangedAsync(IRequestInput, long)"/>
+    Task NotifyChannelChangedAsync(RequestInfo requestInfo, long channelId);
 }
 
 public sealed class ChannelUpdateNotifier(
@@ -28,10 +31,21 @@ public sealed class ChannelUpdateNotifier(
     IObjectMessageSender objectMessageSender)
     : IChannelUpdateNotifier, ITransientDependency
 {
-    public async Task NotifyChannelChangedAsync(IRequestInput input, long channelId)
+    public Task NotifyChannelChangedAsync(IRequestInput input, long channelId)
     {
-        // The username handlers write straight to the read model collection, so the cached copy must
-        // be dropped before the channel is converted below.
+        return NotifyAsync(input, input.UserId, input.PermAuthKeyId, input.Layer, channelId);
+    }
+
+    public Task NotifyChannelChangedAsync(RequestInfo requestInfo, long channelId)
+    {
+        return NotifyAsync(requestInfo, requestInfo.UserId, requestInfo.PermAuthKeyId, requestInfo.Layer, channelId);
+    }
+
+    private async Task NotifyAsync(IRequestWithAccessHashKeyId request, long userId, long permAuthKeyId, int layer,
+        long channelId)
+    {
+        // Locally executed commands never reach the cached read model, so the cached copy must be
+        // dropped before the channel is converted below.
         channelAppService.InvalidateCache(channelId);
 
         var date = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -47,7 +61,7 @@ public sealed class ChannelUpdateNotifier(
             Date = date
         };
 
-        var channel = await chatConverterService.GetChannelAsync(input, channelId, false, false, input.Layer,
+        var channel = await chatConverterService.GetChannelAsync(request, channelId, false, false, layer,
             throwIfNotFound: false);
         if (channel != null)
         {
@@ -60,11 +74,11 @@ public sealed class ChannelUpdateNotifier(
                 Date = date
             };
 
-            await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, input.UserId), selfUpdates,
-                excludeAuthKeyId: input.AuthKeyId);
+            await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, userId), selfUpdates,
+                excludeAuthKeyId: permAuthKeyId);
         }
 
         await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.Channel, channelId), updates,
-            excludeUserId: input.UserId);
+            excludeUserId: userId);
     }
 }

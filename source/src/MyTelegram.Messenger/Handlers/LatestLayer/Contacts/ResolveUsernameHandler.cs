@@ -19,6 +19,7 @@ internal sealed class ResolveUsernameHandler(
     IQueryProcessor queryProcessor,
     IChatConverterService chatConverterService,
     IUserConverterService userConverterService,
+    IUserAppService userAppService,
     IChannelAppService channelAppService,
     IPhotoAppService photoAppService,
     IMongoDatabase mongoDatabase) : RpcResultObjectHandler<MyTelegram.Schema.Contacts.RequestResolveUsername, MyTelegram.Schema.Contacts.IResolvedPeer>
@@ -36,12 +37,17 @@ internal sealed class ResolveUsernameHandler(
             var userNameReadModel = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(obj.Username), default);
             if (userNameReadModel != null)
             {
-                Console.WriteLine($"[ResolveUsername] Username={obj.Username}, PeerId={userNameReadModel.PeerId}, PeerType={userNameReadModel.PeerType} ({(int)userNameReadModel.PeerType})");
-
                 switch (userNameReadModel.PeerType)
                 {
                     case PeerType.User:
-                        Console.WriteLine($"[ResolveUsername] Resolving as User");
+                        // A collectible that has not been activated is visible to its owner only.
+                        // See https://corefork.telegram.org/api/fragment
+                        if (userNameReadModel.PeerId != input.UserId &&
+                            (await userAppService.GetAsync((long?)userNameReadModel.PeerId))?.Usernames.IsDisabledCollectible(obj.Username) == true)
+                        {
+                            break;
+                        }
+
                         var user = await userConverterService.GetUserAsync(input, userNameReadModel.PeerId, false, false, input.Layer);
                         return new TResolvedPeer
                         {
@@ -53,10 +59,11 @@ internal sealed class ResolveUsernameHandler(
                             Users = new TVector<IUser>(user)
                         };
                     case PeerType.Channel:
-                        Console.WriteLine($"[ResolveUsername] Resolving as Channel");
                         {
                             var channelReadModel = await channelAppService.GetAsync(userNameReadModel.PeerId);
-                            if (channelReadModel != null)
+                            if (channelReadModel != null &&
+                                (channelReadModel.CreatorId == input.UserId ||
+                                 !channelReadModel.Usernames.IsDisabledCollectible(obj.Username)))
                             {
                                 var photoReadModel = await photoAppService.GetAsync(channelReadModel.PhotoId);
                                 var channelMemberReadModel = await queryProcessor.ProcessAsync(new GetChannelMemberByUserIdQuery(channelReadModel.ChannelId, input.UserId));
@@ -74,7 +81,6 @@ internal sealed class ResolveUsernameHandler(
 
                         break;
                     default:
-                        Console.WriteLine($"[ResolveUsername] ERROR: Unknown PeerType={userNameReadModel.PeerType} ({(int)userNameReadModel.PeerType})");
                         throw new ArgumentOutOfRangeException($"Unknown PeerType: {userNameReadModel.PeerType}");
                 }
             }

@@ -17,6 +17,7 @@ public class UserReadModel : IUserReadModel,
     IAmReadModelFor<UserAggregate, UserId, UserSupportHasSetEvent>,
     IAmReadModelFor<UserAggregate, UserId, UserVerifiedHasSetEvent>,
     IAmReadModelFor<UserAggregate, UserId, UserNameUpdatedEvent>,
+    IAmReadModelFor<UserAggregate, UserId, UserUsernamesChangedEvent>,
     IAmReadModelFor<UserAggregate, UserId, UserProfilePhotoChangedEvent>,
     IAmReadModelFor<UserAggregate, UserId, UserProfilePhotoUploadedEvent>,
     IAmReadModelFor<UserAggregate, UserId, UserColorUpdatedEvent>,
@@ -152,6 +153,17 @@ public class UserReadModel : IUserReadModel,
         CancellationToken cancellationToken)
     {
         UserName = domainEvent.AggregateEvent.UserItem.UserName;
+        // The editable entry of the usernames vector is the same username; leaving it behind made
+        // everyone keep seeing the previous one once a collectible was attached.
+        Usernames = UsernameListEditor.ChangeEditable(Usernames.ToUsernameItems(), UserName).ToUsernameInfos();
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<UserAggregate, UserId, UserUsernamesChangedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        Usernames = domainEvent.AggregateEvent.Usernames.ToUsernameInfos();
         return Task.CompletedTask;
     }
 

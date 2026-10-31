@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Services.Fragment;
+
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <summary>
 /// Check if a username is free and can be assigned to a channel/supergroup
@@ -17,7 +19,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUsernameHelper usernameHelper) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestCheckUsername, IBool>
+internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUsernameHelper usernameHelper,
+    IFragmentCollectibleCatalog collectibleCatalog) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestCheckUsername, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Channels.RequestCheckUsername obj)
     {
@@ -32,9 +35,14 @@ internal sealed class CheckUsernameHandler(IQueryProcessor queryProcessor, IUser
         var userNameReadModel = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(obj.Username.ToLower()));
         if (userNameReadModel == null)
         {
+            if (await collectibleCatalog.IsUsernameForSaleAsync(obj.Username))
+            {
+                RpcErrors.RpcErrors400.UsernamePurchaseAvailable.ThrowRpcError();
+            }
+
             return new TBoolTrue();
         }
 
         return new TBoolFalse();
     }
-}
+}

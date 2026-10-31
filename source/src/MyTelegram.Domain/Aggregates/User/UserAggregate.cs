@@ -115,6 +115,18 @@ public class UserAggregate : MyInMemorySnapshotAggregateRoot<UserAggregate, User
         Emit(new UserRecentEmojiStatusesClearedEvent(requestInfo, _state.UserId));
     }
 
+    /// <summary>
+    /// Replaces the <a href="https://corefork.telegram.org/api/fragment">usernames vector</a>
+    /// (<c>account|bots.toggleUsername</c>, <c>account|bots.reorderUsernames</c>, attaching or
+    /// detaching a Fragment collectible). The caller validates the edit with
+    /// <see cref="UsernameListEditor"/>; <paramref name="oldUsernames"/> is the list it edited.
+    /// </summary>
+    public void SetUsernames(RequestInfo requestInfo, List<UsernameItem> usernames, List<UsernameItem>? oldUsernames)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        Emit(new UserUsernamesChangedEvent(requestInfo, _state.UserId, usernames, oldUsernames));
+    }
+
     public void UpdateGlobalPrivacySettings(RequestInfo requestInfo, GlobalPrivacySettings globalPrivacySettings)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);

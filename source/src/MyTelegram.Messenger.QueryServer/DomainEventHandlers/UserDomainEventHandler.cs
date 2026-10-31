@@ -73,7 +73,7 @@ public class UserDomainEventHandler(
         // See https://corefork.telegram.org/api/peers#handling-updates
         var userItem = domainEvent.AggregateEvent.UserItem;
         await usernameUpdateNotifier.NotifyUserNameChangedAsync(userId,
-            domainEvent.AggregateEvent.RequestInfo.AuthKeyId,
+            domainEvent.AggregateEvent.RequestInfo.PermAuthKeyId,
             new UserNameSnapshot(userItem.FirstName, userItem.LastName, userItem.UserName));
     }
 

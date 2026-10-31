@@ -8,7 +8,8 @@ public sealed record UserNameSnapshot(string FirstName, string? LastName, string
 
 /// <summary>
 /// Pushes <c>updateUserName</c> after a username list changed through <c>account.updateUsername</c>,
-/// <c>account.toggleUsername</c> or <c>account.reorderUsernames</c>.
+/// <c>account|bots.toggleUsername</c>, <c>account|bots.reorderUsernames</c> or a Fragment collectible
+/// being attached or detached.
 /// <para>
 /// The <a href="https://corefork.telegram.org/api/peers#peer-info-database">peer info database</a>
 /// is meant to be kept fresh reactively: without this update the caller's other sessions, and
@@ -20,17 +21,21 @@ public interface IUsernameUpdateNotifier
 {
     /// <summary>
     /// Re-reads the user and delivers <c>updateUserName</c> to their other sessions and to everyone
-    /// who has them as a contact. The session that made the call is skipped: it already learns the
-    /// outcome from the rpc result and applies the change locally, as the API docs require.
+    /// who has them as a contact.
     /// </summary>
-    Task NotifyUserNameChangedAsync(IRequestInput input, long userId);
-
-    /// <inheritdoc cref="NotifyUserNameChangedAsync(IRequestInput, long)"/>
+    /// <param name="excludeAuthKeyId">
+    /// The permanent auth key of the session that made the call. It already learns the outcome from
+    /// the rpc result and applies the change locally, as the API docs require.
+    /// </param>
     /// <param name="snapshot">
     /// Values that win over the read model. Domain event handlers run alongside the read model
     /// update, so they pass what the event carried rather than risk announcing the previous name.
     /// </param>
-    Task NotifyUserNameChangedAsync(long userId, long? excludeAuthKeyId, UserNameSnapshot? snapshot = null);
+    /// <param name="usernames">
+    /// The complete usernames vector, when the triggering event carried it.
+    /// </param>
+    Task NotifyUserNameChangedAsync(long userId, long? excludeAuthKeyId, UserNameSnapshot? snapshot = null,
+        IReadOnlyList<UsernameItem>? usernames = null);
 }
 
 public sealed class UsernameUpdateNotifier(
@@ -39,16 +44,10 @@ public sealed class UsernameUpdateNotifier(
     IObjectMessageSender objectMessageSender)
     : IUsernameUpdateNotifier, ITransientDependency
 {
-    public Task NotifyUserNameChangedAsync(IRequestInput input, long userId)
-    {
-        return NotifyUserNameChangedAsync(userId, input.AuthKeyId);
-    }
-
     public async Task NotifyUserNameChangedAsync(long userId, long? excludeAuthKeyId,
-        UserNameSnapshot? snapshot = null)
+        UserNameSnapshot? snapshot = null, IReadOnlyList<UsernameItem>? usernames = null)
     {
-        // The username handlers write straight to the read model collection, so the cached copy
-        // must be dropped before anything reads the user again.
+        // Locally executed commands never reach the cached read model, so drop it before reading.
         userAppService.InvalidateCache(userId);
 
         var userReadModel = await userAppService.GetAsync((long?)userId);
@@ -57,69 +56,68 @@ public sealed class UsernameUpdateNotifier(
             return;
         }
 
+        var all = BuildUsernames(userReadModel, snapshot, usernames);
+        var firstName = snapshot?.FirstName ?? userReadModel!.FirstName;
+        var lastName = snapshot?.LastName ?? userReadModel?.LastName ?? string.Empty;
+
+        // The owner sees disabled collectibles too; to everyone else they do not exist.
+        await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, userId),
+            CreateUpdates(userId, firstName, lastName, all), excludeAuthKeyId: excludeAuthKeyId);
+
+        var contactUserIds = await queryProcessor.ProcessAsync(
+            new GetContactSelfUserIdListByTargetUserIdQuery(userId));
+        var othersUpdates = CreateUpdates(userId, firstName, lastName, all.Where(p => p.Active).ToList());
+
+        foreach (var contactUserId in contactUserIds.Where(p => p != userId).Distinct())
+        {
+            await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, contactUserId), othersUpdates);
+        }
+    }
+
+    private static TUpdates CreateUpdates(long userId, string firstName, string lastName,
+        IReadOnlyList<UsernameItem> usernames)
+    {
         var update = new TUpdateUserName
         {
             UserId = userId,
-            FirstName = snapshot?.FirstName ?? userReadModel!.FirstName,
-            LastName = snapshot?.LastName ?? userReadModel?.LastName ?? string.Empty,
-            Usernames = BuildUsernames(userReadModel, snapshot)
+            FirstName = firstName,
+            LastName = lastName,
+            Usernames = new TVector<IUsername>(usernames.Select(p => new TUsername
+            {
+                Username = p.Username,
+                Editable = p.Editable,
+                Active = p.Active
+            }))
         };
 
-        var updates = new TUpdates
+        return new TUpdates
         {
             Updates = new TVector<IUpdate>(update),
             Users = new TVector<IUser>(),
             Chats = new TVector<IChat>(),
             Date = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds()
         };
-
-        await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, userId), updates,
-            excludeAuthKeyId: excludeAuthKeyId);
-
-        var contactUserIds = await queryProcessor.ProcessAsync(
-            new GetContactSelfUserIdListByTargetUserIdQuery(userId));
-
-        foreach (var contactUserId in contactUserIds.Where(p => p != userId).Distinct())
-        {
-            await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, contactUserId), updates);
-        }
     }
 
     /// <summary>
-    /// The stored username list, with the editable (non-Fragment) entry replaced by the one the
-    /// snapshot reports. Fragment usernames only ever change through methods that notify on their
-    /// own, so taking them from the read model is safe even when it lags behind by an instant.
+    /// The full usernames vector: the one the event carried, else the stored one (or the legacy
+    /// username alone). A snapshot's username replaces the editable entry in place, the way the read
+    /// model applies it, since the read model may not have caught up yet.
     /// </summary>
-    private static TVector<IUsername> BuildUsernames(IUserReadModel? userReadModel, UserNameSnapshot? snapshot)
+    internal static IReadOnlyList<UsernameItem> BuildUsernames(IUserReadModel? userReadModel,
+        UserNameSnapshot? snapshot, IReadOnlyList<UsernameItem>? usernames)
     {
-        var usernames = new TVector<IUsername>();
-
-        foreach (var usernameInfo in userReadModel?.Usernames ?? [])
-        {
-            if (snapshot != null && usernameInfo.Editable)
-            {
-                continue;
-            }
-
-            usernames.Add(new TUsername
-            {
-                Username = usernameInfo.Username,
-                Editable = usernameInfo.Editable,
-                Active = usernameInfo.Active
-            });
-        }
-
+        var stored = usernames ?? userReadModel?.Usernames.ToUsernameItems();
         if (snapshot == null)
         {
-            return usernames;
+            return UsernameListEditor.Effective(stored, userReadModel?.UserName);
         }
 
-        if (!string.IsNullOrEmpty(snapshot.UserName))
+        if (stored is not { Count: > 0 })
         {
-            // The editable username always comes first, as the primary one.
-            usernames.Insert(0, new TUsername { Username = snapshot.UserName, Editable = true, Active = true });
+            return string.IsNullOrEmpty(snapshot.UserName) ? [] : [new UsernameItem(snapshot.UserName, true, true)];
         }
 
-        return usernames;
+        return UsernameListEditor.ChangeEditable(stored, snapshot.UserName)!;
     }
 }

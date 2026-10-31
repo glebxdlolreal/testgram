@@ -11,9 +11,10 @@ source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/compose-helper.sh"
 compose exec -T mongodb mongosh tg --quiet --eval '
 
 // Create fragment_collectibles collection with sample data
-print("Creating fragment_collectibles collection...");
-db.fragment_collectibles.deleteMany({});
-db.fragment_collectibles.insertMany([
+// Upsert the catalogue fields only: owner_peer_* and assign_state record who bought
+// a collectible (assign-nft-username.sh) and must survive a re-run.
+print("Updating fragment_collectibles catalogue...");
+[
   // Premium usernames
   {
     _id: "fragment-username-crypto",
@@ -104,7 +105,11 @@ db.fragment_collectibles.insertMany([
     crypto_amount: NumberLong("200000000000"),
     url: "https://fragment.com/number/888999999"
   }
-]);
+].forEach(function (doc) {
+  var id = doc._id;
+  delete doc._id;
+  db.fragment_collectibles.updateOne({ _id: id }, { $set: doc }, { upsert: true });
+});
 
 // Create indexes
 print("Creating indexes...");
@@ -113,7 +118,7 @@ db.fragment_collectibles.createIndex({ "phone": 1 });
 db.fragment_collectibles.createIndex({ "type": 1 });
 
 print("✅ Fragment NFT initialization complete!");
-print("Created " + db.fragment_collectibles.countDocuments({}) + " collectibles");
+print("Catalogue holds " + db.fragment_collectibles.countDocuments({}) + " collectibles");
 print("  - " + db.fragment_collectibles.countDocuments({type: "username"}) + " usernames");
 print("  - " + db.fragment_collectibles.countDocuments({type: "phone"}) + " phone numbers");
 
