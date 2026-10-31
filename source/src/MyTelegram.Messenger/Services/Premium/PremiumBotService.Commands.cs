@@ -45,7 +45,7 @@ public sealed partial class PremiumBotService
     private const int MaxGiftRecipients = 10;
 
     /// <summary>Winner counts offered for a prepaid Premium giveaway, as on real Telegram.</summary>
-    private static readonly int[] GiveawayQuantities = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 25, 50, 100];
+    private static readonly int[] GiveawayQuantities = [.. Enumerable.Range(1, 10), .. PremiumOptions.GiveawayExtraQuantities];
 
     private static readonly string[] StopReasonsRu =
     [
@@ -311,24 +311,40 @@ public sealed partial class PremiumBotService
         return SendAsync(userId, text, [Bold(text, bold1), Bold(text, bold2)], new TReplyKeyboardHide());
     }
 
-    /// <summary>"Получен платёж на сумму 9.599,00 SEK.\n\nСпасибо за покупку 50000 Звёзд Telegram!" and the new balance.</summary>
+    /// <summary>
+    /// Real Telegram's receipt for Stars, bought for oneself or as a gift: "Получен платёж на сумму
+    /// 28.599,00 SEK.\n\nСпасибо за покупку 150000 Звёзд Telegram!" (the English one also states the new balance).
+    /// </summary>
     private async Task SendStarsReceiptAsync(long userId, string price, BotPurchase purchase, bool russian)
     {
-        var recipientId = purchase.Recipients.FirstOrDefault();
-        if (recipientId > 0 && recipientId != userId)
+        var gift = purchase.Recipients.FirstOrDefault() is var recipientId && recipientId > 0 && recipientId != userId;
+        if (russian)
         {
-            var recipient = await queryProcessor.ProcessAsync(new GetUserByIdQuery(recipientId));
-            var name = recipient == null ? recipientId.ToString(CultureInfo.InvariantCulture) : DisplayName(recipient);
-            await SendAsync(userId, russian
-                ? $"Получен платёж на сумму {price}.\n\nСпасибо! {purchase.Stars} Звёзд Telegram отправлены в подарок: {name}."
-                : $"We received the payment for {price}. Thank you for gifting {purchase.Stars} Stars to {name}!");
+            await SendAsync(userId, $"Получен платёж на сумму {price}.\n\nСпасибо за покупку {purchase.Stars} Звёзд Telegram!");
             return;
         }
 
-        var balance = await StarsBalanceHelper.GetBalanceAsync(mongoDatabase, userId);
-        await SendAsync(userId, russian
-            ? $"Получен платёж на сумму {price}.\n\nСпасибо за покупку {purchase.Stars} Звёзд Telegram!\n\nВаш новый баланс: {balance} ⭐️"
-            : $"We received the payment for {price}. Thank you for purchasing {purchase.Stars} Stars!\n\nYour new balance: {balance} ⭐️");
+        var text = $"We received the payment for {price}. Thank you for purchasing {purchase.Stars} Stars!";
+        if (!gift)
+        {
+            text += $"\n\nYour new balance: {await StarsBalanceHelper.GetBalanceAsync(mongoDatabase, userId)} ⭐️";
+        }
+
+        await SendAsync(userId, text);
+    }
+
+    /// <summary>The same receipt for gifted Premium: "Получен платёж на сумму …\n\nСпасибо за покупку …!".</summary>
+    private Task SendPremiumGiftReceiptAsync(long userId, string price, BotPurchase purchase, bool russian)
+    {
+        var count = purchase.Recipients.Length;
+        var term = MonthsText(purchase.Months, russian);
+        return SendAsync(userId, russian
+            ? count == 1
+                ? $"Получен платёж на сумму {price}.\n\nСпасибо за покупку подарочной подписки Telegram Premium на {term}!"
+                : $"Получен платёж на сумму {price}.\n\nСпасибо за покупку {count} подарочных подписок Telegram Premium на {term}!"
+            : count == 1
+                ? $"We received the payment for {price}. Thank you for purchasing a {purchase.Months}-month Telegram Premium gift!"
+                : $"We received the payment for {price}. Thank you for purchasing {count} {purchase.Months}-month Telegram Premium gifts!");
     }
 
     /// <summary>"11 Apr 2026 12:16:03 UTC", the way real Telegram's receipts write dates.</summary>
@@ -525,7 +541,7 @@ public sealed partial class PremiumBotService
 
         foreach (var gift in gifts)
         {
-            var amount = gift.Amount * recipients.Count;
+            var amount = premiumOptions.Value.GiftPrice(gift.Months, recipients.Count);
             var label = $"{recipients.Count}x Premium for {MonthsText(gift.Months, false)}";
             var slug = await SaveLinkInvoiceAsync(userId, $"premcodes{RandomHex(16)}", "Premium Gifts", "Gift to your contacts",
                 label, amount, premiumOptions.Value.Currency, $"premium-gift:{gift.Months}:{ids}");
@@ -596,7 +612,7 @@ public sealed partial class PremiumBotService
         await SendAsync(userId, "⭐️", markup: new TReplyKeyboardHide());
 
         var rows = new TVector<IKeyboardButtonRow>();
-        foreach (var pair in StripeHelper.TopupOptions.Chunk(2))
+        foreach (var pair in StarsCatalog.TopupOffers.Chunk(2))
         {
             var row = new TKeyboardButtonRow { Buttons = new TVector<IKeyboardButton>() };
             foreach (var pack in pair)
@@ -720,8 +736,8 @@ public sealed partial class PremiumBotService
         var rows = new TVector<IKeyboardButtonRow>(gifts.Select(gift => (IKeyboardButtonRow)Row(new TKeyboardButtonCallback
         {
             Text = russian
-                ? $"На {MonthsText(gift.Months, true)} - {FormatPrice(gift.Amount, true)}"
-                : $"{MonthsText(gift.Months, false)} - {FormatPrice(gift.Amount, false)}",
+                ? $"На {MonthsText(gift.Months, true)} - {FormatPrice(premiumOptions.Value.GiftPrice(gift.Months, 1), true)}"
+                : $"{MonthsText(gift.Months, false)} - {FormatPrice(premiumOptions.Value.GiftPrice(gift.Months, 1), false)}",
             Data = $"{GiveawayCallbackPrefix}{channel.ChannelId}/{gift.Months}"
         })));
 
@@ -800,7 +816,7 @@ public sealed partial class PremiumBotService
     private async Task<(string Text, IEnumerable<IMessageEntity> Entities, IReplyMarkup Markup)?> GiveawayQuantitiesAsync(long userId,
         IChannelReadModel channel, int months, bool russian)
     {
-        if (premiumOptions.Value.FindGift(months) is not { Amount: > 0 } gift)
+        if (premiumOptions.Value.GiftPrice(months, 1) <= 0)
         {
             return null;
         }
@@ -811,7 +827,7 @@ public sealed partial class PremiumBotService
             var row = new TKeyboardButtonRow { Buttons = new TVector<IKeyboardButton>() };
             foreach (var quantity in pair)
             {
-                var amount = gift.Amount * quantity;
+                var amount = premiumOptions.Value.GiftPrice(months, quantity);
                 var slug = await SaveLinkInvoiceAsync(userId, $"premgiveprep{channel.ChannelId}_{months}_{quantity}", "Channel Giveaway",
                     $"Get more boosts for your channel by creating a giveaway in {channel.Title}.",
                     $"{quantity}x Premium for {MonthsText(months, false)}", amount, premiumOptions.Value.Currency,
@@ -848,7 +864,7 @@ public sealed partial class PremiumBotService
 
         var price = FormatPrice(offer.Amount, StarsCatalog.Currency, russian);
         var buttons = new List<IKeyboardButton>();
-        foreach (var (users, perUserStars) in offer.Winners)
+        foreach (var (users, perUserStars, _) in offer.Winners)
         {
             var boosts = offer.YearlyBoosts;
             var slug = await SaveLinkInvoiceAsync(userId, $"stargiveprep{channel.ChannelId}_{stars}_{users}", "Channel Giveaway",
@@ -931,7 +947,8 @@ public sealed partial class PremiumBotService
     // ---------------------------------------------------------------- helpers
 
     private List<PremiumPeriodOption> GiftTerms() =>
-        premiumOptions.Value.GetPeriods().Where(p => p.Gift && p.Amount > 0).OrderByDescending(p => p.Months).ToList();
+        premiumOptions.Value.GetPeriods().Where(p => p.Gift && premiumOptions.Value.GiftPrice(p.Months, 1) > 0)
+            .OrderByDescending(p => p.Months).ToList();
 
     /// <summary>
     /// " 12 месяцев: -39% <s>4 196,00 RUB</s>" lines: the saving of each term against buying the shortest
@@ -942,11 +959,12 @@ public sealed partial class PremiumBotService
         var text = new StringBuilder(head);
         var entities = new List<IMessageEntity>();
         var shortest = gifts[^1];
+        var shortestPrice = premiumOptions.Value.GiftPrice(shortest.Months, 1);
         foreach (var gift in gifts)
         {
             text.Append(russian ? " " : string.Empty).Append($"{MonthsText(gift.Months, russian)}: ");
-            var undiscounted = shortest.Amount * gift.Months / shortest.Months;
-            var saving = (int)Math.Floor((1 - (decimal)gift.Amount / undiscounted) * 100);
+            var undiscounted = shortestPrice * gift.Months / shortest.Months;
+            var saving = (int)Math.Floor((1 - (decimal)premiumOptions.Value.GiftPrice(gift.Months, 1) / undiscounted) * 100);
             if (gift != shortest && saving > 0)
             {
                 var percent = $"-{saving}%";

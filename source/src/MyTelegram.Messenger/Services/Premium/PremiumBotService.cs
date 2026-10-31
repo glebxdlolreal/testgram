@@ -287,19 +287,13 @@ public sealed partial class PremiumBotService(
                 break;
 
             case PurchaseKind.PremiumGift:
-                var names = new List<string>();
                 foreach (var recipient in purchase.Recipients)
                 {
                     await premiumGiftService.DeliverAsync(Fresh(input), recipient, purchase.Months, storedInvoice.Currency,
                         storedInvoice.TotalAmount / purchase.Recipients.Length, null, "premium-bot-gift");
-                    var user = await queryProcessor.ProcessAsync(new GetUserByIdQuery(recipient));
-                    names.Add(user == null ? recipient.ToString(CultureInfo.InvariantCulture) : DisplayName(user));
                 }
 
-                await SendAsync(input.UserId, russian
-                    ? $"Спасибо! Получен платёж на сумму {price}.\nПодарочная подписка Telegram Premium на {MonthsText(purchase.Months, true)} отправлена: {string.Join(", ", names)}."
-                    : $"Thank you! We received the payment for {price}.\nA {purchase.Months}-month Telegram Premium gift has been sent to {string.Join(", ", names)}.",
-                    markup: new TReplyKeyboardHide());
+                await SendPremiumGiftReceiptAsync(input.UserId, price, purchase, russian);
                 break;
 
             case PurchaseKind.Stars:

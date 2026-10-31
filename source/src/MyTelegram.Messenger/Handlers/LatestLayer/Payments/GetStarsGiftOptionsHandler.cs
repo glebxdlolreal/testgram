@@ -1,5 +1,6 @@
 ﻿using MyTelegram.Schema.Payments;
 using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Payments;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// <summary>
@@ -18,12 +19,13 @@ internal sealed class GetStarsGiftOptionsHandler : RpcResultObjectHandler<MyTele
 {
     protected override Task<TVector<MyTelegram.Schema.IStarsGiftOption>> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestGetStarsGiftOptions obj)
     {
-        var options = StripeHelper.TopupOptions.Select(o => (IStarsGiftOption)new TStarsGiftOption
+        var options = StarsCatalog.TopupOffers.Select(o => (IStarsGiftOption)new TStarsGiftOption
         {
             Stars = o.Stars,
             StoreProduct = o.StoreProduct,
-            Currency = "USD",
+            Currency = StarsCatalog.Currency,
             Amount = o.Amount,
+            Extended = o.Extended,
         });
         return Task.FromResult<TVector<IStarsGiftOption>>([.. options]);
     }

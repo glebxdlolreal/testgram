@@ -321,7 +321,14 @@ internal sealed class GetPaymentFormHandler(
 
         await premiumPurchaseGate.EnsureAllowedAsync([input.UserId, .. recipients]);
 
-        var amount = period!.Amount * quantity;
+        // A subscription is the term's own price; gifts and giveaways follow the per-quantity table.
+        var amount = invoice.Purpose is TInputStorePaymentPremiumSubscription
+            ? period!.Amount
+            : premium.GiftPrice(months, (int)quantity);
+        if (amount <= 0)
+        {
+            RpcErrors.RpcErrors400.MonthInvalid.ThrowRpcError();
+        }
         var form = await premiumCardCheckout.CreateAsync(input.UserId, amount, premium.Currency, description, intent =>
         {
             intent.PremiumKind = kind;
@@ -396,6 +403,21 @@ internal sealed class GetPaymentFormHandler(
         };
     }
 
+    /// <summary>
+    /// The server's price for a Stars pack. The amount the client quotes is never charged: a pack
+    /// that is not on sale is refused instead of being sold at whatever price was sent.
+    /// </summary>
+    private static long StarsPackPrice(long stars)
+    {
+        var offer = StarsCatalog.FindTopup(stars);
+        if (offer == null)
+        {
+            RpcErrors.RpcErrors400.StarsAmountInvalid.ThrowRpcError();
+        }
+
+        return offer!.Amount;
+    }
+
     private async Task<IPaymentForm> HandleStarsTopupAsync(IRequestInput input, TInputInvoiceStars invoice)
     {
         var stripe = options.Value.Stripe;
@@ -412,22 +434,26 @@ internal sealed class GetPaymentFormHandler(
         if (invoice.Purpose is TInputStorePaymentStarsTopup topup)
         {
             stars = topup.Stars;
-            // Find matching option or use provided amount
-            var opt = StripeHelper.TopupOptions.FirstOrDefault(o => o.Stars == topup.Stars);
-            amountCents = opt != default ? opt.Amount : topup.Amount;
+            amountCents = StarsPackPrice(topup.Stars);
         }
         else if (invoice.Purpose is TInputStorePaymentStarsGift gift)
         {
             stars = gift.Stars;
-            var opt = StripeHelper.TopupOptions.FirstOrDefault(o => o.Stars == gift.Stars);
-            amountCents = opt != default ? opt.Amount : gift.Amount;
+            amountCents = StarsPackPrice(gift.Stars);
             recipientUserId = gift.UserId is TInputUser inputUser ? inputUser.UserId : peerHelper.GetPeer(gift.UserId, input.UserId).PeerId;
             await starsPurchaseGate.EnsureAllowedAsync(input.UserId, recipientUserId);
         }
         else if (invoice.Purpose is TInputStorePaymentStarsGiveaway giveaway)
         {
             stars = giveaway.Stars;
-            amountCents = giveaway.Amount;
+            // The catalogue's price for the pool, never the amount the client quotes.
+            var offer = StarsCatalog.FindGiveaway(giveaway.Stars);
+            if (offer == null)
+            {
+                RpcErrors.RpcErrors400.StarsAmountInvalid.ThrowRpcError();
+            }
+
+            amountCents = offer!.Amount;
         }
         else if (invoice.Purpose is TInputStorePaymentPremiumGiveaway premiumGiveaway)
         {
@@ -507,7 +533,7 @@ internal sealed class GetPaymentFormHandler(
             Url = string.Empty,
             Invoice = new TInvoice
             {
-                Currency = "USD",
+                Currency = StarsCatalog.Currency,
                 Prices = [new TLabeledPrice { Label = $"{stars} Telegram Stars", Amount = amountCents }],
             },
             SavedCredentials = await GetSavedCredentialsAsync(input.UserId),

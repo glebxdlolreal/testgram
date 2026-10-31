@@ -15,14 +15,15 @@ internal sealed class GetStarsGiveawayOptionsHandler : RpcResultObjectHandler<My
             (MyTelegram.Schema.IStarsGiveawayOption)new TStarsGiveawayOption
             {
                 Default = i == 0,
+                Extended = offer.Extended,
                 Stars = offer.Stars,
                 YearlyBoosts = offer.YearlyBoosts,
                 Currency = StarsCatalog.Currency,
                 Amount = offer.Amount,
-                Winners = new TVector<MyTelegram.Schema.IStarsGiveawayWinnersOption>(offer.Winners.Select((w, j) =>
+                Winners = new TVector<MyTelegram.Schema.IStarsGiveawayWinnersOption>(offer.Winners.Select(w =>
                     (MyTelegram.Schema.IStarsGiveawayWinnersOption)new TStarsGiveawayWinnersOption
                     {
-                        Default = j == 0,
+                        Default = w.Default,
                         Users = w.Users,
                         PerUserStars = w.PerUserStars
                     }))

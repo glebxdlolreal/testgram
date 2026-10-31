@@ -36,16 +36,26 @@ internal sealed class GetPremiumGiftCodeOptionsHandler(
         var premium = premiumOptions.Value;
         var gifts = premium.GetPeriods().Where(p => p.Gift).OrderByDescending(p => p.Months).ToList();
 
-        foreach (var period in gifts.Where(p => p.Amount > 0))
+        // Gift codes go to 1–10 users; a giveaway (boost_peer set) may also have 25, 50 or 100 winners.
+        int[] quantities = obj.BoostPeer == null
+            ? [.. Enumerable.Range(1, MaxRecipients)]
+            : [.. Enumerable.Range(1, MaxRecipients), .. PremiumOptions.GiveawayExtraQuantities];
+        foreach (var period in gifts)
         {
-            for (var users = 1; users <= MaxRecipients; users++)
+            foreach (var users in quantities)
             {
+                var amount = premium.GiftPrice(period.Months, users);
+                if (amount <= 0)
+                {
+                    continue;
+                }
+
                 options.Add(new TPremiumGiftCodeOption
                 {
                     Users = users,
                     Months = period.Months,
                     Currency = premium.Currency,
-                    Amount = period.Amount * users
+                    Amount = amount
                 });
             }
         }

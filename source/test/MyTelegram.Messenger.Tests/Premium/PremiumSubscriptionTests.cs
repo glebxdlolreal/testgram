@@ -122,9 +122,9 @@ public class PremiumSubscriptionTests
 
     /// <summary>The bot_url links real Telegram hands out: PremiumBot?start=1, =12 and =24.</summary>
     [RequiresMongoDbTheory]
-    [InlineData("/start 1", 1, 499, "Telegram Premium")]
-    [InlineData("/start 12", 12, 3999, "Premium Annual Subscription")]
-    [InlineData("/start 24", 24, 6999, "Premium for 2 years")]
+    [InlineData("/start 1", 1, 29900, "Telegram Premium")]
+    [InlineData("/start 12", 12, 199000, "Premium Annual Subscription")]
+    [InlineData("/start 24", 24, 299000, "Premium for 2 years")]
     public async Task PremiumBot_sells_the_requested_term(string command, int months, long amount, string title)
     {
         using var mongo = EmbeddedMongoServer.Start();
@@ -141,7 +141,7 @@ public class PremiumSubscriptionTests
             .Find(d => d.MsgId == 77).FirstAsync();
         Encoding.UTF8.GetString(stored.Payload).ShouldBe($"premium:{months}");
         stored.TotalAmount.ShouldBe(amount);
-        stored.Currency.ShouldBe("USD");
+        stored.Currency.ShouldBe("RUB");
         stored.BotId.ShouldBe(MyTelegramConsts.PremiumBotUserId);
         stored.Title.ShouldBe(title);
         stored.StartParam.ShouldBe(months.ToString());
@@ -164,10 +164,10 @@ public class PremiumSubscriptionTests
         await bot.HandleMessageAsync(Input(), "/start 24");
 
         var monthly = sent[1].ReplyMarkup.ShouldBeOfType<TReplyInlineMarkup>().Rows[0].Buttons[0].ShouldBeOfType<TKeyboardButtonCallback>();
-        monthly.Text.ShouldBe("Switch to 2-year (-41% per month)");
+        monthly.Text.ShouldBe("Switch to 2-year (-58% per month)"); // as on real Telegram
         monthly.Data.ShouldStartWith("init/24M/");
         var yearly = sent[3].ReplyMarkup.ShouldBeOfType<TReplyInlineMarkup>().Rows[0].Buttons[0].ShouldBeOfType<TKeyboardButtonCallback>();
-        yearly.Text.ShouldBe("Switch to monthly for 4.99\u00a0USD per month");
+        yearly.Text.ShouldBe("Switch to monthly for 299.00\u00a0RUB per month");
         yearly.Data.ShouldStartWith("init/1M/");
         sent[5].ReplyMarkup.ShouldBeOfType<TReplyKeyboardHide>();
         sent[1].Entities.ShouldHaveSingleItem().ShouldBeOfType<TMessageEntityBold>().Length.ShouldBe("Pay the invoice above".Length);

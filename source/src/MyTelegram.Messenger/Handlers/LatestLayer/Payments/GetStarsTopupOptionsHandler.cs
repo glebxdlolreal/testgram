@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Payments;
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 
 internal sealed class GetStarsTopupOptionsHandler
@@ -6,13 +7,13 @@ internal sealed class GetStarsTopupOptionsHandler
     protected override Task<TVector<MyTelegram.Schema.IStarsTopupOption>> HandleCoreAsync(
         IRequestInput input, MyTelegram.Schema.Payments.RequestGetStarsTopupOptions obj)
     {
-        var options = StripeHelper.TopupOptions.Select((o, i) => (IStarsTopupOption)new TStarsTopupOption
+        var options = StarsCatalog.TopupOffers.Select(o => (IStarsTopupOption)new TStarsTopupOption
         {
             Stars = o.Stars,
             StoreProduct = o.StoreProduct,
-            Currency = "USD",
+            Currency = StarsCatalog.Currency,
             Amount = o.Amount,
-            Extended = i == StripeHelper.TopupOptions.Length - 1, // last option is "extended"
+            Extended = o.Extended,
         }).ToList();
 
         return Task.FromResult(new TVector<IStarsTopupOption>(options));

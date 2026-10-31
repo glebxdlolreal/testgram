@@ -136,8 +136,8 @@ public class PremiumBotCommandsTests
         sent[1].Message.ShouldBe("⭐️");
         var links = sent[2].ReplyMarkup.ShouldBeOfType<TReplyInlineMarkup>().Rows.SelectMany(r => r.Buttons)
             .Select(b => b.ShouldBeOfType<TKeyboardButtonUrl>()).ToList();
-        links.Count.ShouldBe(Handlers.LatestLayer.Payments.StripeHelper.TopupOptions.Length);
-        links[0].Url.ShouldStartWith("https://t.me/$stars50_");
+        links.Count.ShouldBe(StarsCatalog.TopupOffers.Length);
+        links[0].Url.ShouldStartWith("https://t.me/$stars100_");
 
         await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "/stars");
         await bot.HandleMessageAsync(PremiumSubscriptionTests.Input(), "Cancel");

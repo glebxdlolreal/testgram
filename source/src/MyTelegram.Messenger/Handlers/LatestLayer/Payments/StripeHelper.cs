@@ -7,17 +7,6 @@ internal static class StripeHelper
 {
     private static readonly HttpClient Http = new();
 
-    // Stars topup options: stars -> (currency, amount in cents)
-    public static readonly (long Stars, string StoreProduct, long Amount)[] TopupOptions =
-    [
-        (50,   "com.testgram.stars50",   99),
-        (100,  "com.testgram.stars100",  199),
-        (250,  "com.testgram.stars250",  499),
-        (500,  "com.testgram.stars500",  999),
-        (1000, "com.testgram.stars1000", 1999),
-        (2500, "com.testgram.stars2500", 4999),
-    ];
-
     /// <summary>Creates a Stripe PaymentIntent and returns its client_secret and id.</summary>
     public static async Task<(string ClientSecret, string PaymentIntentId)> CreatePaymentIntentAsync(
         string secretKey, long amountCents, string currency, string description)
