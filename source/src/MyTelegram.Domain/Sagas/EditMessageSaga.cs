@@ -58,7 +58,10 @@ ISagaIsStartedBy<MessageAggregate, MessageId, OutboxMessageEditedEventV2>,
                     newItem.Media,
                     newItem.ReplyMarkup,
                     newItem.InvertMedia,
-                    newItem.Hashtags
+                    newItem.Hashtags,
+                    // With message encryption on, the text travels only encrypted, once per owner: the
+                    // recipient's copy needs its own ciphertext or it keeps showing the old text.
+                    newItem.InboxMessageEncryptedData
                 );
                 Publish(command);
             }

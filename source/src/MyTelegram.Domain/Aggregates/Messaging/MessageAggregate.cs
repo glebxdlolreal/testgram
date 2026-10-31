@@ -275,7 +275,9 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
         }
 
         var oldMessageItem = _state.MessageItem;
-        var editHide = oldMessageItem.SenderUserId == MyTelegramConsts.BotFatherUserId && (replyMarkup != null || oldMessageItem.ReplyMarkup != null);
+        // Service bots switching their keyboards, as real Telegram's do: no "edited" mark.
+        var editHide = (oldMessageItem.SenderUserId is MyTelegramConsts.BotFatherUserId or MyTelegramConsts.PremiumBotUserId) &&
+                       (replyMarkup != null || oldMessageItem.ReplyMarkup != null);
         media ??= oldMessageItem.Media;
 
         var newMessageItem = oldMessageItem with
