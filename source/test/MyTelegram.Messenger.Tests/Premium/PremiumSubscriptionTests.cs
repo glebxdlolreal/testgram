@@ -11,6 +11,7 @@ using MyTelegram.Messenger.Services;
 using MyTelegram.Messenger.Services.Interfaces;
 using MyTelegram.Messenger.Services.Payments;
 using MyTelegram.Messenger.Services.Premium;
+using MyTelegram.Messenger.Services.WebFiles;
 using MyTelegram.Messenger.Tests.Stats;
 using MyTelegram.Schema;
 using MyTelegram.Messenger.Converters.ConverterServices;
@@ -121,10 +122,10 @@ public class PremiumSubscriptionTests
 
     /// <summary>The bot_url links real Telegram hands out: PremiumBot?start=1, =12 and =24.</summary>
     [RequiresMongoDbTheory]
-    [InlineData("/start 1", 1, 499)]
-    [InlineData("/start 12", 12, 3999)]
-    [InlineData("/start 24", 24, 6999)]
-    public async Task PremiumBot_sells_the_requested_term(string command, int months, long amount)
+    [InlineData("/start 1", 1, 499, "Telegram Premium")]
+    [InlineData("/start 12", 12, 3999, "Premium Annual Subscription")]
+    [InlineData("/start 24", 24, 6999, "Premium for 2 years")]
+    public async Task PremiumBot_sells_the_requested_term(string command, int months, long amount, string title)
     {
         using var mongo = EmbeddedMongoServer.Start();
         var sent = new List<SendMessageInput>();
@@ -132,25 +133,73 @@ public class PremiumSubscriptionTests
 
         await bot.HandleMessageAsync(Input(), command);
 
-        var invoice = sent.ShouldHaveSingleItem();
-        invoice.Media.ShouldBeOfType<TMessageMediaInvoice>();
+        sent.Count.ShouldBe(2);
+        sent[0].Media.ShouldBeOfType<TMessageMediaInvoice>();
+        sent[0].ReplyMarkup.ShouldBeOfType<TReplyInlineMarkup>().Rows[0].Buttons[0].ShouldBeOfType<TKeyboardButtonBuy>();
+        sent[1].Message.ShouldStartWith("Pay the invoice above");
         var stored = await mongo.Database.GetCollection<BotInvoiceDocument>(BotInvoiceHelper.CollectionName)
             .Find(d => d.MsgId == 77).FirstAsync();
         Encoding.UTF8.GetString(stored.Payload).ShouldBe($"premium:{months}");
         stored.TotalAmount.ShouldBe(amount);
         stored.Currency.ShouldBe("USD");
         stored.BotId.ShouldBe(MyTelegramConsts.PremiumBotUserId);
+        stored.Title.ShouldBe(title);
+        stored.StartParam.ShouldBe(months.ToString());
+        BotInvoiceHelper.ReadPhoto(stored).ShouldBeOfType<TWebDocument>().AccessHash.ShouldBe(42);
+    }
+
+    /// <summary>
+    /// Real Telegram's note under each invoice: a switch to two years under the monthly one, to monthly
+    /// under the yearly one, nothing under the two-year one.
+    /// </summary>
+    [RequiresMongoDbFact]
+    public async Task PremiumBot_offers_to_switch_terms_like_real_Telegram()
+    {
+        using var mongo = EmbeddedMongoServer.Start();
+        var sent = new List<SendMessageInput>();
+        var bot = Bot(mongo.Database, sent, blocked: false);
+
+        await bot.HandleMessageAsync(Input(), "/start");
+        await bot.HandleMessageAsync(Input(), "/start 12");
+        await bot.HandleMessageAsync(Input(), "/start 24");
+
+        var monthly = sent[1].ReplyMarkup.ShouldBeOfType<TReplyInlineMarkup>().Rows[0].Buttons[0].ShouldBeOfType<TKeyboardButtonCallback>();
+        monthly.Text.ShouldBe("Switch to 2-year (-41% per month)");
+        monthly.Data.ShouldStartWith("init/24M/");
+        var yearly = sent[3].ReplyMarkup.ShouldBeOfType<TReplyInlineMarkup>().Rows[0].Buttons[0].ShouldBeOfType<TKeyboardButtonCallback>();
+        yearly.Text.ShouldBe("Switch to monthly for 4.99\u00a0USD per month");
+        yearly.Data.ShouldStartWith("init/1M/");
+        sent[5].ReplyMarkup.ShouldBeOfType<TReplyKeyboardHide>();
+        sent[1].Entities.ShouldHaveSingleItem().ShouldBeOfType<TMessageEntityBold>().Length.ShouldBe("Pay the invoice above".Length);
     }
 
     [RequiresMongoDbFact]
-    public async Task PremiumBot_defaults_to_a_month_for_any_other_start_parameter()
+    public async Task PremiumBot_sends_the_term_a_switch_button_names()
     {
         using var mongo = EmbeddedMongoServer.Start();
         var sent = new List<SendMessageInput>();
 
-        await Bot(mongo.Database, sent, blocked: false).HandleMessageAsync(Input(), "/start double_limits__channels");
+        await Bot(mongo.Database, sent, blocked: false).HandleCallbackAsync(Input(), "init/24M/118135547");
 
-        sent.ShouldHaveSingleItem();
+        sent[0].Media.ShouldBeOfType<TMessageMediaInvoice>();
+        var stored = await mongo.Database.GetCollection<BotInvoiceDocument>(BotInvoiceHelper.CollectionName)
+            .Find(d => d.MsgId == 77).FirstAsync();
+        Encoding.UTF8.GetString(stored.Payload).ShouldBe("premium:24");
+    }
+
+    /// <summary>Real Telegram answers /start 3 and /start status with the monthly invoice.</summary>
+    [RequiresMongoDbTheory]
+    [InlineData("/start double_limits__channels")]
+    [InlineData("/start 3")]
+    [InlineData("/start")]
+    public async Task PremiumBot_defaults_to_a_month_for_any_other_start_parameter(string command)
+    {
+        using var mongo = EmbeddedMongoServer.Start();
+        var sent = new List<SendMessageInput>();
+
+        await Bot(mongo.Database, sent, blocked: false).HandleMessageAsync(Input(), command);
+
+        sent.Count.ShouldBe(2);
         var stored = await mongo.Database.GetCollection<BotInvoiceDocument>(BotInvoiceHelper.CollectionName)
             .Find(d => d.MsgId == 77).FirstAsync();
         Encoding.UTF8.GetString(stored.Payload).ShouldBe("premium:1");
@@ -165,26 +214,28 @@ public class PremiumSubscriptionTests
 
         await bot.HandleMessageAsync(Input(), "/start");
         await bot.HandleMessageAsync(Input(), "/start 12");
+        await bot.HandleCallbackAsync(Input(), "init/24M/1");
 
-        sent.Count.ShouldBe(2);
-        sent.ShouldAllBe(m => m.Media == null && m.Message == "Sorry, I didn't understand your request. Send the /start command.");
+        sent.Count.ShouldBe(3);
+        sent.ShouldAllBe(m => m.Media == null && m.Message == "Sorry, I didn't understand your request. Send the /start command");
         (await mongo.Database.GetCollection<BotInvoiceDocument>(BotInvoiceHelper.CollectionName)
             .CountDocumentsAsync(FilterDefinition<BotInvoiceDocument>.Empty)).ShouldBe(0);
     }
 
     [RequiresMongoDbFact]
-    public async Task PremiumBot_does_not_understand_unknown_terms_or_text()
+    public async Task PremiumBot_does_not_understand_anything_but_start()
     {
         using var mongo = EmbeddedMongoServer.Start();
         var sent = new List<SendMessageInput>();
         var bot = Bot(mongo.Database, sent, blocked: false);
 
-        await bot.HandleMessageAsync(Input(), "/start 5");
         await bot.HandleMessageAsync(Input(), "hello");
         await bot.HandleMessageAsync(Input(), "/status");
 
-        sent.Count.ShouldBe(3);
-        sent.ShouldAllBe(m => m.Media == null && m.Message.StartsWith("Sorry, I didn't understand"));
+        sent.Count.ShouldBe(2);
+        sent.ShouldAllBe(m => m.Media == null && m.Message.StartsWith("Sorry, I didn't understand") && m.ReplyMarkup is TReplyKeyboardHide);
+        var command = sent[0].Entities.ShouldHaveSingleItem().ShouldBeOfType<TMessageEntityBotCommand>();
+        sent[0].Message.Substring(command.Offset, command.Length).ShouldBe("/start");
     }
 
     private static PremiumSubscriptionService Subscriptions(IMongoDatabase database, Mock<ICommandBus> bus, bool premium) =>
@@ -201,15 +252,23 @@ public class PremiumSubscriptionTests
         {
             Title = "Telegram Premium", Description = string.Empty, Currency = "USD", TotalAmount = 1, StartParam = string.Empty
         });
+        // 77 for each invoice, 78 for the note after it.
+        var next = 77;
         var ids = new Mock<IIdGenerator>();
         ids.Setup(i => i.NextIdAsync(It.IsAny<IdType>(), It.IsAny<long>(), It.IsAny<int>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(77);
+            .ReturnsAsync(() => next++ % 2 == 1 ? 77 : 78);
+        var registrar = new Mock<IWebFileRegistrar>();
+        registrar.Setup(r => r.EnsureRegisteredAsync(It.IsAny<long>(), It.IsAny<string?>(), It.IsAny<string>(), It.IsAny<int>(),
+                It.IsAny<TVector<IDocumentAttribute>?>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
+        var proxy = new Mock<IWebDocumentProxy>();
+        proxy.Setup(p => p.Sign(It.IsAny<string>())).Returns(42);
 
         return new PremiumBotService(database, messages.Object, media.Object, ids.Object, new Mock<IQueryProcessor>().Object,
             new Mock<IUserConverterService>().Object, Microsoft.Extensions.Options.Options.Create(new PremiumOptions()),
             PremiumPricingAndLimitTests.Gate(blocked).Object, new Mock<IPremiumSubscriptionService>().Object,
             new Mock<IPremiumCardCheckout>().Object, new Mock<IBotInvoicePaymentService>().Object,
-            NullLogger<PremiumBotService>.Instance);
+            registrar.Object, proxy.Object, NullLogger<PremiumBotService>.Instance);
     }
 
     private static IRequestInput Input()

@@ -17,12 +17,15 @@ public class ForwardMessageSaga : MyInMemoryAggregateSaga<ForwardMessageSaga, Fo
 {
     private readonly IIdGenerator _idGenerator;
     private readonly IMessageEncryptionHelper _encryptionHelper;
+    private readonly IForwardedReplyMarkupProvider _forwardedReplyMarkupProvider;
     private readonly ForwardMessageState _state = new();
 
-    public ForwardMessageSaga(ForwardMessageSagaId id, IEventStore eventStore, IIdGenerator idGenerator, IMessageEncryptionHelper encryptionHelper) : base(id, eventStore)
+    public ForwardMessageSaga(ForwardMessageSagaId id, IEventStore eventStore, IIdGenerator idGenerator, IMessageEncryptionHelper encryptionHelper,
+        IForwardedReplyMarkupProvider forwardedReplyMarkupProvider) : base(id, eventStore)
     {
         _idGenerator = idGenerator;
         _encryptionHelper = encryptionHelper;
+        _forwardedReplyMarkupProvider = forwardedReplyMarkupProvider;
         Register(_state);
     }
 
@@ -245,6 +248,8 @@ public class ForwardMessageSaga : MyInMemoryAggregateSaga<ForwardMessageSaga, Fo
             return outMessageId;
         }
 
+        var replyMarkup = await _forwardedReplyMarkupProvider.GetForwardedReplyMarkupAsync(item);
+
         var messageItem = new MessageItem(
             ownerPeer,
             toPeer,
@@ -280,7 +285,8 @@ public class ForwardMessageSaga : MyInMemoryAggregateSaga<ForwardMessageSaga, Fo
             InboxMessageEncryptedData: _encryptionHelper.IsEnabled && !string.IsNullOrEmpty(message) && _state.ToPeer.PeerType == PeerType.User
                 ? _encryptionHelper.Encrypt(_state.ToPeer.PeerId, message)
                 : null,
-            NoForwards: _state.NoForwards
+            NoForwards: _state.NoForwards,
+            ReplyMarkup: replyMarkup
         );
 
         var reqMsgId = _state.ForwardFromLinkedChannel ? 0 : _state.RequestInfo.ReqMsgId;

@@ -52,6 +52,22 @@ public class PremiumOptions
 
     public List<PremiumPeriodOption>? Periods { get; set; }
 
+    /// <summary>
+    /// The picture on @PremiumBot's invoices, real Telegram's own (telegram.org, 800x650 JPEG, measured
+    /// 2026-10-31). It is registered with the file-server so clients download it through this server.
+    /// An empty URL sends invoices without a picture.
+    /// </summary>
+    public string InvoicePhotoUrl { get; set; } =
+        "https://telegram.org/file/464001019/11ed9/cJ2gxYh2KJs.29672/31f9128ef9c4794644";
+
+    public string InvoicePhotoMimeType { get; set; } = "image/jpeg";
+
+    public int InvoicePhotoSize { get; set; } = 29672;
+
+    public int InvoicePhotoWidth { get; set; } = 800;
+
+    public int InvoicePhotoHeight { get; set; } = 650;
+
     /// <summary>How fast accounts without Premium may upload and download, see <see cref="PremiumSpeedLimitOptions"/>.</summary>
     public PremiumSpeedLimitOptions SpeedLimit { get; set; } = new();
 

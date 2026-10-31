@@ -2,6 +2,7 @@ using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Bots;
 using MyTelegram.Messenger.Services.Phone;
+using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 
@@ -11,6 +12,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// </summary>
 internal sealed class GetBotCallbackAnswerHandler(
     IBotFatherBotService botFatherBotService,
+    IPremiumBotService premiumBotService,
     IPeerHelper peerHelper,
     IMongoDatabase database,
     IMessageAppService messageAppService,
@@ -44,6 +46,13 @@ internal sealed class GetBotCallbackAnswerHandler(
             {
                 _ = Task.Run(() => botFatherBotService.HandleCallbackAsync(input, input.UserId, obj.MsgId, data));
                 return new MyTelegram.Schema.Messages.TBotCallbackAnswer { CacheTime = 0 };
+            }
+
+            // @PremiumBot's term switch answers with a new invoice, not with a toast.
+            if (peer.PeerId == PremiumBotService.BotUserId)
+            {
+                _ = Task.Run(() => premiumBotService.HandleCallbackAsync(input, data));
+                return new MyTelegram.Schema.Messages.TBotCallbackAnswer { CacheTime = 0, NativeUi = true };
             }
         }
 
