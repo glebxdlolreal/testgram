@@ -7,17 +7,23 @@ namespace MyTelegram.Messenger.Services.Premium;
 /// </summary>
 public interface IPremiumWelcomeNotifier
 {
+    /// <summary>Safe from either server: the message itself is sent by the command server (<see cref="SendAsync"/>).</summary>
     Task NotifyAsync(long userId);
+
+    /// <summary>Sends the note; command server only, where message ids are allocated.</summary>
+    Task SendAsync(long userId);
 }
 
 /// <inheritdoc />
-public sealed class PremiumWelcomeNotifier(IMessageAppService messageAppService) : IPremiumWelcomeNotifier, ITransientDependency
+public sealed class PremiumWelcomeNotifier(IMessageAppService messageAppService, IEventBus eventBus) : IPremiumWelcomeNotifier, ITransientDependency
 {
     // Real Telegram decorates 🌟 with a custom emoji this server does not have, so it goes out plain.
     public const string Text =
         "Thank you for subscribing to 🌟 Telegram Premium! Learn all about the exclusive benefits you've unlocked: @premium.";
 
-    public Task NotifyAsync(long userId)
+    public Task NotifyAsync(long userId) => eventBus.PublishAsync(new PremiumWelcomeRequestedEvent(userId));
+
+    public Task SendAsync(long userId)
     {
         var entities = new TVector<IMessageEntity>(
             new TMessageEntityBold { Offset = Text.IndexOf("Telegram Premium", StringComparison.Ordinal), Length = "Telegram Premium".Length },

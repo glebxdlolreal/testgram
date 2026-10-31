@@ -211,6 +211,18 @@ public class PremiumBotCommandsTests
     }
 
     [Fact]
+    public void A_settled_payment_crosses_to_the_command_server_intact()
+    {
+        var serializer = new PremiumBotPaymentSettledEventDataSerializer();
+        var settled = new PremiumBotPaymentSettledEvent(UserId, 42, 222, "bot-invoice-slug-premcodes_ab", "pi_1", "cus_1", string.Empty);
+        var buffer = new System.Buffers.ArrayBufferWriter<byte>();
+
+        serializer.Serialize(buffer, settled);
+
+        serializer.Deserialize(buffer.WrittenMemory).ShouldBe(settled);
+    }
+
+    [Fact]
     public void The_welcome_notification_matches_real_telegram()
     {
         PremiumWelcomeNotifier.Text.ShouldBe("Thank you for subscribing to 🌟 Telegram Premium! Learn all about the exclusive benefits you've unlocked: @premium.");

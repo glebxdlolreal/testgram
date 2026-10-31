@@ -273,7 +273,7 @@ public class PremiumSubscriptionTests
             new Mock<IUserConverterService>().Object, Microsoft.Extensions.Options.Options.Create(new PremiumOptions()),
             PremiumPricingAndLimitTests.Gate(blocked).Object, subscriptions ?? new Mock<IPremiumSubscriptionService>().Object,
             new Mock<IPremiumCardCheckout>().Object, autoRenew ?? new Mock<IPremiumAutoRenewService>().Object,
-            new Mock<IPremiumGiftService>().Object, new Mock<IPremiumWelcomeNotifier>().Object, commandBus ?? new Mock<ICommandBus>().Object, new Mock<MyTelegram.Services.Services.IDataEncryptionHelper>().Object,
+            new Mock<IPremiumGiftService>().Object, new Mock<IPremiumWelcomeNotifier>().Object, new Mock<MyTelegram.EventBus.IEventBus>().Object, commandBus ?? new Mock<ICommandBus>().Object, new Mock<MyTelegram.Services.Services.IDataEncryptionHelper>().Object,
             serverOptions.Object, new Mock<IBotInvoicePaymentService>().Object,
             registrar.Object, proxy.Object, NullLogger<PremiumBotService>.Instance);
     }

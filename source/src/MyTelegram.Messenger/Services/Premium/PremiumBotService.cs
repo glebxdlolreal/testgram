@@ -47,7 +47,11 @@ public interface IPremiumBotService
 
     Task<IPaymentForm> BuildPaymentFormAsync(IRequestInput input, BotInvoiceDocument storedInvoice);
 
+    /// <summary>Charges the card (query server) and hands the delivery to the command server.</summary>
     Task<IPaymentResult> PayAsync(IRequestInput input, BotInvoiceDocument storedInvoice, RequestSendPaymentForm request);
+
+    /// <summary>Delivers a paid invoice and sends the receipts; command server only.</summary>
+    Task SettleAsync(IRequestInput input, PremiumBotPaymentSettledEvent settled);
 }
 
 /// <inheritdoc />
@@ -65,6 +69,7 @@ public sealed partial class PremiumBotService(
     IPremiumAutoRenewService premiumAutoRenewService,
     IPremiumGiftService premiumGiftService,
     IPremiumWelcomeNotifier premiumWelcomeNotifier,
+    IEventBus eventBus,
     ICommandBus commandBus,
     IDataEncryptionHelper dataEncryptionHelper,
     IOptionsMonitor<MyTelegramMessengerServerOptions> serverOptions,
@@ -234,25 +239,45 @@ public sealed partial class PremiumBotService(
         var purchase = ReadPurchase(storedInvoice);
         await EnsureCanBuyAsync(input.UserId, storedInvoice, purchase);
         var charge = await premiumCardCheckout.ChargeAsync(intent, request.Credentials);
-        await botInvoicePaymentService.CompleteExternalChargeAsync(input, storedInvoice, intent.PaymentIntentId);
-        var russian = await IsRussianAsync(input);
 
+        // Paid. What was bought is delivered by the command server, the one process that may send messages.
+        await eventBus.PublishAsync(new PremiumBotPaymentSettledEvent(input.UserId, input.PermAuthKeyId, input.Layer, storedInvoice.Id,
+            intent.PaymentIntentId, charge.StripeCustomerId ?? string.Empty, charge.StripePaymentMethodId ?? string.Empty));
+
+        return EmptyPaymentResult();
+    }
+
+    public async Task SettleAsync(IRequestInput input, PremiumBotPaymentSettledEvent settled)
+    {
+        var storedInvoice = await mongoDatabase.GetCollection<BotInvoiceDocument>(BotInvoiceHelper.CollectionName)
+            .Find(x => x.Id == settled.StoredInvoiceId)
+            .FirstOrDefaultAsync();
+        if (storedInvoice == null)
+        {
+            logger.LogError("PremiumBot: a paid invoice {InvoiceId} of {UserId} is gone; charge {Charge} was not delivered",
+                settled.StoredInvoiceId, settled.UserId, settled.PaymentIntentId);
+            return;
+        }
+
+        var purchase = ReadPurchase(storedInvoice);
+        await botInvoicePaymentService.CompleteExternalChargeAsync(input, storedInvoice, settled.PaymentIntentId);
+        var russian = await IsRussianAsync(input);
         var price = FormatPrice(storedInvoice.TotalAmount, storedInvoice.Currency, russian);
         switch (purchase.Kind)
         {
             case PurchaseKind.Subscription:
                 var result = await premiumSubscriptionService.GrantAsync(input.UserId, PremiumDuration.DaysFromMonths(purchase.Months),
                     "premium-bot", input.UserId);
-                if (charge is { StripeCustomerId: { } customerId, StripePaymentMethodId: { } paymentMethodId })
+                if (settled.StripeCustomerId.Length > 0 && settled.StripePaymentMethodId.Length > 0)
                 {
                     await premiumAutoRenewService.SaveCardAsync(input.UserId, purchase.Months, storedInvoice.TotalAmount,
-                        storedInvoice.Currency, customerId, paymentMethodId);
+                        storedInvoice.Currency, settled.StripeCustomerId, settled.StripePaymentMethodId);
                 }
 
                 await SendSubscriptionReceiptAsync(input.UserId, price, result.ExpiresAt, russian);
                 if (result.BecamePremium)
                 {
-                    await premiumWelcomeNotifier.NotifyAsync(input.UserId);
+                    await premiumWelcomeNotifier.SendAsync(input.UserId);
                 }
 
                 break;
@@ -275,7 +300,7 @@ public sealed partial class PremiumBotService(
 
             case PurchaseKind.Stars:
                 await StarsPurchaseHelper.CreditAsync(mongoDatabase, messageAppService, input, purchase.Recipients.FirstOrDefault(),
-                    purchase.Stars, storedInvoice.Currency, storedInvoice.TotalAmount, intent.PaymentIntentId);
+                    purchase.Stars, storedInvoice.Currency, storedInvoice.TotalAmount, settled.PaymentIntentId);
                 await SendStarsReceiptAsync(input.UserId, price, purchase, russian);
                 break;
 
@@ -285,7 +310,6 @@ public sealed partial class PremiumBotService(
                 break;
         }
 
-        return EmptyPaymentResult();
     }
 
     /// <summary>

@@ -124,7 +124,7 @@ public sealed partial class PremiumBotService
         var state = (await GetDialogAsync(userId))?.State;
         switch (state)
         {
-            case StateResume when text == ResumeAgree(russian):
+            case StateResume when Either(text, ResumeAgree):
                 await SetDialogAsync(userId, null);
                 if (await premiumAutoRenewService.SetEnabledAsync(userId, true))
                 {
@@ -138,18 +138,18 @@ public sealed partial class PremiumBotService
 
                 return;
 
-            case StateResume or StateStopReason when text == Cancel(russian):
-            case StateStopConfirm when text == StopKeep(russian):
+            case StateResume or StateStopReason when Either(text, Cancel):
+            case StateStopConfirm when Either(text, StopKeep):
                 await SetDialogAsync(userId, null);
                 await SendStatusAsync(userId, russian);
                 return;
 
-            case StateStopConfirm when text == StopConfirm(russian):
+            case StateStopConfirm when Either(text, StopConfirm):
                 await SetDialogAsync(userId, StateStopReason);
                 await SendStopReasonsAsync(userId, russian);
                 return;
 
-            case StateStopReason when Array.IndexOf(russian ? StopReasonsRu : StopReasonsEn, text) >= 0:
+            case StateStopReason when (StopReasonsRu.Contains(text) || StopReasonsEn.Contains(text)):
                 await SetDialogAsync(userId, null);
                 await premiumAutoRenewService.SetEnabledAsync(userId, false, text);
                 await SendAsync(userId, russian
@@ -171,12 +171,12 @@ public sealed partial class PremiumBotService
                       "In Telegram for macOS: open the chat with the user and click the top bar with their name. Click (…) More > Send and choose @PremiumBot.");
                 return;
 
-            case StateStars when text == StarsBuy(russian):
+            case StateStars when Either(text, StarsBuy):
                 await SetDialogAsync(userId, null);
                 await SendStarsPacksAsync(userId, recipient: null, russian);
                 return;
 
-            case StateStars when text == Cancel(russian):
+            case StateStars when Either(text, Cancel):
                 await SetDialogAsync(userId, null);
                 await SendAsync(userId, russian ? "Команда stars отменена." : "The stars command has been cancelled.",
                     markup: new TReplyKeyboardHide());
@@ -1107,6 +1107,9 @@ public sealed partial class PremiumBotService
           "Новый 24-месячный период начнётся сразу после окончания срока текущей подписки."
         : "Please pay the invoice above to 🚀 switch to a Telegram Premium subscription renewed every 2 years.\n\n" +
           "The new 24-month period will start right after your current subscription ends.";
+
+    /// <summary>A reply-keyboard answer in either language: the language is read per request and may change in between.</summary>
+    private static bool Either(string text, Func<bool, string> button) => text == button(true) || text == button(false);
 
     private static string ResumeAgree(bool russian) => russian ? "Я согласен(на), возобновите платежи" : "I agree, resume payments";
     private static string StopConfirm(bool russian) => russian ? "Да, отменить продление" : "Yes, cancel renewal";
