@@ -384,6 +384,22 @@ public class UserDataSeeder(
         }
 
         var newUserName = $"legacy{holder.PeerId}_{userName.ToLowerInvariant()}";
+
+        // BotFather writes the bots it creates straight into the read models, with no user or username
+        // aggregate behind them, so the rename saga has nothing to act on (it fails with
+        // AggregateIsCreatedSpecification). Such a holder cannot be moved through events.
+        var holderAggregate = new UserAggregate(UserId.Create(holder.PeerId));
+        await holderAggregate.LoadAsync(eventStore, snapshotStore, CancellationToken.None);
+        if (holderAggregate.IsNew)
+        {
+            await DeleteStaleUserNameAsync(newUserName);
+            logger.LogWarning("The username @{UserName} is held by bot {BotUserId}, which exists only in the read models " +
+                              "(created by BotFather); it cannot be renamed through events, so @{UserName} is not seeded",
+                userName, holder.PeerId, userName);
+
+            return false;
+        }
+
         await commandBus.PublishAsync(new UpdateUserNameCommand(
             UserNameId.Create(newUserName.ToLowerInvariant()),
             RequestInfo.Empty with
@@ -412,6 +428,19 @@ public class UserDataSeeder(
             userName, holder.PeerId, newUserName);
 
         return true;
+    }
+
+    /// <summary>Removes a username registered by an earlier, failed attempt to move a name off a bot.</summary>
+    private async Task DeleteStaleUserNameAsync(string userName)
+    {
+        var stale = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(userName.ToLowerInvariant()));
+        if (stale == null)
+        {
+            return;
+        }
+
+        await commandBus.PublishAsync(new DeleteUserNameCommand(UserNameId.Create(userName.ToLowerInvariant())));
+        logger.LogInformation("Removed the stale username @{UserName}", userName);
     }
 
     private async Task EnsureServiceUserNameAsync(long userId, string userName)
