@@ -99,7 +99,7 @@ public class WebFileRegistrarTests
         await Remember(mongo.Database, url, "image/jpeg", 77);
         var storage = new Mock<IStoredFileStorage>();
         byte[]? stored = null;
-        storage.Setup(s => s.UploadFileAsync(77, It.IsAny<string>(), It.IsAny<CancellationToken>(), null))
+        storage.Setup(s => s.UploadFileAsync(77, It.IsAny<string>(), It.IsAny<CancellationToken>(), "webfile"))
             .Callback<long, string, CancellationToken, string?>((_, path, _, _) => stored = File.ReadAllBytes(path))
             .Returns(Task.CompletedTask);
 

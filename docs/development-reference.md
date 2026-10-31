@@ -549,7 +549,8 @@ drops non-`isGifv()` documents out of the list it receives. Everything lives in 
   For an **image** the file-server fails one step earlier: `DownloadPhotoAsync` stores the body AES-CTR
   encrypted, then dies serializing `WebFileCreatedEvent` (missing AOT metadata), so no
   `eventflow-filereadmodel` key is written and `upload.getWebFile` serves the ciphertext. The registrar
-  then re-uploads the plain body to MinIO with `IStoredFileStorage` (a keyless body is served as is);
+  then re-uploads the plain body to MinIO with `IStoredFileStorage` as `{fileId}_webfile` — the object
+  `getWebFile` actually reads (a keyless body is served as is);
   videos are unaffected and keep their key.
   The messenger keeps its own `GetWebFileHandler` for a deployment without that file-server.
 

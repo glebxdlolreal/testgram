@@ -32,7 +32,8 @@ namespace MyTelegram.Messenger.Services.WebFiles;
 /// <para>For an image the file server fails one step earlier still: <c>DownloadPhotoAsync</c> stores the
 /// body AES-CTR encrypted and then dies serializing <c>WebFileCreatedEvent</c> (missing AOT metadata), so
 /// the key it encrypted with is never written to <c>eventflow-filereadmodel</c> and <c>upload.getWebFile</c>
-/// hands out the ciphertext as it is. Such a body is replaced with the plain one, which the file server
+/// hands out the ciphertext of its <c>{fileId}_webfile</c> object as it is. Such a body is replaced with
+/// the plain one, which the file server
 /// serves unchanged when it has no key — the same way every server-created body is stored.</para>
 ///
 /// <para>Registration is remembered, per process and in Mongo, because the same preview URL comes back on
@@ -77,6 +78,9 @@ public class WebFileRegistrar(
 
     /// <summary>Where the file server keeps the AES key of a body it stored encrypted.</summary>
     private const string FileReadModelCollectionName = "eventflow-filereadmodel";
+
+    /// <summary>The object the file server serves <c>upload.getWebFile</c> from is <c>{fileId}_webfile</c>.</summary>
+    private const string WebFileObjectSuffix = "webfile";
 
     private static readonly ConcurrentDictionary<string, bool> Registered = new(StringComparer.Ordinal);
 
@@ -224,6 +228,8 @@ public class WebFileRegistrar(
 
             path = Path.GetTempFileName();
             await File.WriteAllBytesAsync(path, body.Bytes, cancellationToken);
+            // upload.getWebFile reads the {fileId}_webfile object; {fileId} is the same body under its plain id.
+            await storedFileStorage.UploadFileAsync(fileId, path, cancellationToken, WebFileObjectSuffix);
             await storedFileStorage.UploadFileAsync(fileId, path, cancellationToken);
         }
         catch (Exception ex)
