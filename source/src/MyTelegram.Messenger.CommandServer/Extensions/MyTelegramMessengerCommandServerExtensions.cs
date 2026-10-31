@@ -22,6 +22,7 @@ public static class MyTelegramMessengerCommandServerExtensions
         services.AddSubscription<NewPtsMessageHasSentEvent, PtsEventHandler>();
         services.AddSubscription<RpcMessageHasSentEvent, PtsEventHandler>();
         services.AddSubscription<AcksDataReceivedEvent, PtsEventHandler>();
+        services.AddSubscription<MyTelegram.Messenger.Services.Premium.PremiumBotCallbackRequestedEvent, PremiumBotEventHandler>();
 
     }
 

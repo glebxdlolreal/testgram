@@ -178,9 +178,10 @@ public class WebFilesConfig
     /// <summary>
     /// Hosts that may be fetched, matched on the host itself or any subdomain of it. A URL still has to
     /// carry the signature this server issued, so this is a second fence rather than the only one.
-    /// Tenor serves its renditions from <c>media.tenor.com</c> and its numbered siblings.
+    /// Tenor serves its renditions from <c>media.tenor.com</c> and its numbered siblings; @PremiumBot's
+    /// invoice picture is real Telegram's own, on <c>telegram.org</c>.
     /// </summary>
-    public List<string> AllowedHosts { get; set; } = ["tenor.com", "tenorapi.com", "googleusercontent.com"];
+    public List<string> AllowedHosts { get; set; } = ["tenor.com", "tenorapi.com", "googleusercontent.com", "telegram.org"];
 
     /// <summary>
     /// Largest body that will be proxied. A GIF preview is tens of kilobytes. The cache keeps a body in

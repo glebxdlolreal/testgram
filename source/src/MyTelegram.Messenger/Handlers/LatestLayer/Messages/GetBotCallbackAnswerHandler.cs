@@ -12,7 +12,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// </summary>
 internal sealed class GetBotCallbackAnswerHandler(
     IBotFatherBotService botFatherBotService,
-    IPremiumBotService premiumBotService,
+    IEventBus eventBus,
     IPeerHelper peerHelper,
     IMongoDatabase database,
     IMessageAppService messageAppService,
@@ -51,7 +51,9 @@ internal sealed class GetBotCallbackAnswerHandler(
             // @PremiumBot's term switch answers with a new invoice, not with a toast.
             if (peer.PeerId == PremiumBotService.BotUserId)
             {
-                _ = Task.Run(() => premiumBotService.HandleCallbackAsync(input, data));
+                // Answered by the command server: it is the one process that allocates message ids.
+                await eventBus.PublishAsync(new PremiumBotCallbackRequestedEvent(input.UserId, input.PermAuthKeyId,
+                    input.Layer, data));
                 return new MyTelegram.Schema.Messages.TBotCallbackAnswer { CacheTime = 0, NativeUi = true };
             }
         }
