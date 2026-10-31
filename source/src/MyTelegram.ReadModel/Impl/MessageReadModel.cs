@@ -314,6 +314,7 @@ public class MessageReadModel : IMessageReadModel,
         Message = item.Message;
         Entities2 = item.Entities;
         EditDate = item.EditDate;
+        EditHide = item.EditHide;
         ReplyMarkup2 = item.ReplyMarkup;
         Media2 = item.Media;
         ApplyGeoLive(item.Media);
@@ -351,6 +352,7 @@ public class MessageReadModel : IMessageReadModel,
         Message = item.Message;
         Entities2 = item.Entities;
         EditDate = item.EditDate;
+        EditHide = item.EditHide;
         ReplyMarkup2 = item.ReplyMarkup;
         Media2 = item.Media;
         ApplyGeoLive(item.Media);
