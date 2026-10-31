@@ -7,6 +7,13 @@ internal static class StripeHelper
 {
     private static readonly HttpClient Http = new();
 
+    /// <summary>
+    /// An amount in Telegram's smallest units of <paramref name="currency"/> as Stripe takes it: Telegram
+    /// writes ISK and UGX without decimals, Stripe still wants them with two (always 00).
+    /// </summary>
+    public static long ToStripeAmount(long amount, string currency) =>
+        currency.ToUpperInvariant() is "ISK" or "UGX" ? amount * 100 : amount;
+
     /// <summary>Creates a Stripe PaymentIntent and returns its client_secret and id.</summary>
     public static async Task<(string ClientSecret, string PaymentIntentId)> CreatePaymentIntentAsync(
         string secretKey, long amountCents, string currency, string description)
@@ -15,7 +22,7 @@ internal static class StripeHelper
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", secretKey);
         request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
-            ["amount"] = amountCents.ToString(),
+            ["amount"] = ToStripeAmount(amountCents, currency).ToString(),
             ["currency"] = currency.ToLower(),
             ["description"] = description,
             ["payment_method_types[]"] = "card",
@@ -97,7 +104,7 @@ internal static class StripeHelper
         request.Headers.Add("Idempotency-Key", idempotencyKey);
         request.Content = new FormUrlEncodedContent(new Dictionary<string, string>
         {
-            ["amount"] = amountCents.ToString(),
+            ["amount"] = ToStripeAmount(amountCents, currency).ToString(),
             ["currency"] = currency.ToLower(),
             ["description"] = description,
             ["customer"] = customerId,

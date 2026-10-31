@@ -167,7 +167,7 @@ public class PremiumSubscriptionTests
         monthly.Text.ShouldBe("Switch to 2-year (-58% per month)"); // as on real Telegram
         monthly.Data.ShouldStartWith("init/24M/");
         var yearly = sent[3].ReplyMarkup.ShouldBeOfType<TReplyInlineMarkup>().Rows[0].Buttons[0].ShouldBeOfType<TKeyboardButtonCallback>();
-        yearly.Text.ShouldBe("Switch to monthly for 299.00\u00a0RUB per month");
+        yearly.Text.ShouldBe("Switch to monthly for 299,00\u00a0RUB per month");
         yearly.Data.ShouldStartWith("init/1M/");
         sent[5].ReplyMarkup.ShouldBeOfType<TReplyKeyboardHide>();
         sent[1].Entities.ShouldHaveSingleItem().ShouldBeOfType<TMessageEntityBold>().Length.ShouldBe("Pay the invoice above".Length);
@@ -276,7 +276,19 @@ public class PremiumSubscriptionTests
             new Mock<IPremiumCardCheckout>().Object, autoRenew ?? new Mock<IPremiumAutoRenewService>().Object,
             new Mock<IPremiumGiftService>().Object, new Mock<IPremiumWelcomeNotifier>().Object, new Mock<MyTelegram.EventBus.IEventBus>().Object, commandBus ?? new Mock<ICommandBus>().Object, new Mock<MyTelegram.Services.Services.IDataEncryptionHelper>().Object,
             serverOptions.Object, new Mock<IBotInvoicePaymentService>().Object,
-            registrar.Object, proxy.Object, NullLogger<PremiumBotService>.Instance);
+            registrar.Object, proxy.Object, Pricing(), NullLogger<PremiumBotService>.Instance);
+    }
+
+    /// <summary>Pricing for a Russian number: the tables' own roubles, unconverted.</summary>
+    internal static IPurchasePricing Pricing(string? phone = "79990001122")
+    {
+        var pricing = new MyTelegram.Messenger.Services.Payments.PurchasePricing(new Mock<IQueryProcessor>().Object,
+            new MyTelegram.Messenger.Services.Impl.CountryHelper(),
+            Microsoft.Extensions.Options.Options.Create(new PremiumOptions()));
+        var mock = new Mock<IPurchasePricing>();
+        mock.Setup(p => p.ForUserAsync(It.IsAny<long>())).ReturnsAsync(() => pricing.ForPhone(phone));
+        mock.Setup(p => p.ForPhone(It.IsAny<string?>())).Returns<string?>(pricing.ForPhone);
+        return mock.Object;
     }
 
     internal static Mock<IStarsPurchaseGate> StarsGate(bool blocked)

@@ -54,7 +54,7 @@ public class PremiumBotCommandsTests
 
         var status = sent.ShouldHaveSingleItem();
         status.Media.ShouldBeNull();
-        status.Message.ShouldContain("Next payment: 19.90 USD, 10.01.2027.");
+        status.Message.ShouldContain("Next payment: $19.90, 10.01.2027.");
         status.Message.ShouldContain("/stop");
         CommandsIn(status).ShouldBe(["/stop", "/upgrade", "/gift"]);
     }
@@ -206,7 +206,7 @@ public class PremiumBotCommandsTests
         await bot.NotifyRenewalAsync(new PremiumRenewalOutcome(UserId, true, 1, 1990, "USD", expiresAt));
         await bot.NotifyRenewalAsync(new PremiumRenewalOutcome(UserId, false, 1, 1990, "USD", expiresAt, WillRetry: true));
 
-        sent[0].Message.ShouldBe("We received the payment for 19.90\u00a0USD.\nYour premium subscription is now renewed until 7 Jun 2025 00:19:14 UTC.\n\nTo 🎁 gift Telegram Premium to a friend, use the /gift command.");
+        sent[0].Message.ShouldBe("We received the payment for $19.90.\nYour premium subscription is now renewed until 7 Jun 2025 00:19:14 UTC.\n\nTo 🎁 gift Telegram Premium to a friend, use the /gift command.");
         sent[1].Message.ShouldStartWith("Automatic payment failed. We will try again in several hours.");
     }
 

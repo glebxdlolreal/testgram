@@ -1,6 +1,7 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Options;
+using MyTelegram.Messenger.Services.Payments;
 using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Help;
@@ -14,7 +15,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Help;
 /// <para>Shaped like real Telegram's answer (measured 2026-10-31): <c>users</c> carries the caller, so
 /// clients learn their own <c>premium</c> flag from it, and each period option's <c>bot_url</c> is an
 /// @PremiumBot start link (<c>https://t.me/PremiumBot?start=12</c>), longest term first. Prices come
-/// from <see cref="PremiumOptions"/>. An account Premium is off sale for gets no period options.</para>
+/// from <see cref="PremiumOptions"/>, in the currency of the caller's phone number (<see cref="IPurchasePricing"/>). An account Premium is off sale for gets no period options.</para>
 /// </remarks>
 internal sealed class GetPremiumPromoHandler(
     IMongoDatabase mongoDatabase,
@@ -22,7 +23,8 @@ internal sealed class GetPremiumPromoHandler(
     ILayeredService<IPremiumPromoConverter> layeredPremiumPromoService,
     IUserConverterService userConverterService,
     IOptions<PremiumOptions> premiumOptions,
-    IPremiumPurchaseGate premiumPurchaseGate) : RpcResultObjectHandler<MyTelegram.Schema.Help.RequestGetPremiumPromo, MyTelegram.Schema.Help.IPremiumPromo>
+    IPremiumPurchaseGate premiumPurchaseGate,
+    IPurchasePricing purchasePricing) : RpcResultObjectHandler<MyTelegram.Schema.Help.RequestGetPremiumPromo, MyTelegram.Schema.Help.IPremiumPromo>
 {
     protected override async Task<MyTelegram.Schema.Help.IPremiumPromo> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Help.RequestGetPremiumPromo obj)
     {
@@ -37,12 +39,12 @@ internal sealed class GetPremiumPromoHandler(
 
         promo.PeriodOptions = await premiumPurchaseGate.IsBlockedAsync(input.UserId)
             ? new TVector<IPremiumSubscriptionOption>()
-            : BuildPeriodOptions(premiumOptions.Value);
+            : BuildPeriodOptions(premiumOptions.Value, await purchasePricing.ForUserAsync(input.UserId));
 
         return promo;
     }
 
-    private static TVector<IPremiumSubscriptionOption> BuildPeriodOptions(PremiumOptions premium)
+    private static TVector<IPremiumSubscriptionOption> BuildPeriodOptions(PremiumOptions premium, PurchasePrices prices)
     {
         var options = premium.GetPeriods()
             .Where(p => p.Subscription && p.Amount > 0)
@@ -50,8 +52,8 @@ internal sealed class GetPremiumPromoHandler(
             .Select(p => (IPremiumSubscriptionOption)new TPremiumSubscriptionOption
             {
                 Months = p.Months,
-                Currency = premium.Currency,
-                Amount = p.Amount,
+                Currency = prices.Currency,
+                Amount = prices.Price(p.Amount),
                 BotUrl = PremiumBotService.BotUrlFor(p.Months),
                 StoreProduct = StoreProductFor(p.Months)
             })

@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Options;
 using MyTelegram.Messenger.Options;
+using MyTelegram.Messenger.Services.Payments;
 using MyTelegram.Messenger.Services.Premium;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
@@ -12,7 +13,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 ///
 /// <para>Prices come from <see cref="PremiumOptions"/>, the same table the payment form charges. The
 /// shape follows real Telegram (measured 2026-10-31): each gift term, longest first, for 1 to 10
-/// recipients in the money currency, then the single-recipient <c>XTR</c> options unofficial clients
+/// recipients in the currency of the caller's phone number, then the single-recipient <c>XTR</c> options unofficial clients
 /// must gift with through <c>inputInvoicePremiumGiftStars</c>
 /// (https://corefork.telegram.org/api/premium#gifting-telegram-premium).</para>
 /// <para>For an account Premium is off sale for (<see cref="IPremiumPurchaseGate"/>) there is nothing
@@ -20,7 +21,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// </remarks>
 internal sealed class GetPremiumGiftCodeOptionsHandler(
     IOptions<PremiumOptions> premiumOptions,
-    IPremiumPurchaseGate premiumPurchaseGate)
+    IPremiumPurchaseGate premiumPurchaseGate,
+    IPurchasePricing purchasePricing)
     : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestGetPremiumGiftCodeOptions, TVector<MyTelegram.Schema.IPremiumGiftCodeOption>>
 {
     private const int MaxRecipients = 10;
@@ -34,6 +36,7 @@ internal sealed class GetPremiumGiftCodeOptionsHandler(
         }
 
         var premium = premiumOptions.Value;
+        var prices = await purchasePricing.ForUserAsync(input.UserId);
         var gifts = premium.GetPeriods().Where(p => p.Gift).OrderByDescending(p => p.Months).ToList();
 
         // Gift codes go to 1–10 users; a giveaway (boost_peer set) may also have 25, 50 or 100 winners.
@@ -44,7 +47,7 @@ internal sealed class GetPremiumGiftCodeOptionsHandler(
         {
             foreach (var users in quantities)
             {
-                var amount = premium.GiftPrice(period.Months, users);
+                var amount = prices.Price(premium.GiftPrice(period.Months, users));
                 if (amount <= 0)
                 {
                     continue;
@@ -54,7 +57,7 @@ internal sealed class GetPremiumGiftCodeOptionsHandler(
                 {
                     Users = users,
                     Months = period.Months,
-                    Currency = premium.Currency,
+                    Currency = prices.Currency,
                     Amount = amount
                 });
             }

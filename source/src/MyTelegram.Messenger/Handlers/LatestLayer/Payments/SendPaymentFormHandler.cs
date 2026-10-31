@@ -173,7 +173,8 @@ internal sealed class SendPaymentFormHandler(
 
         var giftPurpose = (obj.Invoice as TInputInvoiceStars)?.Purpose as TInputStorePaymentStarsGift;
         await StarsPurchaseHelper.CreditAsync(mongoDatabase, messageAppService, input, intent!.RecipientUserId, intent.Stars,
-            giftPurpose?.Currency ?? StarsCatalog.Currency, giftPurpose?.Amount ?? 0, intent.PaymentIntentId);
+            intent.Currency ?? giftPurpose?.Currency ?? StarsCatalog.Currency,
+            intent.Currency != null ? intent.Amount : giftPurpose?.Amount ?? 0, intent.PaymentIntentId);
 
         await col.DeleteOneAsync(x => x.Id == intent.Id);
 

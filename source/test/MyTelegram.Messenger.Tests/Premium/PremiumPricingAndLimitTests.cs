@@ -177,7 +177,7 @@ public class PremiumPricingAndLimitTests
     public async Task Gift_options_follow_real_telegrams_shape()
     {
         var handler = CreateHandler("Payments.GetPremiumGiftCodeOptionsHandler",
-            Microsoft.Extensions.Options.Options.Create(new PremiumOptions()), Gate(blocked: false).Object);
+            Microsoft.Extensions.Options.Options.Create(new PremiumOptions()), Gate(blocked: false).Object, PremiumSubscriptionTests.Pricing());
 
         var options = ((TVector<IPremiumGiftCodeOption>)(await InvokeAsync(handler, new MyTelegram.Schema.Payments.RequestGetPremiumGiftCodeOptions()))!)
             .Cast<TPremiumGiftCodeOption>().ToList();
@@ -194,7 +194,7 @@ public class PremiumPricingAndLimitTests
     public async Task A_blocked_account_is_offered_nothing_to_buy()
     {
         var handler = CreateHandler("Payments.GetPremiumGiftCodeOptionsHandler",
-            Microsoft.Extensions.Options.Options.Create(new PremiumOptions()), Gate(blocked: true).Object);
+            Microsoft.Extensions.Options.Options.Create(new PremiumOptions()), Gate(blocked: true).Object, PremiumSubscriptionTests.Pricing());
 
         var options = (TVector<IPremiumGiftCodeOption>)(await InvokeAsync(handler, new MyTelegram.Schema.Payments.RequestGetPremiumGiftCodeOptions()))!;
 

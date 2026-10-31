@@ -15,18 +15,19 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetStarsGiftOptionsHandler : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestGetStarsGiftOptions, TVector<MyTelegram.Schema.IStarsGiftOption>>
+internal sealed class GetStarsGiftOptionsHandler(IPurchasePricing purchasePricing) : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestGetStarsGiftOptions, TVector<MyTelegram.Schema.IStarsGiftOption>>
 {
-    protected override Task<TVector<MyTelegram.Schema.IStarsGiftOption>> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestGetStarsGiftOptions obj)
+    protected override async Task<TVector<MyTelegram.Schema.IStarsGiftOption>> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestGetStarsGiftOptions obj)
     {
+        var prices = await purchasePricing.ForUserAsync(input.UserId);
         var options = StarsCatalog.TopupOffers.Select(o => (IStarsGiftOption)new TStarsGiftOption
         {
             Stars = o.Stars,
             StoreProduct = o.StoreProduct,
-            Currency = StarsCatalog.Currency,
-            Amount = o.Amount,
+            Currency = prices.Currency,
+            Amount = prices.StarsPrice(o.Amount),
             Extended = o.Extended,
         });
-        return Task.FromResult<TVector<IStarsGiftOption>>([.. options]);
+        return [.. options];
     }
 }

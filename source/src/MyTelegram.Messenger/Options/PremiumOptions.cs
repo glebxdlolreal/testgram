@@ -73,6 +73,12 @@ public class PremiumOptions
     /// <summary>Currency code (ISO 4217) for every money price here.</summary>
     public string Currency { get; set; } = "RUB";
 
+    /// <summary>
+    /// Units of a currency per rouble, overriding the built-in rates prices in other currencies are
+    /// converted at (<c>Premium__ExchangeRates__USD=0.0125</c>); see <c>IPurchasePricing</c>.
+    /// </summary>
+    public Dictionary<string, decimal>? ExchangeRates { get; set; }
+
     /// <summary>Gift prices by number of users; when none are configured <see cref="DefaultGiftPrices"/> applies.</summary>
     public List<PremiumGiftPrice>? GiftPrices { get; set; }
 

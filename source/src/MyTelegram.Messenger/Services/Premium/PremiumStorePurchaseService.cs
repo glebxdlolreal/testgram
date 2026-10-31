@@ -1,6 +1,7 @@
 using MongoDB.Driver;
 using MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 using MyTelegram.Messenger.Options;
+using MyTelegram.Messenger.Services.Payments;
 
 namespace MyTelegram.Messenger.Services.Premium;
 
@@ -30,7 +31,8 @@ public sealed class PremiumStorePurchaseService(
     IPremiumPurchaseGate premiumPurchaseGate,
     IPremiumSubscriptionService premiumSubscriptionService,
     IPremiumGiftService premiumGiftService,
-    IPremiumWelcomeNotifier premiumWelcomeNotifier) : IPremiumStorePurchaseService, ITransientDependency
+    IPremiumWelcomeNotifier premiumWelcomeNotifier,
+    IPurchasePricing purchasePricing) : IPremiumStorePurchaseService, ITransientDependency
 {
     public async Task SettleAsync(IRequestInput input, string platform, ReadOnlyMemory<byte> receipt,
         IInputStorePaymentPurpose? purpose, string? storeProduct)
@@ -50,9 +52,10 @@ public sealed class PremiumStorePurchaseService(
             await premiumPurchaseGate.EnsureAllowedAsync(input.UserId, recipientUserId);
 
             // The purpose names the price, not the term; the term is the one sold at that price.
+            var prices = await purchasePricing.ForUserAsync(input.UserId);
             var months = premium.GetPeriods()
-                .FirstOrDefault(p => p.Gift && p.Amount == gift.Amount &&
-                                     string.Equals(premium.Currency, gift.Currency, StringComparison.OrdinalIgnoreCase))
+                .FirstOrDefault(p => p.Gift && prices.Price(premium.GiftPrice(p.Months, 1)) == gift.Amount &&
+                                     string.Equals(prices.Currency, gift.Currency, StringComparison.OrdinalIgnoreCase))
                 ?.Months ?? 0;
             if (months == 0)
             {

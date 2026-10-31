@@ -77,6 +77,7 @@ public sealed partial class PremiumBotService(
     IBotInvoicePaymentService botInvoicePaymentService,
     IWebFileRegistrar webFileRegistrar,
     IWebDocumentProxy webDocumentProxy,
+    IPurchasePricing purchasePricing,
     ILogger<PremiumBotService> logger) : IPremiumBotService, ITransientDependency
 {
     public const long BotUserId = MyTelegramConsts.PremiumBotUserId;
@@ -266,7 +267,7 @@ public sealed partial class PremiumBotService(
         await botInvoicePaymentService.CompleteExternalChargeAsync(Fresh(input), storedInvoice, settled.PaymentIntentId,
             settled.CredentialsTitle);
         var russian = await IsRussianAsync(input);
-        var price = FormatPrice(storedInvoice.TotalAmount, storedInvoice.Currency, russian);
+        var price = FormatPrice(storedInvoice.TotalAmount, storedInvoice.Currency);
         switch (purchase.Kind)
         {
             case PurchaseKind.Subscription:
@@ -362,7 +363,8 @@ public sealed partial class PremiumBotService(
     private async Task SendInvoiceAsync(long userId, PremiumPeriodOption period, bool russian, bool upgrade = false,
         bool offerMonthly = false)
     {
-        var inputInvoice = CreateInputInvoice(period, russian);
+        var prices = await purchasePricing.ForUserAsync(userId);
+        var inputInvoice = CreateInputInvoice(period, russian, prices);
         var media = await mediaHelper.SaveMediaAsync(inputInvoice);
         var photo = await GetInvoicePhotoAsync(inputInvoice.Photo);
         if (media is TMessageMediaInvoice mediaInvoice)
@@ -380,7 +382,7 @@ public sealed partial class PremiumBotService(
             {
                 Buttons = new TVector<IKeyboardButton>(new TKeyboardButtonBuy
                 {
-                    Text = (russian ? "Заплатить " : "Pay ") + FormatPrice(period.Amount, russian)
+                    Text = (russian ? "Заплатить " : "Pay ") + FormatPrice(prices, period.Amount)
                 })
             })
         });
@@ -399,7 +401,7 @@ public sealed partial class PremiumBotService(
         {
             note = InvoiceNote(russian);
             noteEntities = new TVector<IMessageEntity>(InvoiceNoteBold(russian));
-            noteMarkup = SwitchTermMarkup(period, noteId, russian, offerMonthly);
+            noteMarkup = SwitchTermMarkup(period, noteId, russian, offerMonthly, prices);
         }
 
         // One command, so the note can never overtake the invoice it refers to.
@@ -436,7 +438,8 @@ public sealed partial class PremiumBotService(
     /// switch to monthly at its price; under the two-year one nothing (real Telegram hides the keyboard),
     /// except when it came from <c>/upgrade</c> without Premium, where it offers monthly too.
     /// </summary>
-    private IReplyMarkup SwitchTermMarkup(PremiumPeriodOption period, int noteId, bool russian, bool offerMonthly)
+    private IReplyMarkup SwitchTermMarkup(PremiumPeriodOption period, int noteId, bool russian, bool offerMonthly,
+        PurchasePrices prices)
     {
         var options = premiumOptions.Value;
         var monthly = options.FindSubscription(1);
@@ -454,7 +457,7 @@ public sealed partial class PremiumBotService(
         }
         else if ((period.Months == 12 || (offerMonthly && period.Months > 1)) && monthly != null)
         {
-            var price = FormatPrice(monthly.Amount, russian);
+            var price = FormatPrice(prices, monthly.Amount);
             text = russian ? $"Перейти на ежемесячную за {price} в месяц" : $"Switch to monthly for {price} per month";
             target = 1;
         }
@@ -510,7 +513,7 @@ public sealed partial class PremiumBotService(
         return BotInvoiceHelper.ToWebDocument(photo);
     }
 
-    private TInputMediaInvoice CreateInputInvoice(PremiumPeriodOption period, bool russian)
+    private TInputMediaInvoice CreateInputInvoice(PremiumPeriodOption period, bool russian, PurchasePrices prices)
     {
         var options = premiumOptions.Value;
         var term = TermText(period.Months, russian);
@@ -545,11 +548,11 @@ public sealed partial class PremiumBotService(
                 // Recurring, as on real Telegram, only where renewals can really be charged.
                 Recurring = !string.IsNullOrEmpty(serverOptions.CurrentValue.Stripe?.SecretKey),
                 TermsUrl = string.IsNullOrEmpty(serverOptions.CurrentValue.Stripe?.SecretKey) ? null : options.TermsUrl,
-                Currency = options.Currency,
+                Currency = prices.Currency,
                 Prices = new TVector<ILabeledPrice>(new TLabeledPrice
                 {
                     Label = russian ? $"Платёж за {term}" : $"Payment for {term}",
-                    Amount = period.Amount
+                    Amount = prices.Price(period.Amount)
                 })
             },
             Payload = Encoding.UTF8.GetBytes($"{PayloadPrefix}{period.Months}"),
@@ -714,17 +717,14 @@ public sealed partial class PremiumBotService(
         };
     }
 
-    /// <summary>"299,00 RUB" / "1 990,00 RUB" with no-break spaces, as real Telegram's bot writes prices.</summary>
-    private string FormatPrice(long amount, bool russian) => FormatPrice(amount, premiumOptions.Value.Currency, russian);
+    /// <summary>A Premium table price in the buyer's currency, written like <see cref="FormatPrice(long, string)"/>.</summary>
+    private static string FormatPrice(PurchasePrices prices, long amount) => FormatPrice(prices.Price(amount), prices.Currency);
 
-    private static string FormatPrice(long amount, string currencyCode, bool russian)
-    {
-        var currency = currencyCode.ToUpperInvariant();
-        var format = (NumberFormatInfo)NumberFormatInfo.InvariantInfo.Clone();
-        format.NumberGroupSeparator = russian ? "\u00a0" : ",";
-        format.NumberDecimalSeparator = russian ? "," : ".";
-        return $"{(amount / 100m).ToString("#,0.00", format)}\u00a0{currency}";
-    }
+    /// <summary>
+    /// "1 990,00 RUB", "9.599,00 SEK", "£699.00": real Telegram's bot writes each currency its own way
+    /// whatever the language of the chat.
+    /// </summary>
+    private static string FormatPrice(long amount, string currencyCode) => CurrencyFormatter.Format(amount, currencyCode);
 
     private static string FormatDate(long unixSeconds) =>
         DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime.ToString("dd.MM.yyyy", CultureInfo.InvariantCulture);

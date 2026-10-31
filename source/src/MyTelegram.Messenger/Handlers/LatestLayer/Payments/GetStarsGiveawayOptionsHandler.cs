@@ -7,10 +7,11 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Payments;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetStarsGiveawayOptionsHandler : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestGetStarsGiveawayOptions, TVector<MyTelegram.Schema.IStarsGiveawayOption>>
+internal sealed class GetStarsGiveawayOptionsHandler(IPurchasePricing purchasePricing) : RpcResultObjectHandler<MyTelegram.Schema.Payments.RequestGetStarsGiveawayOptions, TVector<MyTelegram.Schema.IStarsGiveawayOption>>
 {
-    protected override Task<TVector<MyTelegram.Schema.IStarsGiveawayOption>> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestGetStarsGiveawayOptions obj)
+    protected override async Task<TVector<MyTelegram.Schema.IStarsGiveawayOption>> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Payments.RequestGetStarsGiveawayOptions obj)
     {
+        var prices = await purchasePricing.ForUserAsync(input.UserId);
         var options = new TVector<MyTelegram.Schema.IStarsGiveawayOption>(StarsCatalog.GiveawayOffers.Select((offer, i) =>
             (MyTelegram.Schema.IStarsGiveawayOption)new TStarsGiveawayOption
             {
@@ -18,8 +19,8 @@ internal sealed class GetStarsGiveawayOptionsHandler : RpcResultObjectHandler<My
                 Extended = offer.Extended,
                 Stars = offer.Stars,
                 YearlyBoosts = offer.YearlyBoosts,
-                Currency = StarsCatalog.Currency,
-                Amount = offer.Amount,
+                Currency = prices.Currency,
+                Amount = prices.StarsPrice(offer.Amount),
                 Winners = new TVector<MyTelegram.Schema.IStarsGiveawayWinnersOption>(offer.Winners.Select(w =>
                     (MyTelegram.Schema.IStarsGiveawayWinnersOption)new TStarsGiveawayWinnersOption
                     {
@@ -29,6 +30,6 @@ internal sealed class GetStarsGiveawayOptionsHandler : RpcResultObjectHandler<My
                     }))
             }));
 
-        return Task.FromResult(options);
+        return options;
     }
 }

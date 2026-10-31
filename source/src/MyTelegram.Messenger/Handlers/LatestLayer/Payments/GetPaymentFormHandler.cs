@@ -21,7 +21,8 @@ internal sealed class GetPaymentFormHandler(
     IPremiumPurchaseGate premiumPurchaseGate,
     IPremiumCardCheckout premiumCardCheckout,
     IPremiumBotService premiumBotService,
-    IStarsPurchaseGate starsPurchaseGate)
+    IStarsPurchaseGate starsPurchaseGate,
+    IPurchasePricing purchasePricing)
     : RpcResultObjectHandler<RequestGetPaymentForm, IPaymentForm>
 {
     protected override async Task<IPaymentForm> HandleCoreAsync(IRequestInput input, RequestGetPaymentForm obj)
@@ -269,7 +270,9 @@ internal sealed class GetPaymentFormHandler(
             RpcErrors.RpcErrors400.MonthInvalid.ThrowRpcError();
         }
 
-        if (!string.Equals(invoice.Option.Currency, premium.Currency, StringComparison.OrdinalIgnoreCase))
+        // Prices are in the currency of the buyer's phone number, the one the option lists quoted.
+        var prices = await purchasePricing.ForUserAsync(input.UserId);
+        if (!string.Equals(invoice.Option.Currency, prices.Currency, StringComparison.OrdinalIgnoreCase))
         {
             RpcErrors.RpcErrors400.CurrencyTotalAmountInvalid.ThrowRpcError();
         }
@@ -322,14 +325,14 @@ internal sealed class GetPaymentFormHandler(
         await premiumPurchaseGate.EnsureAllowedAsync([input.UserId, .. recipients]);
 
         // A subscription is the term's own price; gifts and giveaways follow the per-quantity table.
-        var amount = invoice.Purpose is TInputStorePaymentPremiumSubscription
+        var amount = prices.Price(invoice.Purpose is TInputStorePaymentPremiumSubscription
             ? period!.Amount
-            : premium.GiftPrice(months, (int)quantity);
+            : premium.GiftPrice(months, (int)quantity));
         if (amount <= 0)
         {
             RpcErrors.RpcErrors400.MonthInvalid.ThrowRpcError();
         }
-        var form = await premiumCardCheckout.CreateAsync(input.UserId, amount, premium.Currency, description, intent =>
+        var form = await premiumCardCheckout.CreateAsync(input.UserId, amount, prices.Currency, description, intent =>
         {
             intent.PremiumKind = kind;
             intent.PremiumMonths = months;
@@ -350,7 +353,7 @@ internal sealed class GetPaymentFormHandler(
             Url = string.Empty,
             Invoice = new TInvoice
             {
-                Currency = premium.Currency,
+                Currency = prices.Currency,
                 Prices = [new TLabeledPrice { Label = description, Amount = amount }],
             },
             SavedCredentials = await GetSavedCredentialsAsync(input.UserId),
@@ -407,7 +410,7 @@ internal sealed class GetPaymentFormHandler(
     /// The server's price for a Stars pack. The amount the client quotes is never charged: a pack
     /// that is not on sale is refused instead of being sold at whatever price was sent.
     /// </summary>
-    private static long StarsPackPrice(long stars)
+    private static long StarsPackPrice(long stars, PurchasePrices prices)
     {
         var offer = StarsCatalog.FindTopup(stars);
         if (offer == null)
@@ -415,7 +418,7 @@ internal sealed class GetPaymentFormHandler(
             RpcErrors.RpcErrors400.StarsAmountInvalid.ThrowRpcError();
         }
 
-        return offer!.Amount;
+        return prices.StarsPrice(offer!.Amount);
     }
 
     private async Task<IPaymentForm> HandleStarsTopupAsync(IRequestInput input, TInputInvoiceStars invoice)
@@ -424,6 +427,7 @@ internal sealed class GetPaymentFormHandler(
         long amountCents = 0;
         long stars = 0;
         long recipientUserId = 0;
+        var prices = await purchasePricing.ForUserAsync(input.UserId);
 
         // Stars off sale for this account (or, for a gift, its recipient): see IStarsPurchaseGate.
         if (invoice.Purpose is TInputStorePaymentStarsTopup or TInputStorePaymentStarsGiveaway)
@@ -434,12 +438,12 @@ internal sealed class GetPaymentFormHandler(
         if (invoice.Purpose is TInputStorePaymentStarsTopup topup)
         {
             stars = topup.Stars;
-            amountCents = StarsPackPrice(topup.Stars);
+            amountCents = StarsPackPrice(topup.Stars, prices);
         }
         else if (invoice.Purpose is TInputStorePaymentStarsGift gift)
         {
             stars = gift.Stars;
-            amountCents = StarsPackPrice(gift.Stars);
+            amountCents = StarsPackPrice(gift.Stars, prices);
             recipientUserId = gift.UserId is TInputUser inputUser ? inputUser.UserId : peerHelper.GetPeer(gift.UserId, input.UserId).PeerId;
             await starsPurchaseGate.EnsureAllowedAsync(input.UserId, recipientUserId);
         }
@@ -453,7 +457,7 @@ internal sealed class GetPaymentFormHandler(
                 RpcErrors.RpcErrors400.StarsAmountInvalid.ThrowRpcError();
             }
 
-            amountCents = offer!.Amount;
+            amountCents = prices.StarsPrice(offer!.Amount);
         }
         else if (invoice.Purpose is TInputStorePaymentPremiumGiveaway premiumGiveaway)
         {
@@ -467,7 +471,7 @@ internal sealed class GetPaymentFormHandler(
         if (!string.IsNullOrEmpty(stripe.SecretKey))
         {
             var (clientSecret, paymentIntentId) = await StripeHelper.CreatePaymentIntentAsync(
-                stripe.SecretKey, amountCents, "usd", $"Telegram Stars x{stars}");
+                stripe.SecretKey, amountCents, prices.Currency, $"Telegram Stars x{stars}");
 
             // Store mapping formId -> paymentIntentId for later verification // Force rebuild 407-2
             await mongoDatabase.GetCollection<StripePaymentIntentDocument>("stripe-payment-intents")
@@ -479,6 +483,8 @@ internal sealed class GetPaymentFormHandler(
                     UserId = input.UserId,
                     RecipientUserId = recipientUserId,
                     Stars = stars,
+                    Amount = amountCents,
+                    Currency = prices.Currency,
                     CreatedAt = DateTime.UtcNow,
                     GiveawayPurpose = invoice.Purpose is TInputStorePaymentStarsGiveaway or TInputStorePaymentPremiumGiveaway
                         ? invoice.Purpose.ToBytes()
@@ -506,6 +512,8 @@ internal sealed class GetPaymentFormHandler(
                     UserId = input.UserId,
                     RecipientUserId = recipientUserId,
                     Stars = stars,
+                    Amount = amountCents,
+                    Currency = prices.Currency,
                     CreatedAt = DateTime.UtcNow,
                     GiveawayPurpose = invoice.Purpose is TInputStorePaymentStarsGiveaway or TInputStorePaymentPremiumGiveaway
                         ? invoice.Purpose.ToBytes()
@@ -533,7 +541,7 @@ internal sealed class GetPaymentFormHandler(
             Url = string.Empty,
             Invoice = new TInvoice
             {
-                Currency = StarsCatalog.Currency,
+                Currency = prices.Currency,
                 Prices = [new TLabeledPrice { Label = $"{stars} Telegram Stars", Amount = amountCents }],
             },
             SavedCredentials = await GetSavedCredentialsAsync(input.UserId),

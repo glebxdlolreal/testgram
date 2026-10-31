@@ -234,9 +234,10 @@ public sealed partial class PremiumBotService
                     await SendAsync(userId, "⚡️", markup: new TReplyKeyboardHide());
                     var messageId = (int)await idGenerator.NextIdAsync(IdType.MessageId, BotUserId);
                     await SetDialogAsync(userId, state, channel.ChannelId.ToString(CultureInfo.InvariantCulture), messageId);
+                    var prices = await purchasePricing.ForUserAsync(userId);
                     var (text, entities, markup) = state == StateGiveawayPremium
-                        ? GiveawayTerms(channel, russian)
-                        : StarsGiveawayPools(channel, russian);
+                        ? GiveawayTerms(channel, russian, prices)
+                        : StarsGiveawayPools(channel, russian, prices);
                     await SendAsync(userId, text, entities, markup, messageId);
                     return;
 
@@ -277,7 +278,7 @@ public sealed partial class PremiumBotService
         if (outcome.Succeeded)
         {
             // Real Telegram's renewal receipt.
-            var price = FormatPrice(outcome.Amount, outcome.Currency, russian);
+            var price = FormatPrice(outcome.Amount, outcome.Currency);
             await SendAsync(outcome.UserId, russian
                 ? $"Получен платёж на сумму {price}.\nПодписка Telegram Premium продлена до {FormatReceiptDate(outcome.ExpiresAt)}.\n\nВы можете подарить Telegram Premium 🎁  друзьям с помощью команды /gift."
                 : $"We received the payment for {price}.\nYour premium subscription is now renewed until {FormatReceiptDate(outcome.ExpiresAt)}.\n\nTo 🎁 gift Telegram Premium to a friend, use the /gift command.");
@@ -535,19 +536,20 @@ public sealed partial class PremiumBotService
         var head = russian
             ? $"Спасибо, контакт получен. Теперь можно выбрать подарочную подписку для пользователя {names}:\n\n"
             : $"Thank you, the contact has been received. Now you can choose a gift subscription for {names}:\n\n";
-        var (text, entities) = TermList(head, gifts, russian);
+        var prices = await purchasePricing.ForUserAsync(userId);
+        var (text, entities) = TermList(head, gifts, russian, prices);
         var rows = new TVector<IKeyboardButtonRow>();
         var ids = string.Join(',', recipients.Select(r => r.UserId.ToString(CultureInfo.InvariantCulture)));
 
         foreach (var gift in gifts)
         {
-            var amount = premiumOptions.Value.GiftPrice(gift.Months, recipients.Count);
+            var amount = prices.Price(premiumOptions.Value.GiftPrice(gift.Months, recipients.Count));
             var label = $"{recipients.Count}x Premium for {MonthsText(gift.Months, false)}";
             var slug = await SaveLinkInvoiceAsync(userId, $"premcodes{RandomHex(16)}", "Premium Gifts", "Gift to your contacts",
-                label, amount, premiumOptions.Value.Currency, $"premium-gift:{gift.Months}:{ids}");
+                label, amount, prices.Currency, $"premium-gift:{gift.Months}:{ids}");
             rows.Add(Row(new TKeyboardButtonUrl
             {
-                Text = $"{(russian ? "На" : "For")} {MonthsText(gift.Months, russian)} - {FormatPrice(amount, russian)}",
+                Text = $"{(russian ? "На" : "For")} {MonthsText(gift.Months, russian)} - {FormatPrice(amount, prices.Currency)}",
                 Url = $"https://t.me/${slug}"
             }));
         }
@@ -611,6 +613,7 @@ public sealed partial class PremiumBotService
 
         await SendAsync(userId, "⭐️", markup: new TReplyKeyboardHide());
 
+        var prices = await purchasePricing.ForUserAsync(userId);
         var rows = new TVector<IKeyboardButtonRow>();
         foreach (var pair in StarsCatalog.TopupOffers.Chunk(2))
         {
@@ -618,15 +621,16 @@ public sealed partial class PremiumBotService
             foreach (var pack in pair)
             {
                 var label = $"{pack.Stars} Telegram Stars";
+                var amount = prices.StarsPrice(pack.Amount);
                 var slug = recipient == null
-                    ? await SaveLinkInvoiceAsync(userId, $"stars{pack.Stars}", "Telegram Stars Top-Up", label, label, pack.Amount,
-                        StarsCatalog.Currency, $"stars:{pack.Stars}:0")
+                    ? await SaveLinkInvoiceAsync(userId, $"stars{pack.Stars}", "Telegram Stars Top-Up", label, label, amount,
+                        prices.Currency, $"stars:{pack.Stars}:0")
                     : await SaveLinkInvoiceAsync(userId, $"stars_gift{recipient.UserId}_{pack.Stars}", "Telegram Stars Gift",
-                        $"{label} for {DisplayName(recipient)}", label, pack.Amount, StarsCatalog.Currency,
+                        $"{label} for {DisplayName(recipient)}", label, amount, prices.Currency,
                         $"stars:{pack.Stars}:{recipient.UserId}");
                 row.Buttons.Add(new TKeyboardButtonUrl
                 {
-                    Text = $"{pack.Stars} ⭐️ ({FormatPrice(pack.Amount, StarsCatalog.Currency, russian)})",
+                    Text = $"{pack.Stars} ⭐️ ({FormatPrice(amount, prices.Currency)})",
                     Url = $"https://t.me/${slug}"
                 });
             }
@@ -724,20 +728,21 @@ public sealed partial class PremiumBotService
     }
 
     /// <summary>Premium giveaway terms, each with its saving, as callback buttons "give/&lt;channel&gt;/&lt;months&gt;".</summary>
-    private (string Text, IEnumerable<IMessageEntity> Entities, IReplyMarkup Markup) GiveawayTerms(IChannelReadModel channel, bool russian)
+    private (string Text, IEnumerable<IMessageEntity> Entities, IReplyMarkup Markup) GiveawayTerms(IChannelReadModel channel, bool russian,
+        PurchasePrices prices)
     {
         var head = russian
             ? $"Пожалуйста, выберите срок действия подписок Telegram Premium, которые Вы хотите разыграть в {channel.Title}:\n\n"
             : $"OK! Please select the duration of the Telegram Premium subscriptions you want to give away in {channel.Title}:\n\n";
         var gifts = GiftTerms();
-        var (text, entities) = TermList(head, gifts, russian);
+        var (text, entities) = TermList(head, gifts, russian, prices);
         entities.Insert(0, Bold(head, russian ? "срок действия" : "duration"));
 
         var rows = new TVector<IKeyboardButtonRow>(gifts.Select(gift => (IKeyboardButtonRow)Row(new TKeyboardButtonCallback
         {
             Text = russian
-                ? $"На {MonthsText(gift.Months, true)} - {FormatPrice(premiumOptions.Value.GiftPrice(gift.Months, 1), true)}"
-                : $"{MonthsText(gift.Months, false)} - {FormatPrice(premiumOptions.Value.GiftPrice(gift.Months, 1), false)}",
+                ? $"На {MonthsText(gift.Months, true)} - {FormatPrice(prices, premiumOptions.Value.GiftPrice(gift.Months, 1))}"
+                : $"{MonthsText(gift.Months, false)} - {FormatPrice(prices, premiumOptions.Value.GiftPrice(gift.Months, 1))}",
             Data = $"{GiveawayCallbackPrefix}{channel.ChannelId}/{gift.Months}"
         })));
 
@@ -746,7 +751,7 @@ public sealed partial class PremiumBotService
 
     /// <summary>Stars giveaway pools, largest first, as callback buttons "stargive/&lt;channel&gt;/&lt;stars&gt;".</summary>
     private static (string Text, IEnumerable<IMessageEntity> Entities, IReplyMarkup Markup) StarsGiveawayPools(IChannelReadModel channel,
-        bool russian)
+        bool russian, PurchasePrices prices)
     {
         var offers = StarsCatalog.GiveawayOffers.OrderByDescending(o => o.Stars).ToList();
         var head = russian
@@ -761,7 +766,7 @@ public sealed partial class PremiumBotService
         {
             Buttons = new TVector<IKeyboardButton>(pair.Select(o => (IKeyboardButton)new TKeyboardButtonCallback
             {
-                Text = $"{o.Stars} ⭐️ - {FormatPrice(o.Amount, StarsCatalog.Currency, russian)}",
+                Text = $"{o.Stars} ⭐️ - {FormatPrice(prices.StarsPrice(o.Amount), prices.Currency)}",
                 Data = $"{StarsGiveawayCallbackPrefix}{channel.ChannelId}/{o.Stars}"
             }))
         }));
@@ -796,10 +801,11 @@ public sealed partial class PremiumBotService
             return;
         }
 
+        var prices = await purchasePricing.ForUserAsync(userId);
         (string Text, IEnumerable<IMessageEntity> Entities, IReplyMarkup Markup)? step = (stars, choice) switch
         {
-            (false, 0) => GiveawayTerms(channel, russian),
-            (true, 0) => StarsGiveawayPools(channel, russian),
+            (false, 0) => GiveawayTerms(channel, russian, prices),
+            (true, 0) => StarsGiveawayPools(channel, russian, prices),
             (false, _) => await GiveawayQuantitiesAsync(userId, channel, (int)choice, russian),
             (true, _) => await StarsGiveawayWinnersAsync(userId, channel, choice, russian)
         };
@@ -821,20 +827,21 @@ public sealed partial class PremiumBotService
             return null;
         }
 
+        var prices = await purchasePricing.ForUserAsync(userId);
         var rows = new TVector<IKeyboardButtonRow>();
         foreach (var pair in GiveawayQuantities.Chunk(2))
         {
             var row = new TKeyboardButtonRow { Buttons = new TVector<IKeyboardButton>() };
             foreach (var quantity in pair)
             {
-                var amount = premiumOptions.Value.GiftPrice(months, quantity);
+                var amount = prices.Price(premiumOptions.Value.GiftPrice(months, quantity));
                 var slug = await SaveLinkInvoiceAsync(userId, $"premgiveprep{channel.ChannelId}_{months}_{quantity}", "Channel Giveaway",
                     $"Get more boosts for your channel by creating a giveaway in {channel.Title}.",
-                    $"{quantity}x Premium for {MonthsText(months, false)}", amount, premiumOptions.Value.Currency,
+                    $"{quantity}x Premium for {MonthsText(months, false)}", amount, prices.Currency,
                     $"premium-giveaway:{channel.ChannelId}:{months}:{quantity}");
                 row.Buttons.Add(new TKeyboardButtonUrl
                 {
-                    Text = $"{quantity}x {months}{(russian ? "м." : "mo")} ({FormatPrice(amount, russian)})",
+                    Text = $"{quantity}x {months}{(russian ? "м." : "mo")} ({FormatPrice(amount, prices.Currency)})",
                     Url = $"https://t.me/${slug}"
                 });
             }
@@ -862,14 +869,16 @@ public sealed partial class PremiumBotService
             return null;
         }
 
-        var price = FormatPrice(offer.Amount, StarsCatalog.Currency, russian);
+        var prices = await purchasePricing.ForUserAsync(userId);
+        var amount = prices.StarsPrice(offer.Amount);
+        var price = FormatPrice(amount, prices.Currency);
         var buttons = new List<IKeyboardButton>();
         foreach (var (users, perUserStars, _) in offer.Winners)
         {
             var boosts = offer.YearlyBoosts;
             var slug = await SaveLinkInvoiceAsync(userId, $"stargiveprep{channel.ChannelId}_{stars}_{users}", "Channel Giveaway",
                 $"Get {boosts} {(boosts == 1 ? "boost" : "boosts")} for your channel by creating a giveaway in {channel.Title}.",
-                $"{stars} stars shared between {users} winners", offer.Amount, StarsCatalog.Currency,
+                $"{stars} stars shared between {users} winners", amount, prices.Currency,
                 $"stars-giveaway:{channel.ChannelId}:{stars}:{users}");
             buttons.Add(new TKeyboardButtonUrl
             {
@@ -954,7 +963,8 @@ public sealed partial class PremiumBotService
     /// " 12 месяцев: -39% <s>4 196,00 RUB</s>" lines: the saving of each term against buying the shortest
     /// one repeatedly, as real Telegram lists gift and giveaway terms.
     /// </summary>
-    private (string Text, List<IMessageEntity> Entities) TermList(string head, IReadOnlyList<PremiumPeriodOption> gifts, bool russian)
+    private (string Text, List<IMessageEntity> Entities) TermList(string head, IReadOnlyList<PremiumPeriodOption> gifts, bool russian,
+        PurchasePrices prices)
     {
         var text = new StringBuilder(head);
         var entities = new List<IMessageEntity>();
@@ -970,7 +980,7 @@ public sealed partial class PremiumBotService
                 var percent = $"-{saving}%";
                 entities.Add(new TMessageEntityBold { Offset = text.Length, Length = percent.Length });
                 text.Append(percent).Append(' ');
-                var full = FormatPrice(undiscounted, russian);
+                var full = FormatPrice(prices, undiscounted);
                 entities.Add(new TMessageEntityStrike { Offset = text.Length, Length = full.Length });
                 text.Append(full);
             }
@@ -1038,7 +1048,7 @@ public sealed partial class PremiumBotService
     private static string RandomHex(int bytes) => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(bytes));
 
     private string NextPayment(PremiumAutoRenewalDocument renewal, long expiresAt, bool russian) =>
-        $"{FormatPrice(renewal.Amount, renewal.Currency, russian)}, {FormatDate(expiresAt)}";
+        $"{FormatPrice(renewal.Amount, renewal.Currency)}, {FormatDate(expiresAt)}";
 
     private async Task<bool> HasPremiumAsync(long userId) =>
         (await queryProcessor.ProcessAsync(new GetUserByIdQuery(userId)))?.Premium == true;
