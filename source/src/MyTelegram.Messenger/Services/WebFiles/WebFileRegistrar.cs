@@ -3,6 +3,7 @@ using Google.Protobuf;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.GrpcService;
+using MyTelegram.Messenger.Services.VideoProcessing;
 
 namespace MyTelegram.Messenger.Services.WebFiles;
 
@@ -27,6 +28,12 @@ namespace MyTelegram.Messenger.Services.WebFiles;
 /// row its query reads. That is a deliberate exception to the rule against writing <c>eventflow-*</c>
 /// directly — the aggregate that owns this read model lives in a closed binary whose write path is
 /// broken, so there is no other way for a proxied <c>webDocument</c> to be readable at all.</para>
+///
+/// <para>For an image the file server fails one step earlier still: <c>DownloadPhotoAsync</c> stores the
+/// body AES-CTR encrypted and then dies serializing <c>WebFileCreatedEvent</c> (missing AOT metadata), so
+/// the key it encrypted with is never written to <c>eventflow-filereadmodel</c> and <c>upload.getWebFile</c>
+/// hands out the ciphertext as it is. Such a body is replaced with the plain one, which the file server
+/// serves unchanged when it has no key — the same way every server-created body is stored.</para>
 ///
 /// <para>Registration is remembered, per process and in Mongo, because the same preview URL comes back on
 /// every keystroke of a GIF search and each fresh registration is a download on the file server.</para>
@@ -55,6 +62,7 @@ public interface IWebFileRegistrar
 public class WebFileRegistrar(
     IMongoDatabase mongoDatabase,
     IWebFileFetcher fetcher,
+    IStoredFileStorage storedFileStorage,
     IOptionsMonitor<MyTelegramMessengerServerOptions> options,
     ILogger<WebFileRegistrar> logger)
     : IWebFileRegistrar, ISingletonDependency
@@ -66,6 +74,9 @@ public class WebFileRegistrar(
     /// collection <c>eventflow-{type}</c>, and the query is a plain <c>FileId</c> match.
     /// </summary>
     public const string ReadModelCollectionName = "eventflow-webfilereadmodel";
+
+    /// <summary>Where the file server keeps the AES key of a body it stored encrypted.</summary>
+    private const string FileReadModelCollectionName = "eventflow-filereadmodel";
 
     private static readonly ConcurrentDictionary<string, bool> Registered = new(StringComparer.Ordinal);
 
@@ -87,8 +98,9 @@ public class WebFileRegistrar(
             return true;
         }
 
-        if (await WasRegisteredBeforeAsync(url, cancellationToken))
+        if (await WasRegisteredBeforeAsync(url, cancellationToken) is { } registeredFileId)
         {
+            await EnsureReadableBodyAsync(registeredFileId, url, mimeType, cancellationToken);
             Registered[url] = true;
 
             return true;
@@ -119,6 +131,7 @@ public class WebFileRegistrar(
             }
 
             await WriteReadModelAsync(response.FileId, url, mimeType, size, cancellationToken);
+            await EnsureReadableBodyAsync(response.FileId, url, mimeType, cancellationToken);
 
             Registered[url] = true;
             await RememberAsync(url, mimeType, response.FileId, cancellationToken);
@@ -158,7 +171,8 @@ public class WebFileRegistrar(
             cancellationToken);
     }
 
-    private async Task<bool> WasRegisteredBeforeAsync(string url, CancellationToken cancellationToken)
+    /// <summary>The file id an earlier registration of <paramref name="url"/> got, or <c>null</c> for none.</summary>
+    private async Task<long?> WasRegisteredBeforeAsync(string url, CancellationToken cancellationToken)
     {
         try
         {
@@ -166,13 +180,62 @@ public class WebFileRegistrar(
                 .Find(Builders<BsonDocument>.Filter.Eq("_id", CacheId(url)))
                 .FirstOrDefaultAsync(cancellationToken);
 
-            return existing != null;
+            return existing == null ? null : existing.TryGetValue("FileId", out var fileId) && fileId.IsNumeric ? fileId.ToInt64() : 0;
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "The web file registration cache could not be read");
 
-            return false;
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Replaces an image body the file server stored encrypted without keeping its key (see the class
+    /// summary) with the plain body. A body that has its key is left alone: the file server decrypts it.
+    /// </summary>
+    private async Task EnsureReadableBodyAsync(long fileId, string url, string mimeType,
+        CancellationToken cancellationToken)
+    {
+        if (fileId == 0 || !mimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        string? path = null;
+        try
+        {
+            var keyed = await mongoDatabase.GetCollection<BsonDocument>(FileReadModelCollectionName)
+                .Find(Builders<BsonDocument>.Filter.And(
+                    Builders<BsonDocument>.Filter.Eq("FileId", fileId),
+                    Builders<BsonDocument>.Filter.Exists("Key")))
+                .AnyAsync(cancellationToken);
+            if (keyed)
+            {
+                return;
+            }
+
+            var body = await fetcher.GetAsync(url, mimeType, cancellationToken);
+            if (body == null)
+            {
+                logger.LogWarning("The web file {Url} could not be fetched to store it readable", url);
+                return;
+            }
+
+            path = Path.GetTempFileName();
+            await File.WriteAllBytesAsync(path, body.Bytes, cancellationToken);
+            await storedFileStorage.UploadFileAsync(fileId, path, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "The web file {Url} could not be stored readable", url);
+        }
+        finally
+        {
+            if (path != null)
+            {
+                File.Delete(path);
+            }
         }
     }
 
