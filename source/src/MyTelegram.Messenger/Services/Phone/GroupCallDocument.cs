@@ -11,6 +11,8 @@ public class GroupCallDocument
     public long CreatorId { get; set; }
     public bool Active { get; set; } = true;
     public bool JoinMuted { get; set; }
+    /// <summary>The call belongs to a broadcast channel: everybody joins muted and join_muted cannot be changed.</summary>
+    public bool Broadcast { get; set; }
     public bool RtmpStream { get; set; }
     public string? RtmpUrl { get; set; }
     public string? RtmpStreamKey { get; set; }

@@ -95,6 +95,60 @@ public class GroupCallTelegramParityTests
     }
 
     [Fact]
+    public async Task ChannelVideoChat_EveryoneJoinsMuted_OnlyAdminsMayUnmute_AndJoinMutedIsFixed()
+    {
+        // Telegram 2026-11-01, a broadcast channel's (non-RTMP) video chat.
+        var harness = Harness.Create(broadcast: true);
+
+        var adminJoin = await harness.JoinAsync(AdminUserId, muted: false);
+        var admin = SingleParticipant(adminJoin);
+        admin.Muted.ShouldBeTrue();
+        admin.CanSelfUnmute.ShouldBeTrue();
+
+        var member = SingleParticipant(await harness.JoinAsync(MemberUserId, muted: false));
+        member.Muted.ShouldBeTrue();
+        member.CanSelfUnmute.ShouldBeFalse();
+
+        var call = adminJoin.ShouldBeOfType<TUpdates>().Updates.OfType<TUpdateGroupCall>().Single().Call.ShouldBeOfType<MyTelegram.Schema.TGroupCall>();
+        call.JoinMuted.ShouldBeTrue();
+        call.CanChangeJoinMuted.ShouldBeFalse();
+        call.StreamDcId.ShouldBeNull();
+        call.ListenersHidden.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task RtmpStream_ListenersAreHiddenAndUnversioned_AndOnlyManagersGetTheStreamKey()
+    {
+        // Telegram 2026-11-01, an RTMP stream in a broadcast channel.
+        var harness = Harness.Create(broadcast: true, rtmp: true);
+
+        var adminJoin = (TUpdates)await harness.JoinAsync(AdminUserId, muted: false);
+        var adminParams = adminJoin.Updates.OfType<TUpdateGroupCallConnection>().Single().Params.Data;
+        adminParams.ShouldContain("\"stream\":true");
+        adminParams.ShouldContain("\"rtmp_stream_url\":\"rtmp://stream.example/live\"");
+        adminParams.ShouldContain("\"rtmp_stream_key\":\"stream-key\"");
+        var admin = SingleParticipant(adminJoin);
+        admin.Muted.ShouldBeTrue();
+        admin.CanSelfUnmute.ShouldBeFalse();
+
+        harness.ClearPushes();
+        var memberJoin = (TUpdates)await harness.JoinAsync(MemberUserId, muted: true);
+        memberJoin.Updates.OfType<TUpdateGroupCallConnection>().Single().Params.Data.ShouldBe("{\"stream\":true,\"rtmp\":true}");
+        var member = SingleParticipant(memberJoin);
+        member.JustJoined.ShouldBeTrue();
+        member.Versioned.ShouldBeFalse();
+        member.CanSelfUnmute.ShouldBeFalse();
+        harness.Pushes.SelectMany(p => p.Data is TUpdates u ? u.Updates : []).OfType<TUpdateGroupCallParticipants>()
+            .ShouldBeEmpty("a listener's join is not announced to the others");
+
+        var call = memberJoin.Updates.OfType<TUpdateGroupCall>().Single().Call.ShouldBeOfType<MyTelegram.Schema.TGroupCall>();
+        call.ListenersHidden.ShouldBeTrue();
+        call.ParticipantsCount.ShouldBe(0);
+        call.StreamDcId.ShouldBe(1);
+        call.CanChangeJoinMuted.ShouldBeFalse();
+    }
+
+    [Fact]
     public async Task AdminUnmute_OnlyAllowsSpeaking_ThenTheParticipantUnmutesThemselves()
     {
         var harness = Harness.Create(joinMuted: true);
@@ -332,7 +386,7 @@ public class GroupCallTelegramParityTests
 
         public void ClearPushes() => _sender.Clear();
 
-        public static Harness Create(bool joinMuted = false, bool scheduled = false)
+        public static Harness Create(bool joinMuted = false, bool scheduled = false, bool broadcast = false, bool rtmp = false)
         {
             var database = PhoneTestFixtures.CreateDatabase(out var store);
             database.GetCollection<GroupCallDocument>(PhoneTestFixtures.GroupCallsCollectionName).InsertOne(
@@ -345,7 +399,11 @@ public class GroupCallTelegramParityTests
                     PeerId = ChannelId,
                     PeerType = (int)PeerType.Channel,
                     Active = true,
-                    JoinMuted = joinMuted,
+                    JoinMuted = joinMuted || broadcast,
+                    Broadcast = broadcast,
+                    RtmpStream = rtmp,
+                    RtmpUrl = rtmp ? "rtmp://stream.example/live" : null,
+                    RtmpStreamKey = rtmp ? "stream-key" : null,
                     ScheduleDate = scheduled ? 2_000_000_000 : null,
                     Version = 1
                 });

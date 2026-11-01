@@ -172,9 +172,12 @@ internal static class GroupCallStateHelper
         {
             Id = call.CallId,
             AccessHash = accessHash ?? call.AccessHash,
-            ParticipantsCount = call.Participants.Count(p => !p.Left),
+            // An RTMP stream's listeners are hidden and not counted (captured 2026-11-01), and only an RTMP
+            // stream is served from a stream DC: Telegram leaves stream_dc_id unset for every other call.
+            ParticipantsCount = call.RtmpStream ? 0 : call.Participants.Count(p => !p.Left),
+            ListenersHidden = call.RtmpStream,
             Title = call.Title,
-            StreamDcId = DefaultGroupCallStreamDcId,
+            StreamDcId = call.RtmpStream ? DefaultGroupCallStreamDcId : null,
             ScheduleDate = call.ScheduleDate,
             RecordStartDate = call.RecordStartDate,
             RecordVideoActive = call.RecordVideoActive,
@@ -185,7 +188,7 @@ internal static class GroupCallStateHelper
             Conference = call.Conference,
             Creator = call.CreatorId == selfUserId,
             MessagesEnabled = call.MessagesEnabled,
-            CanChangeJoinMuted = true,
+            CanChangeJoinMuted = !call.Broadcast,
             CanChangeMessagesEnabled = true,
             CanStartVideo = true,
             UnmutedVideoCount = call.Participants.Count(p => !p.Left && !p.VideoStopped),
@@ -428,7 +431,9 @@ internal static class GroupCallStateHelper
         {
             Call = ToInputGroupCall(call),
             Participants = new TVector<IGroupCallParticipant>(
-                participants.Select(p => (IGroupCallParticipant)ToParticipant(p, selfUserId, peerHelper, justJoined, call, versioned || justJoined || p.Left))),
+                participants.Select(p => (IGroupCallParticipant)ToParticipant(p, selfUserId, peerHelper, justJoined, call,
+                    // An RTMP stream has no participant list to version: its join update is unversioned.
+                    !call.RtmpStream && (versioned || justJoined || p.Left)))),
             Version = call.Version
         };
     }
@@ -626,20 +631,30 @@ internal static class GroupCallStateHelper
     /// Every other call needs the Jingle transport of the media server (<see cref="CreateSfuConnectionUpdate"/>),
     /// so null is returned for it here.
     /// </summary>
+    /// <param name="withRtmpCredentials">Whether the joiner manages the call: Telegram hands those the
+    /// stream's RTMP URL and key in the connection too.</param>
     public static TUpdateGroupCallConnection? CreateConnectionUpdate(
         GroupCallDocument call,
-        bool presentation = false)
+        bool presentation = false,
+        bool withRtmpCredentials = false)
     {
         if (!call.RtmpStream)
         {
             return null;
         }
 
-        var streamJson = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+        var stream = new Dictionary<string, object?>
         {
             ["stream"] = true,
             ["rtmp"] = true
-        });
+        };
+        if (withRtmpCredentials && !string.IsNullOrEmpty(call.RtmpUrl) && !string.IsNullOrEmpty(call.RtmpStreamKey))
+        {
+            stream["rtmp_stream_url"] = call.RtmpUrl;
+            stream["rtmp_stream_key"] = call.RtmpStreamKey;
+        }
+
+        var streamJson = System.Text.Json.JsonSerializer.Serialize(stream);
 
         return new TUpdateGroupCallConnection
         {

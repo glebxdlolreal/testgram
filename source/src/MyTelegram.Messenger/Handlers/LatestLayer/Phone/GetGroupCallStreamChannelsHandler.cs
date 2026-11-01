@@ -29,7 +29,8 @@ internal sealed class GetGroupCallStreamChannelsHandler(
     protected override async Task<MyTelegram.Schema.Phone.IGroupCallStreamChannels> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestGetGroupCallStreamChannels obj)
     {
         var groupCall = await _groupCallCollection.Find(GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2)).FirstOrDefaultAsync();
-        if (groupCall == null)
+        // Only an RTMP stream has stream channels; Telegram answers GROUPCALL_INVALID for any other call.
+        if (groupCall == null || !groupCall.RtmpStream)
         {
             RpcErrors.RpcErrors400.GroupcallInvalid.ThrowRpcError();
             return null!;

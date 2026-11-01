@@ -26,7 +26,8 @@ internal sealed class CreateGroupCallHandler(
     IPeerHelper peerHelper,
     IMessageAppService messageAppService,
     IOptionsMonitor<MyTelegramMessengerServerOptions> options,
-    IChannelAdminRightsChecker channelAdminRightsChecker)
+    IChannelAdminRightsChecker channelAdminRightsChecker,
+    IQueryProcessor queryProcessor)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestCreateGroupCall, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -43,6 +44,7 @@ internal sealed class CreateGroupCallHandler(
             return null!;
         }
 
+        var broadcast = false;
         if (peer.PeerType == PeerType.Channel)
         {
             await channelAdminRightsChecker.CheckAdminRightAsync(
@@ -50,6 +52,7 @@ internal sealed class CreateGroupCallHandler(
                 input.UserId,
                 rights => rights.ManageCall,
                 RpcErrors.RpcErrors400.ChatAdminRequired);
+            broadcast = (await queryProcessor.ProcessAsync(new GetChannelByIdQuery(peer.PeerId)))?.Broadcast == true;
         }
 
         if (obj.ScheduleDate is { } scheduleDate && scheduleDate <= GroupCallStateHelper.CurrentDate())
@@ -107,6 +110,9 @@ internal sealed class CreateGroupCallHandler(
                 Title = obj.Title,
                 ScheduleDate = obj.ScheduleDate,
                 RtmpStream = obj.RtmpStream,
+                // A channel's video chat starts join_muted and stays so (captured 2026-11-01).
+                Broadcast = broadcast,
+                JoinMuted = broadcast,
                 RtmpUrl = obj.RtmpStream ? GroupCallRtmpHelper.GetStoredOrDefault(rtmpStream?.Url, rtmpUrl) : null,
                 RtmpStreamKey = obj.RtmpStream ? rtmpStream?.Key : null,
                 Date = GroupCallStateHelper.CurrentDate()

@@ -160,13 +160,28 @@ public class StreamHandlerTests
         ex.Message.ShouldBe("GROUPCALL_JOIN_MISSING"); // R25.7
     }
 
+    [Fact]
+    public async Task GetStreamChannels_OfACallThatIsNotAnRtmpStream_IsGroupCallInvalid()
+    {
+        // Telegram 2026-11-01: an ordinary channel video chat has no stream channels at all.
+        var database = PhoneTestFixtures.CreateDatabase(out _);
+        SeedRtmpGroupCall(database, rtmpStreamKey: "key", rtmpStream: false);
+        var hls = new Mock<IHlsGroupCallStreamService>();
+
+        var request = new RequestGetGroupCallStreamChannels { Call = InputCall() };
+        var ex = await Should.ThrowAsync<RpcException>(() =>
+            InvokeAsync(CreateChannelsHandler(database, hls.Object), AdminUserId, request));
+        ex.Message.ShouldBe("GROUPCALL_INVALID");
+        hls.Verify(x => x.GetChannelsAsync(It.IsAny<GroupCallDocument>()), Times.Never);
+    }
+
     // ---- helpers ---------------------------------------------------------------------------------
 
     private static IInputGroupCall InputCall() => new TInputGroupCall { Id = CallId, AccessHash = AccessHash };
 
     private static IInputPeer ChannelPeer() => new TInputPeerChannel { ChannelId = ChannelId, AccessHash = 0 };
 
-    private static void SeedRtmpGroupCall(IMongoDatabase database, string? rtmpStreamKey)
+    private static void SeedRtmpGroupCall(IMongoDatabase database, string? rtmpStreamKey, bool rtmpStream = true)
     {
         var collection = database.GetCollection<GroupCallDocument>(PhoneTestFixtures.GroupCallsCollectionName);
         collection.InsertOne(new GroupCallDocument
@@ -178,7 +193,7 @@ public class StreamHandlerTests
             PeerId = ChannelId,
             PeerType = (int)PeerType.Channel,
             Active = true,
-            RtmpStream = true,
+            RtmpStream = rtmpStream,
             RtmpStreamKey = rtmpStreamKey,
             Version = 1,
             Date = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds()

@@ -72,10 +72,13 @@ internal sealed class JoinGroupCallHandler(
 
         // In a join_muted call only those who can manage it may speak; everybody else joins muted and has
         // to be allowed to unmute by an admin. Rejoining does not lift an admin's mute.
+        // Nobody speaks in an RTMP stream, and in a channel's video chat even its admins join muted (they may
+        // unmute themselves); both captured from Telegram 2026-11-01.
         var previous = GroupCallStateHelper.FindParticipantByUser(groupCall, input.UserId);
+        var canManage = await GroupCallStateHelper.CanManageCallAsync(groupCall, input.UserId, channelAdminRightsChecker);
         var mutedByAdmin = previous?.MutedByAdmin == true ||
-                           (groupCall.JoinMuted &&
-                            !await GroupCallStateHelper.CanManageCallAsync(groupCall, input.UserId, channelAdminRightsChecker));
+                           groupCall.RtmpStream ||
+                           (groupCall.JoinMuted && !canManage);
 
         // The media server has to accept the connection before the join is recorded, so a client whose
         // params cannot connect is refused instead of showing up as a participant nobody can hear.
@@ -92,7 +95,7 @@ internal sealed class JoinGroupCallHandler(
             PeerId = joinAs.PeerId,
             PeerType = (int)joinAs.PeerType,
             Source = ssrc,
-            Muted = obj.Muted || mutedByAdmin,
+            Muted = obj.Muted || mutedByAdmin || groupCall.Broadcast,
             MutedByAdmin = mutedByAdmin,
             VideoStopped = obj.VideoStopped,
             Date = currentDate,
@@ -110,11 +113,12 @@ internal sealed class JoinGroupCallHandler(
             GroupCallStateHelper.CreateCallUpdate(groupCall, input.UserId, peerHelper)
         };
 
+        var participantsUpdate = GroupCallStateHelper.CreateParticipantsUpdate(groupCall, input.UserId, peerHelper, [participant], true);
+        responseUpdates.Add(participantsUpdate);
+        // An RTMP stream's listeners are hidden: the joiner gets its own (unversioned) entry, nobody else does.
         if (!groupCall.RtmpStream)
         {
-            var participantsUpdate = GroupCallStateHelper.CreateParticipantsUpdate(groupCall, input.UserId, peerHelper, [participant], true);
             pushUpdatesList.Add(participantsUpdate);
-            responseUpdates.Add(participantsUpdate);
         }
 
         if (groupCall.Conference && obj.Block is { } chainBlock)
@@ -140,7 +144,7 @@ internal sealed class JoinGroupCallHandler(
 
         var connectionUpdate = media != null
             ? GroupCallStateHelper.CreateSfuConnectionUpdate(media)
-            : GroupCallStateHelper.CreateConnectionUpdate(groupCall);
+            : GroupCallStateHelper.CreateConnectionUpdate(groupCall, withRtmpCredentials: canManage);
         if (connectionUpdate != null)
         {
             responseUpdates.Add(connectionUpdate);

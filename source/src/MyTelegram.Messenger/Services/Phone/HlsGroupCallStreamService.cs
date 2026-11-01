@@ -16,15 +16,16 @@ public interface IHlsGroupCallStreamService
 
 public sealed class HlsGroupCallStreamService(
     IOptionsMonitor<MyTelegramMessengerServerOptions> options,
+    IGroupCallStreamPartMuxer muxer,
     ILogger<HlsGroupCallStreamService> logger)
     : IHlsGroupCallStreamService, ISingletonDependency
 {
     private const int TelegramVideoStreamPartSignature = unchecked((int)0xa12e810d);
     private const int VideoChannel = 1;
+    private const int AudioChannel = 0;
     private const int VideoScale = 0;
     private const string DefaultTelegramStreamContainer = "mp4";
     private const string MpegTsTelegramStreamContainer = "mpegts";
-    private const string TelegramUnifiedEndpoint = "unified";
     private const int SegmentDurationMs = 1_000;
     // Clients start two seconds behind last_timestamp_ms, while HLS segment
     // timestamps can be offset from exact second boundaries.
@@ -33,6 +34,8 @@ public sealed class HlsGroupCallStreamService(
     private static readonly TimeSpan ChildManifestCacheTtl = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan MediaManifestCacheTtl = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan InitFragmentCacheTtl = TimeSpan.FromMinutes(5);
+    // Every viewer asks for the same parts; building one runs ffmpeg.
+    private static readonly TimeSpan PartCacheTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan HlsSessionCookieCacheTtl = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan StartupManifestWaitTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan StartupManifestRetryDelay = TimeSpan.FromMilliseconds(250);
@@ -46,6 +49,7 @@ public sealed class HlsGroupCallStreamService(
     private readonly ConcurrentDictionary<string, MediaManifestCacheEntry> _mediaManifestCache = new();
     private readonly ConcurrentDictionary<string, BytesCacheEntry> _initFragmentCache = new();
     private readonly ConcurrentDictionary<string, HlsSessionCookieCacheEntry> _hlsSessionCookieCache = new();
+    private readonly ConcurrentDictionary<string, (Lazy<Task<byte[]>> Part, DateTimeOffset ExpiresAt)> _partCache = new();
 
     public async Task<IReadOnlyList<HlsGroupCallStreamChannel>> GetChannelsAsync(GroupCallDocument groupCall)
     {
@@ -80,10 +84,20 @@ public sealed class HlsGroupCallStreamService(
                 manifest.Segments.Count,
                 manifest.Parts.Count);
 
-            return
-            [
-                new HlsGroupCallStreamChannel(VideoChannel, VideoScale, lastTimestamp.Value)
-            ];
+            // Telegram lists the video channel and the audio channel (0); the audio one only exists when
+            // the stream has an audio rendition of its own.
+            var channels = new List<HlsGroupCallStreamChannel>
+            {
+                new(VideoChannel, VideoScale, lastTimestamp.Value)
+            };
+            var audio = await GetMediaManifestAsync(groupCall, video: false, AudioChannel, forceRefresh: false);
+            var lastAudioTimestamp = MaxTimestamp(audio.LatestSegmentTimestampMs, audio.LatestPartTimestampMs);
+            if (audio.ChildManifestUrl != manifest.ChildManifestUrl && lastAudioTimestamp is not null)
+            {
+                channels.Add(new HlsGroupCallStreamChannel(AudioChannel, VideoScale, lastAudioTimestamp.Value));
+            }
+
+            return channels;
         }
         catch (Exception ex)
         {
@@ -114,9 +128,7 @@ public sealed class HlsGroupCallStreamService(
 
             try
             {
-                var result = video
-                    ? await ReadUnifiedVideoPartAsync(groupCall, manifest, fragments)
-                    : await ReadFragmentsAsync(groupCall, manifest, fragments);
+                var result = await ReadCachedPartAsync(groupCall, location, video, channel, manifest, fragments);
 
                 logger.LogInformation(
                     "Returning group call HLS chunk: CallId={CallId}, TimeMs={TimeMs}, Scale={Scale}, VideoChannel={VideoChannel}, VideoQuality={VideoQuality}, Container={Container}, Manifest={Manifest}, Fragments={Fragments}, FragmentTimes={FragmentTimes}, Bytes={Bytes}",
@@ -157,13 +169,78 @@ public sealed class HlsGroupCallStreamService(
         return [];
     }
 
+    private Task<byte[]> ReadCachedPartAsync(
+        GroupCallDocument groupCall,
+        TInputGroupCallStream location,
+        bool video,
+        int channel,
+        MediaManifest manifest,
+        List<HlsFragment> fragments)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var key = $"{groupCall.CallId}:{video}:{channel}:{location.Scale}:{fragments[0].Uri}:{fragments.Count}";
+        foreach (var expired in _partCache.Where(entry => entry.Value.ExpiresAt <= now).Select(entry => entry.Key).ToList())
+        {
+            _partCache.TryRemove(expired, out _);
+        }
+
+        var entry = _partCache.GetOrAdd(key, _ => (
+            new Lazy<Task<byte[]>>(() => video
+                ? ReadUnifiedVideoPartAsync(groupCall, location, manifest, fragments)
+                : ReadAudioPartAsync(groupCall, manifest, fragments)),
+            now.Add(PartCacheTtl)));
+        var part = entry.Part.Value;
+        if (part.IsFaulted || part.IsCanceled)
+        {
+            _partCache.TryRemove(key, out _);
+        }
+
+        return part;
+    }
+
+    /// <summary>
+    /// The video channel's part, which tgcalls plays as a unified broadcast: the video fragments and the
+    /// audio of the same time span in one MP4.
+    /// </summary>
     private async Task<byte[]> ReadUnifiedVideoPartAsync(
         GroupCallDocument groupCall,
+        TInputGroupCallStream location,
         MediaManifest videoManifest,
         List<HlsFragment> videoFragments)
     {
         var videoBytes = await ReadFragmentsAsync(groupCall, videoManifest, videoFragments);
-        return WrapTelegramVideoStreamPart(videoBytes, videoManifest.Container);
+        var audioBytes = await TryReadAudioForAsync(groupCall, location, videoManifest);
+        return WrapTelegramVideoStreamPart(await muxer.MuxAsync(videoBytes, audioBytes), DefaultTelegramStreamContainer);
+    }
+
+    private async Task<byte[]> ReadAudioPartAsync(
+        GroupCallDocument groupCall,
+        MediaManifest audioManifest,
+        List<HlsFragment> audioFragments)
+    {
+        var audioBytes = await ReadFragmentsAsync(groupCall, audioManifest, audioFragments);
+        return WrapTelegramVideoStreamPart(await muxer.MuxAsync(null, audioBytes), DefaultTelegramStreamContainer);
+    }
+
+    private async Task<byte[]?> TryReadAudioForAsync(GroupCallDocument groupCall, TInputGroupCallStream location, MediaManifest videoManifest)
+    {
+        var audioManifest = await GetMediaManifestAsync(groupCall, video: false, AudioChannel, forceRefresh: false);
+        if (audioManifest.ChildManifestUrl == videoManifest.ChildManifestUrl)
+        {
+            return null; // the stream has no separate audio rendition
+        }
+
+        List<HlsFragment> audioFragments;
+        try
+        {
+            audioFragments = SelectFragments(audioManifest, location.TimeMs, location.Scale);
+        }
+        catch (RpcException)
+        {
+            return null;
+        }
+
+        return audioFragments.Count == 0 ? null : await ReadFragmentsAsync(groupCall, audioManifest, audioFragments);
     }
 
     private async Task<byte[]> ReadFragmentsAsync(
@@ -852,7 +929,10 @@ public sealed class HlsGroupCallStreamService(
 
     private static string ResolveHlsUrl(string parentUrl, string childUri)
     {
-        return Uri.TryCreate(childUri, UriKind.Absolute, out var absolute)
+        // On Linux a rooted path such as mediamtx's "/live/<key>/index.m3u8?cookieCheck=1" redirect also
+        // parses as an absolute (file://) URI, so only http(s) counts as absolute here.
+        return Uri.TryCreate(childUri, UriKind.Absolute, out var absolute) &&
+               (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps)
             ? absolute.ToString()
             : new Uri(new Uri(parentUrl), childUri).ToString();
     }
@@ -879,15 +959,21 @@ public sealed class HlsGroupCallStreamService(
                !string.IsNullOrWhiteSpace(groupCall.RtmpStreamKey);
     }
 
+    internal static string ResolveHlsUrlForTests(string parentUrl, string childUri) => ResolveHlsUrl(parentUrl, childUri);
+
+    internal static byte[] WrapTelegramVideoStreamPartForTests(byte[] media) => WrapTelegramVideoStreamPart(media, DefaultTelegramStreamContainer);
+
     private static byte[] WrapTelegramVideoStreamPart(IReadOnlyCollection<byte> mediaBytes, string container)
     {
         var result = new List<byte>(mediaBytes.Count + 64);
         WriteInt32(result, TelegramVideoStreamPartSignature);
         WriteSerializedString(result, container);
-        WriteInt32(result, 1); // activeMask; current clients do not inspect it, but Telegram uses a non-zero mask.
-        WriteInt32(result, 1); // event count; current Android client parses exactly one event.
+        // The header as Telegram writes it for an RTMP stream (captured 2026-11-01): activeMask 0, one event
+        // at media offset 0 with an empty endpoint id, rotation 0, extra 0.
+        WriteInt32(result, 0); // activeMask
+        WriteInt32(result, 1); // event count
         WriteInt32(result, 0); // media offset after the stream-info header is consumed
-        WriteSerializedString(result, TelegramUnifiedEndpoint);
+        WriteSerializedString(result, string.Empty);
         WriteInt32(result, 0); // rotation
         WriteInt32(result, 0); // extra
         result.AddRange(mediaBytes);

@@ -131,6 +131,13 @@ public static class PhoneTestFixtures
                 continue;
             }
 
+            if (parameterType == typeof(global::EventFlow.Queries.IQueryProcessor))
+            {
+                // No read model answers: a channel looked up through it is not a broadcast channel.
+                filled[i] = new Mock<global::EventFlow.Queries.IQueryProcessor>(MockBehavior.Loose).Object;
+                continue;
+            }
+
             if (parameterType == typeof(ITopPeerUsageRecorder))
             {
                 filled[i] = new Mock<ITopPeerUsageRecorder>(MockBehavior.Loose).Object;
