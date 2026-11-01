@@ -30,7 +30,11 @@ public sealed class HlsGroupCallStreamService(
     // Clients start two seconds behind last_timestamp_ms, while HLS segment
     // timestamps can be offset from exact second boundaries.
     private const int InitialBackfillWindowMs = 3_000;
-    private const int TimestampToleranceMs = 250;
+    // PROGRAM-DATE-TIME and part durations are rounded to the millisecond.
+    private const int TimestampToleranceMs = 20;
+    // Android downloads a part with a single 128 KB upload.getFile (VoIPService.onRequestBroadcastPart).
+    private const int MaxPartBytes = 128 * 1024;
+    private const int TelegramPartHeaderBytes = 0x20;
     private static readonly TimeSpan ChildManifestCacheTtl = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan MediaManifestCacheTtl = TimeSpan.FromMilliseconds(500);
     private static readonly TimeSpan InitFragmentCacheTtl = TimeSpan.FromMinutes(5);
@@ -63,8 +67,8 @@ public sealed class HlsGroupCallStreamService(
         try
         {
             var manifest = await WaitForInitialBackfillWindowAsync(groupCall, video: true, VideoChannel);
-            var lastTimestamp = MaxTimestamp(manifest.LatestSegmentTimestampMs, manifest.LatestPartTimestampMs);
-            if (lastTimestamp is null)
+            var lastEnd = MaxTimestamp(manifest.LatestSegmentEndTimestampMs, manifest.LatestPartEndTimestampMs);
+            if (lastEnd is null)
             {
                 logger.LogWarning(
                     "No stream data available for group call {CallId}: Segments={Segments}, Parts={Parts}, LatestSegmentTs={LatestSegmentTs}, LatestPartTs={LatestPartTs}",
@@ -80,7 +84,7 @@ public sealed class HlsGroupCallStreamService(
                 "Returning group call stream channel: CallId={CallId}, Oldest={Oldest}, Latest={Latest}, Segments={Segments}, Parts={Parts}",
                 groupCall.CallId,
                 OldestTimestamp(manifest),
-                lastTimestamp.Value,
+                LastCompletePartTimestamp(lastEnd.Value),
                 manifest.Segments.Count,
                 manifest.Parts.Count);
 
@@ -88,13 +92,13 @@ public sealed class HlsGroupCallStreamService(
             // the stream has an audio rendition of its own.
             var channels = new List<HlsGroupCallStreamChannel>
             {
-                new(VideoChannel, VideoScale, lastTimestamp.Value)
+                new(VideoChannel, VideoScale, LastCompletePartTimestamp(lastEnd.Value))
             };
             var audio = await GetMediaManifestAsync(groupCall, video: false, AudioChannel, forceRefresh: false);
-            var lastAudioTimestamp = MaxTimestamp(audio.LatestSegmentTimestampMs, audio.LatestPartTimestampMs);
-            if (audio.ChildManifestUrl != manifest.ChildManifestUrl && lastAudioTimestamp is not null)
+            var lastAudioEnd = MaxTimestamp(audio.LatestSegmentEndTimestampMs, audio.LatestPartEndTimestampMs);
+            if (audio.ChildManifestUrl != manifest.ChildManifestUrl && lastAudioEnd is not null)
             {
-                channels.Add(new HlsGroupCallStreamChannel(AudioChannel, VideoScale, lastAudioTimestamp.Value));
+                channels.Add(new HlsGroupCallStreamChannel(AudioChannel, VideoScale, LastCompletePartTimestamp(lastAudioEnd.Value)));
             }
 
             return channels;
@@ -116,31 +120,20 @@ public sealed class HlsGroupCallStreamService(
 
         var video = location.VideoChannel.GetValueOrDefault() > 0;
         var channel = video ? location.VideoChannel.GetValueOrDefault() : 0;
+        var durationMs = SegmentDurationMs >> Math.Clamp(location.Scale, 0, 10);
         for (var attempt = 0; attempt < 2; attempt++)
         {
-            var manifest = await GetMediaManifestAsync(groupCall, video, channel, forceRefresh: attempt > 0);
-            var fragments = SelectFragments(manifest, location.TimeMs, location.Scale);
-            if (fragments.Count == 0)
-            {
-                ThrowTimeTooBig();
-                return [];
-            }
-
             try
             {
-                var result = await ReadCachedPartAsync(groupCall, location, video, channel, manifest, fragments);
+                var result = await ReadCachedPartAsync(groupCall, video, channel, location.TimeMs, durationMs, refresh: attempt > 0);
 
                 logger.LogInformation(
-                    "Returning group call HLS chunk: CallId={CallId}, TimeMs={TimeMs}, Scale={Scale}, VideoChannel={VideoChannel}, VideoQuality={VideoQuality}, Container={Container}, Manifest={Manifest}, Fragments={Fragments}, FragmentTimes={FragmentTimes}, Bytes={Bytes}",
+                    "Returning group call HLS chunk: CallId={CallId}, TimeMs={TimeMs}, Scale={Scale}, VideoChannel={VideoChannel}, VideoQuality={VideoQuality}, Bytes={Bytes}",
                     groupCall.CallId,
                     location.TimeMs,
                     location.Scale,
                     location.VideoChannel,
                     location.VideoQuality,
-                    manifest.Container,
-                    manifest.ChildManifestUrl,
-                    fragments.Count,
-                    string.Join(',', fragments.Select(fragment => fragment.TimestampMs)),
                     result.Length);
 
                 return result;
@@ -157,11 +150,10 @@ public sealed class HlsGroupCallStreamService(
 
                 logger.LogInformation(
                     ex,
-                    "Refreshing HLS manifest after a failed fragment read: CallId={CallId}, TimeMs={TimeMs}, StatusCode={StatusCode}, Manifest={Manifest}",
+                    "Refreshing HLS manifest after a failed fragment read: CallId={CallId}, TimeMs={TimeMs}, StatusCode={StatusCode}",
                     groupCall.CallId,
                     location.TimeMs,
-                    ex.StatusCode,
-                    manifest.ChildManifestUrl);
+                    ex.StatusCode);
             }
         }
 
@@ -169,78 +161,80 @@ public sealed class HlsGroupCallStreamService(
         return [];
     }
 
-    private Task<byte[]> ReadCachedPartAsync(
+    private async Task<byte[]> ReadCachedPartAsync(
         GroupCallDocument groupCall,
-        TInputGroupCallStream location,
         bool video,
         int channel,
-        MediaManifest manifest,
-        List<HlsFragment> fragments)
+        long fromMs,
+        int durationMs,
+        bool refresh)
     {
+        // The window has to be complete before a part is built: tgcalls plays each part as exactly its
+        // duration, so a part cut short at the live edge would be a hole that is never filled.
+        var toMs = fromMs + durationMs;
+        var manifest = await GetMediaManifestAsync(groupCall, video, channel, refresh);
+        var fragments = SelectWindow(manifest, fromMs, toMs, startOnKeyframe: video);
+        MediaManifest? audioManifest = null;
+        List<HlsFragment>? audioFragments = null;
+        if (video)
+        {
+            audioManifest = await GetMediaManifestAsync(groupCall, video: false, AudioChannel, refresh);
+            if (audioManifest.ChildManifestUrl == manifest.ChildManifestUrl)
+            {
+                audioManifest = null; // the stream has no separate audio rendition
+            }
+            else
+            {
+                audioFragments = SelectWindow(audioManifest, fromMs, toMs, startOnKeyframe: false);
+            }
+        }
+
         var now = DateTimeOffset.UtcNow;
-        var key = $"{groupCall.CallId}:{video}:{channel}:{location.Scale}:{fragments[0].Uri}:{fragments.Count}";
         foreach (var expired in _partCache.Where(entry => entry.Value.ExpiresAt <= now).Select(entry => entry.Key).ToList())
         {
             _partCache.TryRemove(expired, out _);
         }
 
+        var key = $"{groupCall.CallId}:{video}:{channel}:{fromMs}:{durationMs}";
         var entry = _partCache.GetOrAdd(key, _ => (
-            new Lazy<Task<byte[]>>(() => video
-                ? ReadUnifiedVideoPartAsync(groupCall, location, manifest, fragments)
-                : ReadAudioPartAsync(groupCall, manifest, fragments)),
+            new Lazy<Task<byte[]>>(() => BuildPartAsync(groupCall, video, manifest, fragments, audioManifest, audioFragments, fromMs, durationMs)),
             now.Add(PartCacheTtl)));
-        var part = entry.Part.Value;
-        if (part.IsFaulted || part.IsCanceled)
+        try
         {
-            _partCache.TryRemove(key, out _);
+            return await entry.Part.Value;
         }
-
-        return part;
+        catch
+        {
+            _partCache.TryRemove(new KeyValuePair<string, (Lazy<Task<byte[]>>, DateTimeOffset)>(key, entry));
+            throw;
+        }
     }
 
     /// <summary>
-    /// The video channel's part, which tgcalls plays as a unified broadcast: the video fragments and the
-    /// audio of the same time span in one MP4.
+    /// The video channel's part is what tgcalls plays as a unified broadcast: the video and the audio of the
+    /// same time span in one MP4. The audio channel's part is the audio alone.
     /// </summary>
-    private async Task<byte[]> ReadUnifiedVideoPartAsync(
+    private async Task<byte[]> BuildPartAsync(
         GroupCallDocument groupCall,
-        TInputGroupCallStream location,
-        MediaManifest videoManifest,
-        List<HlsFragment> videoFragments)
+        bool video,
+        MediaManifest manifest,
+        List<HlsFragment> fragments,
+        MediaManifest? audioManifest,
+        List<HlsFragment>? audioFragments,
+        long fromMs,
+        int durationMs)
     {
-        var videoBytes = await ReadFragmentsAsync(groupCall, videoManifest, videoFragments);
-        var audioBytes = await TryReadAudioForAsync(groupCall, location, videoManifest);
-        return WrapTelegramVideoStreamPart(await muxer.MuxAsync(videoBytes, audioBytes), DefaultTelegramStreamContainer);
-    }
-
-    private async Task<byte[]> ReadAudioPartAsync(
-        GroupCallDocument groupCall,
-        MediaManifest audioManifest,
-        List<HlsFragment> audioFragments)
-    {
-        var audioBytes = await ReadFragmentsAsync(groupCall, audioManifest, audioFragments);
-        return WrapTelegramVideoStreamPart(await muxer.MuxAsync(null, audioBytes), DefaultTelegramStreamContainer);
-    }
-
-    private async Task<byte[]?> TryReadAudioForAsync(GroupCallDocument groupCall, TInputGroupCallStream location, MediaManifest videoManifest)
-    {
-        var audioManifest = await GetMediaManifestAsync(groupCall, video: false, AudioChannel, forceRefresh: false);
-        if (audioManifest.ChildManifestUrl == videoManifest.ChildManifestUrl)
+        var main = new StreamPartInput(await ReadFragmentsAsync(groupCall, manifest, fragments), fragments[0].TimestampMs);
+        StreamPartInput? audio = null;
+        if (audioManifest != null && audioFragments != null)
         {
-            return null; // the stream has no separate audio rendition
+            audio = new StreamPartInput(await ReadFragmentsAsync(groupCall, audioManifest, audioFragments), audioFragments[0].TimestampMs);
         }
 
-        List<HlsFragment> audioFragments;
-        try
-        {
-            audioFragments = SelectFragments(audioManifest, location.TimeMs, location.Scale);
-        }
-        catch (RpcException)
-        {
-            return null;
-        }
-
-        return audioFragments.Count == 0 ? null : await ReadFragmentsAsync(groupCall, audioManifest, audioFragments);
+        var media = video
+            ? await muxer.BuildAsync(main, audio, fromMs, durationMs, MaxPartBytes - TelegramPartHeaderBytes)
+            : await muxer.BuildAsync(null, main, fromMs, durationMs, MaxPartBytes - TelegramPartHeaderBytes);
+        return WrapTelegramVideoStreamPart(media, DefaultTelegramStreamContainer);
     }
 
     private async Task<byte[]> ReadFragmentsAsync(
@@ -487,110 +481,46 @@ public sealed class HlsGroupCallStreamService(
         return code is >= 300 and < 400;
     }
 
-    private List<HlsFragment> SelectFragments(MediaManifest manifest, long requestedTimeMs, int scale)
+    /// <summary>
+    /// The fragments that cover <c>[fromMs, toMs)</c>, starting, for video, at the keyframe at or before
+    /// <paramref name="fromMs"/>. LL-HLS parts are preferred; older times fall back to whole segments (each of
+    /// which starts on a keyframe), followed by the parts after the last complete segment.
+    /// </summary>
+    internal static List<HlsFragment> SelectWindow(MediaManifest manifest, long fromMs, long toMs, bool startOnKeyframe)
     {
-        var durationMs = SegmentDurationMs >> Math.Clamp(scale, 0, 10);
-        var candidates = manifest.Parts.Count > 0
-            ? manifest.Parts
-            : manifest.Segments;
-        if (ShouldUseFullSegmentsForOlderRequest(manifest, requestedTimeMs, durationMs))
+        var end = MaxTimestamp(manifest.LatestSegmentEndTimestampMs, manifest.LatestPartEndTimestampMs);
+        if (end is null || toMs > end.Value + TimestampToleranceMs)
         {
-            candidates = manifest.Segments;
+            ThrowTimeTooBig();
         }
 
-        if (candidates.Count == 0 && manifest.Parts.Count > 0)
-        {
-            candidates = manifest.Parts;
-        }
-
-        if (candidates.Count == 0)
-        {
-            return [];
-        }
-
-        var oldest = candidates[0];
-        var start = requestedTimeMs <= 0
-            ? candidates[^1].TimestampMs
-            : AlignRequestedTimeToFragmentGrid(requestedTimeMs, durationMs, candidates);
-        var end = start + durationMs;
-        if (requestedTimeMs > 0 && start < oldest.TimestampMs - TimestampToleranceMs)
-        {
-            var deltaMs = oldest.TimestampMs - start;
-            logger.LogInformation(
-                "Rejecting stale group call HLS request: RequestedTimeMs={RequestedTimeMs}, AlignedStartMs={AlignedStartMs}, OldestTimeMs={OldestTimeMs}, DeltaMs={DeltaMs}",
-                requestedTimeMs,
-                start,
-                oldest.TimestampMs,
-                deltaMs);
-            ThrowTimeTooSmall();
-            return [];
-        }
-
-        var newest = candidates[^1];
-        if (requestedTimeMs > 0 && start > newest.TimestampMs + TimestampToleranceMs)
-        {
-            return [];
-        }
-
-        if (candidates != manifest.Parts)
-        {
-            var selected = candidates
-                .OrderBy(fragment => Math.Abs(fragment.TimestampMs - start))
-                .FirstOrDefault();
-
-            return selected is null ? [] : [selected];
-        }
-
-        var fragments = candidates
-            .Where(fragment =>
-                fragment.TimestampMs < end + TimestampToleranceMs &&
-                fragment.TimestampMs + fragment.DurationMs > start - TimestampToleranceMs)
+        var segmentEnd = manifest.LatestSegmentEndTimestampMs ?? long.MinValue;
+        var timeline = manifest.Segments
+            .Concat(manifest.Parts.Where(part => part.TimestampMs >= segmentEnd - TimestampToleranceMs))
             .ToList();
-
-        return fragments.Count == 0
-            ? [candidates.LastOrDefault(fragment => fragment.TimestampMs <= end + TimestampToleranceMs) ?? candidates[0]]
-            : fragments;
-    }
-
-    private static long OverlapMs(long firstStart, long firstEnd, long secondStart, long secondEnd)
-    {
-        return Math.Max(0, Math.Min(firstEnd, secondEnd) - Math.Max(firstStart, secondStart));
-    }
-
-    private static long AlignRequestedTimeToFragmentGrid(long requestedTimeMs, int durationMs, List<HlsFragment> candidates)
-    {
-        if (durationMs <= 0 || candidates.Count == 0)
+        foreach (var candidates in new[] { manifest.Parts, timeline })
         {
-            return requestedTimeMs;
+            var first = candidates.FindLastIndex(fragment =>
+                fragment.TimestampMs <= fromMs + TimestampToleranceMs && (!startOnKeyframe || fragment.Independent));
+            if (first < 0)
+            {
+                continue;
+            }
+
+            var fragments = candidates.Skip(first).TakeWhile(fragment => fragment.TimestampMs < toMs).ToList();
+            var last = fragments[^1];
+            if (last.TimestampMs + last.DurationMs + TimestampToleranceMs >= toMs)
+            {
+                return fragments;
+            }
         }
 
-        var offset = PositiveModulo(candidates[^1].TimestampMs, durationMs);
-        var aligned = requestedTimeMs - PositiveModulo(requestedTimeMs - offset, durationMs);
-
-        return aligned;
+        ThrowTimeTooSmall();
+        return [];
     }
 
-    private static long PositiveModulo(long value, long modulo)
-    {
-        var result = value % modulo;
-        return result < 0 ? result + modulo : result;
-    }
-
-    private static bool ShouldUseFullSegmentsForOlderRequest(MediaManifest manifest, long requestedTimeMs, int durationMs)
-    {
-        if (manifest.Parts.Count == 0 ||
-            manifest.Segments.Count == 0 ||
-            requestedTimeMs <= 0 ||
-            requestedTimeMs >= manifest.Parts[0].TimestampMs - TimestampToleranceMs)
-        {
-            return false;
-        }
-
-        var segment = manifest.Segments.LastOrDefault(fragment => fragment.TimestampMs <= requestedTimeMs + TimestampToleranceMs) ??
-                      manifest.Segments[0];
-
-        return segment.DurationMs <= durationMs + TimestampToleranceMs;
-    }
+    /// <summary>The start of the newest complete part on the part grid, which is what clients ask for next.</summary>
+    internal static long LastCompletePartTimestamp(long endMs) => endMs / SegmentDurationMs * SegmentDurationMs - SegmentDurationMs;
 
     private static bool HasInitialBackfillWindow(MediaManifest manifest)
     {
@@ -646,7 +576,8 @@ public sealed class HlsGroupCallStreamService(
                 }
 
                 var durationMs = ParseDurationAttributeMs(line, "DURATION") ?? 200;
-                parts.Add(new HlsFragment(uri, partCursorMs.Value, durationMs));
+                parts.Add(new HlsFragment(uri, partCursorMs.Value, durationMs,
+                    line.Contains("INDEPENDENT=YES", StringComparison.OrdinalIgnoreCase)));
                 partCursorMs += durationMs;
                 continue;
             }
@@ -674,7 +605,7 @@ public sealed class HlsGroupCallStreamService(
 
         var fixedSegments = FillMissingSegmentTimestamps(segments)
             .Where(fragment => fragment.TimestampMs != null)
-            .Select(fragment => new HlsFragment(fragment.Uri, fragment.TimestampMs!.Value, fragment.DurationMs))
+            .Select(fragment => new HlsFragment(fragment.Uri, fragment.TimestampMs!.Value, fragment.DurationMs, Independent: true))
             .ToList();
 
         return new MediaManifest(childManifestUrl, InferContainer(lines), initUri, fixedSegments, parts);
@@ -959,6 +890,9 @@ public sealed class HlsGroupCallStreamService(
                !string.IsNullOrWhiteSpace(groupCall.RtmpStreamKey);
     }
 
+    internal MediaManifest ParseMediaManifestForTests(string childManifestUrl, string manifestText) =>
+        ParseMediaManifest(childManifestUrl, manifestText);
+
     internal static string ResolveHlsUrlForTests(string parentUrl, string childUri) => ResolveHlsUrl(parentUrl, childUri);
 
     internal static byte[] WrapTelegramVideoStreamPartForTests(byte[] media) => WrapTelegramVideoStreamPart(media, DefaultTelegramStreamContainer);
@@ -1053,4 +987,4 @@ internal sealed record MediaManifest(
     public long? LatestPartEndTimestampMs => Parts.Count == 0 ? null : Parts[^1].TimestampMs + Parts[^1].DurationMs;
 }
 
-internal sealed record HlsFragment(string Uri, long TimestampMs, int DurationMs);
+internal sealed record HlsFragment(string Uri, long TimestampMs, int DurationMs, bool Independent);
