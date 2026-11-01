@@ -4,5 +4,6 @@
 ./4.build-sms-sender.sh
 ./5.build-gateway-server.sh
 ./6.build-auth-server.sh
-./7.build-data-seeder.sh./8.build-sfu.sh
+./7.build-data-seeder.sh
+./8.build-sfu.sh
 ./9.build-reflector.sh
