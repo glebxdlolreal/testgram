@@ -564,9 +564,8 @@ internal static class GroupCallStateHelper
     /// <summary>
     /// The connection parameters a joined client needs. RTMP calls are played in stream mode
     /// (<c>{"stream":true,"rtmp":true}</c>, see https://corefork.telegram.org/api/group-calls#detecting-stream-mode).
-    /// Every other call needs the Jingle transport of a media server (SFU), and there is none deployed yet,
-    /// so null is returned instead of transport data no server answers: the join is recorded and pushed,
-    /// and the client stays "connecting" until the SFU exists.
+    /// Every other call needs the Jingle transport of the media server (<see cref="CreateSfuConnectionUpdate"/>),
+    /// so null is returned for it here.
     /// </summary>
     public static TUpdateGroupCallConnection? CreateConnectionUpdate(
         GroupCallDocument call,
@@ -589,6 +588,32 @@ internal static class GroupCallStateHelper
             Params = new TDataJSON { Data = streamJson }
         };
     }
+
+    /// <summary>
+    /// The connection parameters for a call carried by the SFU, in the shape Telegram's own SFU answers
+    /// (captured 2026-11-01): its Jingle <c>transport</c> plus the <c>audio</c> payload types and header
+    /// extensions. tgcalls reads only <c>transport</c> (and <c>video</c>, which is not offered yet).
+    /// </summary>
+    public static TUpdateGroupCallConnection CreateSfuConnectionUpdate(
+        System.Text.Json.Nodes.JsonObject transport,
+        bool presentation = false)
+    {
+        var connection = new System.Text.Json.Nodes.JsonObject
+        {
+            ["transport"] = transport.DeepClone(),
+            ["audio"] = System.Text.Json.Nodes.JsonNode.Parse(SfuAudioDescription)
+        };
+
+        return new TUpdateGroupCallConnection
+        {
+            Presentation = presentation,
+            Params = new TDataJSON { Data = connection.ToJsonString() }
+        };
+    }
+
+    private const string SfuAudioDescription = """
+        {"payload-types":[{"id":111,"name":"opus","clockrate":48000,"channels":2,"parameters":{"minptime":10,"useinbandfec":1},"rtcp-fbs":[{"type":"transport-cc"}]},{"id":126,"name":"telephone-event","clockrate":8000,"channels":1}],"rtp-hdrexts":[{"id":1,"uri":"urn:ietf:params:rtp-hdrext:ssrc-audio-level"},{"id":2,"uri":"http://www.webrtc.org/experiments/rtp-hdrext/abs-send-time"},{"id":3,"uri":"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01"}]}
+        """;
 
     public static int CreateParticipantSource(string? paramsJson, GroupCallDocument call, long userId)
     {

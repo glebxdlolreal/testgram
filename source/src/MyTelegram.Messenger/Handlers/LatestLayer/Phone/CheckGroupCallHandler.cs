@@ -18,7 +18,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class CheckGroupCallHandler(
     IMongoDatabase mongoDatabase,
-    IAccessHashHelper2 accessHashHelper2)
+    IAccessHashHelper2 accessHashHelper2,
+    IGroupCallMediaServer mediaServer)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestCheckGroupCall, TVector<int>>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -38,7 +39,11 @@ internal sealed class CheckGroupCallHandler(
             return null!;
         }
 
-        var sources = GroupCallStateHelper.GetForwardedSources(groupCall.Participants);
+        // The answer is what the media server actually holds: tgcalls rejoins when its own source is
+        // missing from it. Without an SFU (or when it cannot be asked) the joined sources stand in.
+        IReadOnlySet<int> sources = !groupCall.RtmpStream && await mediaServer.GetSourcesAsync(groupCall.CallId) is { } live
+            ? live
+            : GroupCallStateHelper.GetForwardedSources(groupCall.Participants);
         return new TVector<int>(obj.Sources.Where(sources.Contains));
     }
 }

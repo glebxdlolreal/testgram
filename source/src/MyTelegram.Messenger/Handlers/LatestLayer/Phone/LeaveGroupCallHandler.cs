@@ -10,7 +10,8 @@ internal sealed class LeaveGroupCallHandler(
     IMongoDatabase mongoDatabase,
     IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
-    IObjectMessageSender objectMessageSender)
+    IObjectMessageSender objectMessageSender,
+    IGroupCallMediaServer mediaServer)
     : RpcResultObjectHandler<RequestLeaveGroupCall, IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -52,6 +53,7 @@ internal sealed class LeaveGroupCallHandler(
             }
 
             groupCall = updated;
+            await mediaServer.LeaveAsync(groupCall.CallId, input.UserId);
             removed.Left = true;
             removed.Muted = false;
             removed.RaiseHand = false;

@@ -25,7 +25,8 @@ internal sealed class DiscardGroupCallHandler(
     IPeerHelper peerHelper,
     IObjectMessageSender objectMessageSender,
     IMessageAppService messageAppService,
-    IChannelAdminRightsChecker channelAdminRightsChecker)
+    IChannelAdminRightsChecker channelAdminRightsChecker,
+    IGroupCallMediaServer mediaServer)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestDiscardGroupCall, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -58,6 +59,7 @@ internal sealed class DiscardGroupCallHandler(
         groupCall.Version++;
         var date = GroupCallStateHelper.CurrentDate();
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
+        await mediaServer.EndAsync(groupCall.CallId);
         var updateGroupCall = new TUpdateGroupCall
         {
             LiveStory = groupCall.LiveStory,

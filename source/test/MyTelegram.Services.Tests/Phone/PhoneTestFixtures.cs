@@ -192,6 +192,11 @@ public static class PhoneTestFixtures
             return PermissiveAdminRightsChecker();
         }
 
+        if (parameterType == typeof(IGroupCallMediaServer))
+        {
+            return new FakeGroupCallMediaServer { IsConfigured = false };
+        }
+
         return null;
     }
 
@@ -773,4 +778,69 @@ public static class FakeUserAppService
         mock.SetupGet(x => x.Bot).Returns(isBot);
         return mock.Object;
     }
+}
+
+/// <summary>
+/// A recording <see cref="IGroupCallMediaServer"/>. Unconfigured by default, i.e. no SFU deployed.
+/// </summary>
+public sealed class FakeGroupCallMediaServer : IGroupCallMediaServer
+{
+    public bool IsConfigured { get; set; } = true;
+
+    /// <summary>Throw this from <see cref="JoinAsync"/> instead of answering.</summary>
+    public Exception? JoinFailure { get; set; }
+
+    public HashSet<int> Sources { get; } = new();
+
+    public List<(long CallId, long UserId, string Params)> Joins { get; } = new();
+
+    public List<(long CallId, long UserId)> Leaves { get; } = new();
+
+    public List<long> Ends { get; } = new();
+
+    public Task<System.Text.Json.Nodes.JsonObject> JoinAsync(long callId, long userId, string paramsJson,
+        CancellationToken cancellationToken = default)
+    {
+        if (JoinFailure != null)
+        {
+            return Task.FromException<System.Text.Json.Nodes.JsonObject>(JoinFailure);
+        }
+
+        Joins.Add((callId, userId, paramsJson));
+        return Task.FromResult(new System.Text.Json.Nodes.JsonObject
+        {
+            ["xmlns"] = "urn:xmpp:jingle:transports:ice-udp:1",
+            ["ufrag"] = "sfuufrag",
+            ["pwd"] = "sfupwd",
+            ["rtcp-mux"] = true,
+            ["fingerprints"] = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject
+            {
+                ["hash"] = "sha-256",
+                ["fingerprint"] = "AA:BB",
+                ["setup"] = "passive"
+            }),
+            ["candidates"] = new System.Text.Json.Nodes.JsonArray(new System.Text.Json.Nodes.JsonObject
+            {
+                ["ip"] = "203.0.113.7",
+                ["port"] = "32000",
+                ["protocol"] = "udp",
+                ["type"] = "host"
+            })
+        });
+    }
+
+    public Task LeaveAsync(long callId, long userId, CancellationToken cancellationToken = default)
+    {
+        Leaves.Add((callId, userId));
+        return Task.CompletedTask;
+    }
+
+    public Task EndAsync(long callId, CancellationToken cancellationToken = default)
+    {
+        Ends.Add(callId);
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlySet<int>?> GetSourcesAsync(long callId, CancellationToken cancellationToken = default)
+        => Task.FromResult<IReadOnlySet<int>?>(IsConfigured ? Sources : null);
 }

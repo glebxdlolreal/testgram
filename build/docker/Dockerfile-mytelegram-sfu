@@ -1,0 +1,14 @@
+# Testgram's selective forwarding unit for group calls (source/sfu, Go + pion).
+FROM golang:1.25-alpine AS build
+WORKDIR /src
+COPY sfu/go.mod sfu/go.sum ./
+RUN go mod download
+COPY sfu/ ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/sfu .
+
+FROM scratch
+COPY --from=build /out/sfu /sfu
+# Media: one UDP port for every participant (Telegram's SFU uses 32000). API: internal only.
+EXPOSE 32000/udp 8090/tcp
+USER 65534:65534
+ENTRYPOINT ["/sfu"]

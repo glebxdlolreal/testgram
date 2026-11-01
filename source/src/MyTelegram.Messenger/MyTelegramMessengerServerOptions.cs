@@ -61,6 +61,7 @@ public class MyTelegramMessengerServerOptions
     public StatsConfig Stats { get; set; } = new();
     public RatesConfig Rates { get; set; } = new();
     public CallsConfig Calls { get; set; } = new();
+    public GroupCallSfuConfig GroupCallSfu { get; set; } = new();
     public WebAppsConfig WebApps { get; set; } = new();
     public VideoProcessingConfig VideoProcessing { get; set; } = new();
     public AccountDeletionConfig AccountDeletion { get; set; } = new();

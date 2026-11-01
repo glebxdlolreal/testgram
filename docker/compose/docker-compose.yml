@@ -139,6 +139,22 @@ services:
       --static-auth-secret ${App__WebRtcConnections__0__AuthSecret:?set App__WebRtcConnections__0__AuthSecret in .env (TURN REST secret)}
       --log-file stdout
 
+  ### SFU (selective forwarding unit) for group calls: ICE + DTLS-SRTP with every participant,
+  ### forwards audio by SSRC. Built from source/sfu (build/docker/8.build-sfu.sh).
+  sfu:
+    image: ${MyTelegramRegistry}/mytelegram-sfu:${MyTelegramVersion}
+    platform: ${DOCKER_PLATFORM:-linux/amd64}
+    restart: always
+    networks:
+      - tg-net
+    ports:
+      # Media for every participant on one UDP port, like Telegram's SFU. The API (8090) stays internal.
+      - "${App__GroupCallSfu__UdpPort:-32000}:32000/udp"
+    environment:
+      SFU_PUBLIC_IP: ${App__GroupCallSfu__PublicIp:-${App__WebRtcConnections__0__Ip}}
+      SFU_UDP_ADDR: ":32000"
+      SFU_HTTP_ADDR: ":8090"
+
   ### RTMP server for group calls and live stories
   rtmp-server:
     image: bluenviron/mediamtx:latest
@@ -512,6 +528,7 @@ services:
       App__WebRtcConnections__0__UserName: ${App__WebRtcConnections__0__UserName}
       App__WebRtcConnections__0__Password: ${App__WebRtcConnections__0__Password}
       App__WebRtcConnections__0__AuthSecret: ${App__WebRtcConnections__0__AuthSecret}
+      App__GroupCallSfu__Url: ${App__GroupCallSfu__Url:-http://sfu:8090}
       App__RtmpStreamUrl: ${App__RtmpStreamUrl}
       App__RtmpHlsUrl: ${App__RtmpHlsUrl}
       App__PasskeyRpId: ${App__PasskeyRpId}
@@ -641,6 +658,7 @@ services:
       App__WebRtcConnections__0__UserName: ${App__WebRtcConnections__0__UserName}
       App__WebRtcConnections__0__Password: ${App__WebRtcConnections__0__Password}
       App__WebRtcConnections__0__AuthSecret: ${App__WebRtcConnections__0__AuthSecret}
+      App__GroupCallSfu__Url: ${App__GroupCallSfu__Url:-http://sfu:8090}
       App__RtmpStreamUrl: ${App__RtmpStreamUrl}
       App__RtmpHlsUrl: ${App__RtmpHlsUrl}
       App__PasskeyRpId: ${App__PasskeyRpId}
