@@ -170,7 +170,8 @@ public sealed class ChannelDifferencePublicationTests
                 Mock.Of<IChatConverterService>(), Mock.Of<IUserConverterService>(), messageConverter.Object,
                 updates.Object, Mock.Of<IMinConstructorReducer>(), null!, null!);
             _handler = new GetChannelDifferenceHandler(messages.Object, this, Acks, converter,
-                NullLogger<GetChannelDifferenceHandler>.Instance, channels.Object, allocator.Object);
+                NullLogger<GetChannelDifferenceHandler>.Instance, channels.Object, allocator.Object,
+                Mock.Of<IChatInvitePeekService>());
         }
 
         public void AddDeletion()
