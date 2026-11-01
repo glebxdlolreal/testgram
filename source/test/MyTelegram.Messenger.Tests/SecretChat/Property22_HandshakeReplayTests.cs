@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Tests.TestDoubles;
 using EventFlow.Queries;
 using Microsoft.Extensions.Logging.Abstractions;
 using MongoDB.Bson;
@@ -468,7 +469,8 @@ internal sealed class DifferenceFixture
 
     public async Task InvokeAsync(long permAuthKeyId)
     {
-        var handler = new GetDifferenceHandler(new StubMessageAppService(),
+        var handler = new GetDifferenceHandler(new NoBotQtsCounter(),
+            new StubMessageAppService(),
             new StubPtsHelper(),
             QueryProcessor,
             Ack,

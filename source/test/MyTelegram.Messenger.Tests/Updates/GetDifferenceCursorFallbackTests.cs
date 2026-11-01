@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Tests.TestDoubles;
 using EventFlow.Queries;
 using MyTelegram.Core;
 using MyTelegram.Messenger.Handlers.LatestLayer.Updates;
@@ -95,6 +96,7 @@ public class GetDifferenceCursorFallbackTests
         public Task InvokeAsync()
         {
             var handler = new GetDifferenceHandler(
+                new NoBotQtsCounter(),
                 new StubMessageAppService(),
                 new StubPtsHelper(),
                 this,
