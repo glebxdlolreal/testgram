@@ -21,8 +21,7 @@ internal sealed class ToggleForumHandler(
     IMongoDatabase mongoDatabase,
     IPeerHelper peerHelper,
     IChannelAdminRightsChecker channelAdminRightsChecker,
-    IQueryProcessor queryProcessor,
-    IObjectMapper objectMapper) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestToggleForum, MyTelegram.Schema.IUpdates>
+    IChatConverterService chatConverterService) : RpcResultObjectHandler<MyTelegram.Schema.Channels.RequestToggleForum, MyTelegram.Schema.IUpdates>
 {
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Channels.RequestToggleForum obj)
     {
@@ -86,9 +85,9 @@ internal sealed class ToggleForumHandler(
         // Log to admin log
         await AdminLogHelper.LogToggleForum(mongoDatabase, channelId, input.UserId, obj.Enabled);
 
-        // Get updated channel
-        var channelReadModel = await queryProcessor.ProcessAsync(new GetChannelByIdQuery(channelId), default);
-        var channel = objectMapper.Map<IChannelReadModel, IChat>(channelReadModel!);
+        // Get updated channel; Forum and ForumTabs are set below because the cached read model may
+        // not have seen the direct write yet.
+        var channel = await chatConverterService.GetChannelAsync(input, channelId, false, null, input.Layer);
         if (channel is TChannel tChannel)
         {
             tChannel.Forum = obj.Enabled;
