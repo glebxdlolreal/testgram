@@ -191,12 +191,26 @@ func newLayerSelector() *layerSelector { return &layerSelector{current: -1} }
 
 // route decides what to do with a packet of the given layer when the viewer should be on
 // target. It returns the rewritten header and payload to send (nil when the packet is
-// dropped) and whether a keyframe of target has to be asked for.
+// dropped) and whether a keyframe of target has to be asked for. A negative target drops
+// everything.
 func (s *layerSelector) route(layer, target int, baseSsrc uint32, h *rtp.Header, payload []byte, now time.Time) (*rtp.Header, []byte, bool) {
+	return s.forward(layer, target, baseSsrc, h, payload, now, nil)
+}
+
+// forward is route that also hands the packet to send while still holding the selector's lock:
+// the layers arrive on separate goroutines, and the order packets are numbered in must be the
+// order they leave in.
+func (s *layerSelector) forward(layer, target int, baseSsrc uint32, h *rtp.Header, payload []byte, now time.Time,
+	send func(*rtp.Header, []byte)) (*rtp.Header, []byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	codec := codecOf(h.PayloadType)
+	if target < 0 {
+		// The viewer does not show this camera now; it needs a keyframe to start again.
+		s.current = -1
+		return nil, nil, false
+	}
 	ask := false
 	if layer != s.current {
 		// Move only at a keyframe; until one comes, keep the viewer on the layer it has. A
@@ -234,6 +248,9 @@ func (s *layerSelector) route(layer, target int, baseSsrc uint32, h *rtp.Header,
 		}
 	}
 	s.remember(&out, codec, payload, now)
+	if send != nil {
+		send(&out, payload)
+	}
 	return &out, payload, ask
 }
 

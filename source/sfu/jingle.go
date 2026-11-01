@@ -142,7 +142,7 @@ func (p *JoinParams) VideoSsrcs() (main uint32, rtx uint32, ok bool) {
 // RemoteAnswer turns the client's join params into the SDP answer the SFU's
 // offer needs. setup:passive makes the SFU the DTLS client, which is what the
 // client expects: tgcalls' GroupNetworkManager always runs DTLS as the server.
-func (p *JoinParams) RemoteAnswer(audioMid, videoMid string) string {
+func (p *JoinParams) RemoteAnswer(audioMid, videoMid, dataMid string) string {
 	fp := p.Fingerprints[0]
 	hash := fp.Hash
 	if hash == "" {
@@ -151,7 +151,7 @@ func (p *JoinParams) RemoteAnswer(audioMid, videoMid string) string {
 	ssrc := p.Ssrc32()
 	var b strings.Builder
 	b.WriteString("v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n")
-	fmt.Fprintf(&b, "a=group:BUNDLE %s %s\r\n", audioMid, videoMid)
+	fmt.Fprintf(&b, "a=group:BUNDLE %s %s %s\r\n", audioMid, videoMid, dataMid)
 	transport := func() {
 		b.WriteString("c=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\n")
 		fmt.Fprintf(&b, "a=ice-ufrag:%s\r\na=ice-pwd:%s\r\n", p.Ufrag, p.Pwd)
@@ -197,6 +197,10 @@ func (p *JoinParams) RemoteAnswer(audioMid, videoMid string) string {
 			fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", l.rtx, ssrc)
 		}
 	}
+	// tgcalls runs SCTP straight over the DTLS transport on port 5000, with no SDP of its own.
+	b.WriteString("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n")
+	transport()
+	fmt.Fprintf(&b, "a=mid:%s\r\na=sctp-port:5000\r\na=max-message-size:262144\r\n", dataMid)
 	return b.String()
 }
 

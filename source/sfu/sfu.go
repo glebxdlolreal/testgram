@@ -58,6 +58,10 @@ type Participant struct {
 	selMu     sync.Mutex
 	selectors map[*Participant]*layerSelector // per viewer
 
+	dc              atomic.Pointer[webrtc.DataChannel]
+	constraints     atomic.Pointer[receiverConstraints]
+	sentIdealHeight int // guarded by mu; -1 until the first SenderVideoConstraints
+
 	connected atomic.Bool
 	received  atomic.Uint64
 	forwarded atomic.Uint64
@@ -237,6 +241,8 @@ func (s *SFU) Join(callID int64, key string, params *JoinParams) (*JoinResult, e
 		sources:   map[uint32]struct{}{params.Ssrc32(): {}},
 		layerOf:   map[uint32]int{},
 		selectors: map[*Participant]*layerSelector{},
+
+		sentIdealHeight: -1,
 	}
 	if layers := params.VideoLayers(); len(layers) > 0 {
 		p.layers = layers
@@ -262,6 +268,11 @@ func (s *SFU) Join(callID int64, key string, params *JoinParams) (*JoinResult, e
 		return nil, err
 	}
 	go drainRTCP(videoSender)
+
+	if err := p.openDataChannel(); err != nil {
+		pc.Close()
+		return nil, err
+	}
 
 	pc.OnTrack(func(track *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		go p.receive(track)
@@ -313,11 +324,11 @@ func (s *SFU) Join(callID int64, key string, params *JoinParams) (*JoinResult, e
 		pc.Close()
 		return nil, err
 	}
-	if len(mids) != 2 {
+	if len(mids) != 3 {
 		pc.Close()
-		return nil, fmt.Errorf("offer has %d media sections, want audio and video", len(mids))
+		return nil, fmt.Errorf("offer has %d media sections, want audio, video and data", len(mids))
 	}
-	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: params.RemoteAnswer(mids[0], mids[1])}); err != nil {
+	if err := pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: params.RemoteAnswer(mids[0], mids[1], mids[2])}); err != nil {
 		pc.Close()
 		return nil, fmt.Errorf("client params do not form a usable answer: %w", err)
 	}
@@ -385,12 +396,14 @@ func (p *Participant) receive(track *webrtc.TrackRemote) {
 				continue
 			}
 			sel := p.selectorFor(other)
-			h, payload, ask := sel.route(layer, p.targetLayer(other, now), p.videoMain, &pkt.Header, pkt.Payload, now)
+			target := p.targetLayer(other, now)
+			_, _, ask := sel.forward(layer, target, p.videoMain, &pkt.Header, pkt.Payload, now, func(h *rtp.Header, payload []byte) {
+				if other.videoOut.write(h, payload) {
+					other.forwarded.Add(1)
+				}
+			})
 			if ask {
-				p.requestKeyframe(p.targetLayer(other, now))
-			}
-			if h != nil && other.videoOut.write(h, payload) {
-				other.forwarded.Add(1)
+				p.requestKeyframe(target)
 			}
 		}
 		p.call.mu.RUnlock()
@@ -413,11 +426,11 @@ func (p *Participant) selectorFor(viewer *Participant) *layerSelector {
 const layerActiveFor = time.Second
 
 // targetLayer is the layer a viewer should get from this camera: the highest one the camera is
-// sending, capped by what the viewer allows (all of them for now).
+// sending, capped by the viewer's ReceiverVideoConstraints. -1: the viewer wants none.
 func (p *Participant) targetLayer(viewer *Participant, now time.Time) int {
 	limit := viewer.maxLayerFor(p)
-	if limit >= len(p.layers) {
-		limit = len(p.layers) - 1
+	if limit < 0 {
+		return -1
 	}
 	for i := limit; i > 0; i-- {
 		if now.UnixNano()-p.layerSeen[i].Load() < int64(layerActiveFor) {
@@ -427,8 +440,10 @@ func (p *Participant) targetLayer(viewer *Participant, now time.Time) int {
 	return 0
 }
 
-// maxLayerFor is the highest layer the viewer accepts from a camera.
-func (viewer *Participant) maxLayerFor(_ *Participant) int { return 1 << 30 }
+// maxLayerFor is the highest layer the viewer accepts from a camera, -1 for none.
+func (viewer *Participant) maxLayerFor(camera *Participant) int {
+	return layerForHeight(viewer.constraints.Load().heightFor(camera.Endpoint), len(camera.layers))
+}
 
 // watchedLayers are the layers some viewer is currently getting.
 func (p *Participant) watchedLayers() []int {
@@ -490,6 +505,7 @@ func (s *SFU) Leave(callID int64, key string) bool {
 		for _, o := range others {
 			o.forgetViewer(p)
 		}
+		c.updateSenderConstraints()
 	}
 	if p != nil {
 		p.close()
@@ -579,6 +595,9 @@ type ParticipantStats struct {
 	Layers map[string]int `json:"layers,omitempty"`
 	// LayerKeyframes counts the keyframe requests sent for each of the camera's layers.
 	LayerKeyframes []uint64 `json:"layer_keyframe_requests,omitempty"`
+	DataChannel    bool     `json:"data_channel"`
+	// IdealHeight is the last SenderVideoConstraints sent to this camera (-1: none yet).
+	IdealHeight int `json:"ideal_height"`
 }
 
 func (s *SFU) Stats(callID int64) []ParticipantStats {
@@ -591,7 +610,11 @@ func (s *SFU) Stats(callID int64) []ParticipantStats {
 	out := []ParticipantStats{}
 	for _, p := range c.participants {
 		st := ParticipantStats{Key: p.Key, Source: int32(p.Source), Endpoint: p.Endpoint, Connected: p.connected.Load(),
-			Received: p.received.Load(), Forwarded: p.forwarded.Load(), Keyframes: p.keyframes.Load()}
+			Received: p.received.Load(), Forwarded: p.forwarded.Load(), Keyframes: p.keyframes.Load(),
+			DataChannel: p.dc.Load() != nil}
+		p.mu.Lock()
+		st.IdealHeight = p.sentIdealHeight
+		p.mu.Unlock()
 		for i := range p.layers {
 			if i < len(p.layerPLIs) {
 				st.LayerKeyframes = append(st.LayerKeyframes, p.layerPLIs[i].Load())

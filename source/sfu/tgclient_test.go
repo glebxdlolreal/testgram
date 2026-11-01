@@ -39,6 +39,10 @@ type tgClient struct {
 	gotAny    atomic.Bool
 	keyframes atomic.Int64
 	layerPLIs [3]atomic.Int64
+
+	dc       *webrtc.DataChannel
+	dcOpen   atomic.Bool
+	messages []string
 }
 
 func newTGClient(t *testing.T) *tgClient { return newTGClientWith(t, false) }
@@ -162,7 +166,7 @@ func newTGClientWith(t *testing.T, withVideo bool) *tgClient {
 func (c *tgClient) connect(tr *Transport) {
 	c.t.Helper()
 	var b strings.Builder
-	b.WriteString("v=0\r\no=- 7 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1\r\n")
+	b.WriteString("v=0\r\no=- 7 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\na=group:BUNDLE 0 1 2\r\n")
 	common := func(mid string) {
 		b.WriteString("c=IN IP4 0.0.0.0\r\n")
 		fmt.Fprintf(&b, "a=ice-ufrag:%s\r\na=ice-pwd:%s\r\n", tr.Ufrag, tr.Pwd)
@@ -179,6 +183,9 @@ func (c *tgClient) connect(tr *Transport) {
 	b.WriteString("m=video 9 UDP/TLS/RTP/SAVPF 100 101\r\n")
 	common("1")
 	b.WriteString("a=rtpmap:100 VP8/90000\r\na=rtcp-fb:100 nack pli\r\na=rtpmap:101 rtx/90000\r\na=fmtp:101 apt=100\r\n")
+	b.WriteString("m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n")
+	common("2")
+	b.WriteString("a=sctp-port:5000\r\n")
 	if err := c.pc.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: b.String()}); err != nil {
 		c.t.Fatal(err)
 	}
@@ -189,6 +196,51 @@ func (c *tgClient) connect(tr *Transport) {
 	if err := c.pc.SetLocalDescription(answer); err != nil {
 		c.t.Fatal(err)
 	}
+	// tgcalls' channel: stream 0, label "data", opened with DCEP by the client.
+	id := uint16(0)
+	dc, err := c.pc.CreateDataChannel("data", &webrtc.DataChannelInit{ID: &id})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	c.dc = dc
+	dc.OnOpen(func() { c.dcOpen.Store(true) })
+	dc.OnMessage(func(m webrtc.DataChannelMessage) {
+		c.mu.Lock()
+		c.messages = append(c.messages, string(m.Data))
+		c.mu.Unlock()
+	})
+}
+
+// constrain sends ReceiverVideoConstraints the way tgcalls builds them: default 0 (no video)
+// and a maxHeight per endpoint the client shows.
+func (c *tgClient) constrain(maxHeights map[string]int) {
+	c.t.Helper()
+	constraints := map[string]any{}
+	onStage := []string{}
+	for endpoint, h := range maxHeights {
+		constraints[endpoint] = map[string]int{"maxHeight": h}
+		if h >= 720 {
+			onStage = append(onStage, endpoint)
+		}
+	}
+	msg, _ := json.Marshal(map[string]any{
+		"colibriClass":       "ReceiverVideoConstraints",
+		"defaultConstraints": map[string]int{"maxHeight": 0},
+		"onStageEndpoints":   onStage,
+		"constraints":        constraints,
+	})
+	if err := c.dc.SendText(string(msg)); err != nil {
+		c.t.Fatal(err)
+	}
+}
+
+func (c *tgClient) lastMessage() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.messages) == 0 {
+		return ""
+	}
+	return c.messages[len(c.messages)-1]
 }
 
 // film sends VP8 packets on the given simulcast layer. Like libwebrtc, every layer has its own

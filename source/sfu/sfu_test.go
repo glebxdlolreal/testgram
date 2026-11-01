@@ -29,6 +29,11 @@ func newTestSFU(t *testing.T) *SFU {
 
 func join(t *testing.T, s *SFU, callID int64, key string, c *tgClient) *Transport {
 	t.Helper()
+	return joinFull(t, s, callID, key, c).Transport
+}
+
+func joinFull(t *testing.T, s *SFU, callID int64, key string, c *tgClient) *JoinResult {
+	t.Helper()
 	params, err := ParseJoinParams(c.params)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +43,7 @@ func join(t *testing.T, s *SFU, callID int64, key string, c *tgClient) *Transpor
 		t.Fatal(err)
 	}
 	c.connect(joined.Transport)
-	return joined.Transport
+	return joined
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -413,7 +418,7 @@ func TestVideoLayers_FollowTheSimGroupOrder_WithTheirRtx(t *testing.T) {
 	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
 		t.Fatalf("got %v, want %v", got, want)
 	}
-	answer := p.RemoteAnswer("0", "1")
+	answer := p.RemoteAnswer("0", "1", "2")
 	for _, line := range []string{"a=ssrc:12 cname:1", "a=ssrc:14 cname:1", "a=ssrc-group:FID 14 15"} {
 		if !strings.Contains(answer, line) {
 			t.Fatalf("the answer lacks %q, so pion would not receive that layer", line)
@@ -436,5 +441,83 @@ func TestVideoSsrcs_TakeTheBaseLayerAndItsRtx(t *testing.T) {
 	audioOnly, _ := ParseJoinParams(`{"ufrag":"a","pwd":"b","fingerprints":[{"fingerprint":"AA"}],"ssrc":1,"ssrc-groups":[]}`)
 	if _, _, ok := audioOnly.VideoSsrcs(); ok {
 		t.Fatal("audio-only params reported video")
+	}
+}
+
+func TestDataChannel_ConstraintsCapTheLayer_AndZeroStopsTheVideo(t *testing.T) {
+	s := newTestSFU(t)
+	camera, viewer := newTGClientWith(t, true), newTGClientWith(t, true)
+	cam := joinFull(t, s, 31, "camera", camera)
+	join(t, s, 31, "viewer", viewer)
+	defer s.End(31)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	for layer := 0; layer < 3; layer++ {
+		go camera.film(stop, layer)
+	}
+	waitFor(t, "the viewer's data channel to open on the SFU", func() bool {
+		for _, st := range s.Stats(31) {
+			if st.Key == "viewer" && st.DataChannel {
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "the top layer before any constraint", func() bool { return layerOf(s, 31, "camera", "viewer") == 2 })
+
+	viewer.constrain(map[string]int{cam.Endpoint: 360})
+	waitFor(t, "the viewer to be capped at the 360p layer", func() bool { return layerOf(s, 31, "camera", "viewer") == 1 })
+
+	viewer.constrain(map[string]int{}) // the camera is no longer shown: default maxHeight 0
+	waitFor(t, "the viewer to stop getting the camera", func() bool { return layerOf(s, 31, "camera", "viewer") == -1 })
+	n := viewer.count(camera.videoSsrc[0])
+	time.Sleep(400 * time.Millisecond)
+	if got := viewer.count(camera.videoSsrc[0]); got != n {
+		t.Fatalf("video kept flowing after maxHeight 0: %d -> %d packets", n, got)
+	}
+
+	viewer.constrain(map[string]int{cam.Endpoint: 180})
+	waitFor(t, "the thumbnail layer", func() bool { return layerOf(s, 31, "camera", "viewer") == 0 })
+}
+
+func TestDataChannel_TheCameraIsToldTheLargestPictureAnyViewerWants(t *testing.T) {
+	s := newTestSFU(t)
+	camera, a, b := newTGClientWith(t, true), newTGClient(t), newTGClient(t)
+	cam := joinFull(t, s, 32, "camera", camera)
+	join(t, s, 32, "a", a)
+	join(t, s, 32, "b", b)
+	defer s.End(32)
+
+	waitFor(t, "every data channel", func() bool { return camera.dcOpen.Load() && a.dcOpen.Load() && b.dcOpen.Load() })
+	a.constrain(map[string]int{cam.Endpoint: 180})
+	b.constrain(map[string]int{cam.Endpoint: 360})
+	waitFor(t, "SenderVideoConstraints with idealHeight 360", func() bool {
+		return strings.Contains(camera.lastMessage(), `"idealHeight":360`) && strings.Contains(camera.lastMessage(), `"colibriClass":"SenderVideoConstraints"`)
+	})
+	b.constrain(map[string]int{})
+	waitFor(t, "idealHeight to drop to 180", func() bool { return strings.Contains(camera.lastMessage(), `"idealHeight":180`) })
+}
+
+func TestParseReceiverVideoConstraints_FollowsTgcallsShape(t *testing.T) {
+	c, ok := parseReceiverVideoConstraints([]byte(`{"colibriClass":"ReceiverVideoConstraints","defaultConstraints":{"maxHeight":0},"onStageEndpoints":["e1"],"constraints":{"e1":{"minHeight":720,"maxHeight":720},"e2":{"maxHeight":180},"e3":{}}}`))
+	if !ok {
+		t.Fatal("not parsed")
+	}
+	for endpoint, want := range map[string]int{"e1": 720, "e2": 180, "e3": 720, "other": 0} {
+		if got := c.heightFor(endpoint); got != want {
+			t.Errorf("%s: maxHeight %d, want %d", endpoint, got, want)
+		}
+	}
+	for h, want := range map[int]int{0: -1, 90: 0, 180: 0, 360: 1, 540: 1, 720: 2, 1080: 2} {
+		if got := layerForHeight(h, 3); got != want {
+			t.Errorf("height %d -> layer %d, want %d", h, got, want)
+		}
+	}
+	if layerForHeight(720, 1) != 0 {
+		t.Error("a single-layer stream (screen share) must use its only layer")
+	}
+	if _, ok := parseReceiverVideoConstraints([]byte(`{"colibriClass":"EndpointMessage"}`)); ok {
+		t.Error("another colibri class was taken for constraints")
 	}
 }
