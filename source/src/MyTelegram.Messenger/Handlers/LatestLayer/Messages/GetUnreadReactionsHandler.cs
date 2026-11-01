@@ -9,7 +9,8 @@ internal sealed class GetUnreadReactionsHandler(
     IMessageAppService messageAppService,
     IMessageConverterService messageConverterService,
     IChatConverterService chatConverterService,
-    IUserConverterService userConverterService)
+    IUserConverterService userConverterService,
+    IChannelAppService channelAppService)
     : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetUnreadReactions, MyTelegram.Schema.Messages.IMessages>
 {
     protected override async Task<MyTelegram.Schema.Messages.IMessages> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestGetUnreadReactions obj)
@@ -17,6 +18,30 @@ internal sealed class GetUnreadReactionsHandler(
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
         var savedPeer = obj.SavedPeerId == null ? null : peerHelper.GetPeer(obj.SavedPeerId, input.UserId);
         var ownerPeerId = peer.PeerType == PeerType.Channel ? peer.PeerId : input.UserId;
+
+        // Reactions to broadcast posts are anonymous and never unread for anyone (the post is the
+        // channel's, not its author's), so there is nothing to walk. The empty answer is also what
+        // lets a client holding a stale counter call messages.readReactions and drop the badge.
+        if (peer.PeerType == PeerType.Channel)
+        {
+            var channel = await channelAppService.GetAsync((long?)peer.PeerId);
+            if (channel == null)
+            {
+                RpcErrors.RpcErrors400.ChannelInvalid.ThrowRpcError();
+            }
+
+            if (channel!.Broadcast)
+            {
+                return new TMessages
+                {
+                    Messages = new TVector<IMessage>(),
+                    Chats = new TVector<IChat>(),
+                    Users = new TVector<IUser>(),
+                    Topics = new TVector<IForumTopic>()
+                };
+            }
+        }
+
         var readState = await queryProcessor.ProcessAsync(
             new GetUserConfigByKeyQuery(input.UserId, ReactionReadState.GetKey(peer, obj.TopMsgId, savedPeer)));
         var readDate = ReactionReadState.ParseReadDate(readState?.Value);
@@ -26,7 +51,9 @@ internal sealed class GetUnreadReactionsHandler(
             new GetMessagesWithUnreadReactionsQuery(
                 ownerPeerId,
                 input.UserId,
+                peer,
                 obj.OffsetId,
+                obj.AddOffset,
                 limit,
                 obj.MaxId,
                 obj.MinId,

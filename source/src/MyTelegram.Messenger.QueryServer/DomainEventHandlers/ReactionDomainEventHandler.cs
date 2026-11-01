@@ -116,7 +116,7 @@ public class ReactionDomainEventHandler(
 
         await SendRpcMessageToClientAsync(e.RequestInfo, updates, ownerPeer.PeerId, pts, ownerPeer.PeerType);
 
-        await TryIncrementUnreadReactionsAsync(e, messageItem);
+        await TryIncrementUnreadReactionsAsync(e, messageItem, isChannel);
         await NotifyBotsAsync(e, messageItem, isChannel);
 
         var toPeer = messageItem.ToPeer;
@@ -187,8 +187,18 @@ public class ReactionDomainEventHandler(
     /// Cleared again by messages.readReactions.
     /// See https://corefork.telegram.org/api/reactions
     /// </summary>
-    private async Task TryIncrementUnreadReactionsAsync(MessageReactionsUpdatedEvent e, MessageItem messageItem)
+    private async Task TryIncrementUnreadReactionsAsync(MessageReactionsUpdatedEvent e, MessageItem messageItem,
+        bool isBroadcast)
     {
+        // A broadcast post belongs to the channel, not to the admin who wrote it, and its reactions are
+        // anonymous (recent_reactions is never sent). Counting them left a badge on the admin's dialog
+        // that Android can never clear: it only decrements when a visible message carries an unread
+        // messagePeerReaction (ChatActivity / ChatMessageCell.checkUnreadReactions).
+        if (isBroadcast)
+        {
+            return;
+        }
+
         var authorUserId = messageItem.SenderUserId;
 
         // Reacting to your own message, or to a message with no human author, raises no badge.

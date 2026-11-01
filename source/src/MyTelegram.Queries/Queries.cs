@@ -822,7 +822,9 @@ public record GetMaxChannelIdQuery:IQuery<long>;
 public record GetMessagesWithUnreadReactionsQuery(
     long OwnerPeerId,
     long SenderUserId,
+    Peer ToPeer,
     int OffsetId,
+    int AddOffset,
     int Limit,
     int MaxId,
     int MinId,
