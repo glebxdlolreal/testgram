@@ -21,7 +21,8 @@ public class DialogSnapshot(
     int antiSpamMentionMessageId = 0,
     bool antiSpamMentionConsumed = false,
     bool mentionRecountRequired = false,
-    string? mentionReadOperation = null
+    string? mentionReadOperation = null,
+    List<int>? unreadReactionMessageIds = null
     )
     : ISnapshot
 {
@@ -48,6 +49,12 @@ public class DialogSnapshot(
     /// </summary>
     public int UnreadReactionsCount { get; } = unreadReactionsCount;
     public int UnreadPollVotesCount { get; } = unreadPollVotesCount;
+
+    /// <summary>
+    /// The messages behind <see cref="UnreadReactionsCount"/>. Null in snapshots written before it was
+    /// tracked; such a counter still drops to zero on the next messages.readReactions.
+    /// </summary>
+    public List<int>? UnreadReactionMessageIds { get; } = unreadReactionMessageIds;
     public int? FolderId { get; } = folderId;
 
     public long OwnerId { get; } = ownerId;

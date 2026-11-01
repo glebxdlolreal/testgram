@@ -183,8 +183,8 @@ public class ReactionDomainEventHandler(
     }
 
     /// <summary>
-    /// Raises the unread reaction badge on the message author's dialog when somebody else reacts.
-    /// Cleared again by messages.readReactions.
+    /// Raises the unread reaction badge on the message author's dialog when somebody else reacts, and
+    /// lowers it when the last such reaction is taken back. Cleared by messages.readReactions.
     /// See https://corefork.telegram.org/api/reactions
     /// </summary>
     private async Task TryIncrementUnreadReactionsAsync(MessageReactionsUpdatedEvent e, MessageItem messageItem,
@@ -207,8 +207,10 @@ public class ReactionDomainEventHandler(
             return;
         }
 
-        // Only count reactions that were actually added by someone else.
-        if (!e.Reactions.Any(r => r.UserId != authorUserId))
+        // A private-chat reaction updates both copies of the message (SendReactionHandler), so this
+        // runs twice. Only the author's own copy counts: it carries the author's message id, which is
+        // what messages.getUnreadReactions returns, and counting both copies raised the badge by two.
+        if (messageItem.ToPeer.PeerType == PeerType.User && messageItem.OwnerPeer.PeerId != authorUserId)
         {
             return;
         }
@@ -216,12 +218,20 @@ public class ReactionDomainEventHandler(
         var dialogPeer = messageItem.ToPeer.PeerType == PeerType.User
             ? new Peer(PeerType.User, e.RequestInfo.UserId)
             : messageItem.ToPeer;
+        var dialogId = DialogId.Create(authorUserId, dialogPeer);
 
         try
         {
-            await commandBus.PublishAsync(new CreateUnreadReactionCommand(
-                DialogId.Create(authorUserId, dialogPeer),
-                messageItem.MessageId));
+            // The badge counts messages that still carry someone else's reaction; the aggregate
+            // ignores repeats and removals of messages it is not counting.
+            if (e.Reactions.Any(r => r.UserId != authorUserId))
+            {
+                await commandBus.PublishAsync(new CreateUnreadReactionCommand(dialogId, messageItem.MessageId));
+            }
+            else
+            {
+                await commandBus.PublishAsync(new RemoveUnreadReactionCommand(dialogId, messageItem.MessageId));
+            }
         }
         catch (DomainError)
         {

@@ -26,6 +26,7 @@ public class DialogReadModel : IDialogReadModel,
     IAmReadModelFor<DialogAggregate, DialogId, UpdateReadChannelInboxEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, DialogFolderUpdatedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, UnreadReactionCreatedEvent>,
+    IAmReadModelFor<DialogAggregate, DialogId, UnreadReactionRemovedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, UnreadReactionsReadEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, MentionCreatedEvent>,
     IAmReadModelFor<DialogAggregate, DialogId, AntiSpamMentionDeletionAppliedEvent>,
@@ -144,6 +145,14 @@ public class DialogReadModel : IDialogReadModel,
 
     public Task ApplyAsync(IReadModelContext context,
         IDomainEvent<DialogAggregate, DialogId, UnreadReactionCreatedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        UnreadReactionsCount = domainEvent.AggregateEvent.UnreadReactionsCount;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<DialogAggregate, DialogId, UnreadReactionRemovedEvent> domainEvent,
         CancellationToken cancellationToken)
     {
         UnreadReactionsCount = domainEvent.AggregateEvent.UnreadReactionsCount;

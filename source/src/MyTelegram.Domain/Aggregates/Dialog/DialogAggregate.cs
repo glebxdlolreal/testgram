@@ -154,14 +154,38 @@ public partial class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAgg
     }
 
     /// <summary>
-    /// Increments the unread reaction counter shown as a badge in the dialog list.
+    /// Counts <paramref name="messageId"/> towards the unread reaction badge. The badge counts messages,
+    /// not reactions: a second reaction to a message that is already unread changes nothing, otherwise
+    /// the counter outgrows what messages.getUnreadReactions can walk and Android never clears it.
     /// See https://corefork.telegram.org/api/reactions#notifications-about-reactions
     /// </summary>
     public void CreateUnreadReaction(int messageId)
     {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        if (_state.UnreadReactionMessageIds.Contains(messageId))
+        {
+            return;
+        }
+
         var unreadReactionsCount = _state.UnreadReactionsCount + 1;
         var ownerUserId = _state.OwnerId;
         Emit(new UnreadReactionCreatedEvent(ownerUserId, _state.ToPeer, messageId, unreadReactionsCount));
+    }
+
+    /// <summary>
+    /// Takes <paramref name="messageId"/> off the badge once nobody but its author reacts to it any more.
+    /// </summary>
+    public void RemoveUnreadReaction(int messageId)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        if (!_state.UnreadReactionMessageIds.Contains(messageId))
+        {
+            return;
+        }
+
+        var unreadReactionsCount = Math.Max(0, _state.UnreadReactionsCount - 1);
+        var ownerUserId = _state.OwnerId;
+        Emit(new UnreadReactionRemovedEvent(ownerUserId, _state.ToPeer, messageId, unreadReactionsCount));
     }
 
     /// <summary>
@@ -447,7 +471,8 @@ public partial class DialogAggregate : MyInMemorySnapshotAggregateRoot<DialogAgg
             _state.AntiSpamMentionMessageId,
             _state.AntiSpamMentionConsumed,
             _state.MentionRecountRequired,
-            _state.MentionReadOperation
+            _state.MentionReadOperation,
+            [.. _state.UnreadReactionMessageIds]
         ));
 
     }

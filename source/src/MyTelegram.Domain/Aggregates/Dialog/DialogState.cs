@@ -30,6 +30,7 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     IApply<UnreadMentionsReadEvent>,
     IApply<UnreadMentionsCountSyncedEvent>,
     IApply<UnreadReactionCreatedEvent>,
+    IApply<UnreadReactionRemovedEvent>,
     IApply<UnreadReactionsReadEvent>,
     IApply<PollVoteCreatedEvent>,
     IApply<PollVotesReadEvent>,
@@ -61,6 +62,9 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     public bool UnreadMark { get; private set; }
     public int UnreadMentionsCount { get; private set; }
     public int UnreadReactionsCount { get; private set; }
+
+    /// <summary>The messages counted by <see cref="UnreadReactionsCount"/>.</summary>
+    public HashSet<int> UnreadReactionMessageIds { get; private set; } = [];
     public int UnreadPollVotesCount { get; private set; }
 
     public string? MentionReadOperation { get; private set; }
@@ -223,11 +227,19 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
     public void Apply(UnreadReactionCreatedEvent aggregateEvent)
     {
         UnreadReactionsCount = aggregateEvent.UnreadReactionsCount;
+        UnreadReactionMessageIds.Add(aggregateEvent.MessageId);
+    }
+
+    public void Apply(UnreadReactionRemovedEvent aggregateEvent)
+    {
+        UnreadReactionsCount = aggregateEvent.UnreadReactionsCount;
+        UnreadReactionMessageIds.Remove(aggregateEvent.MessageId);
     }
 
     public void Apply(UnreadReactionsReadEvent aggregateEvent)
     {
         UnreadReactionsCount = aggregateEvent.UnreadReactionsCount;
+        UnreadReactionMessageIds.Clear();
     }
 
     public void Apply(PollVoteCreatedEvent aggregateEvent)
@@ -335,6 +347,7 @@ public class DialogState : AggregateState<DialogAggregate, DialogId, DialogState
         TopicDraftKeys = snapshot.TopicDraftKeys == null ? [] : [.. snapshot.TopicDraftKeys];
         UnreadMentionsCount = snapshot.UnreadMentionsCount;
         UnreadReactionsCount = snapshot.UnreadReactionsCount;
+        UnreadReactionMessageIds = snapshot.UnreadReactionMessageIds == null ? [] : [.. snapshot.UnreadReactionMessageIds];
         UnreadPollVotesCount = snapshot.UnreadPollVotesCount;
         FolderId = snapshot.FolderId;
     }
