@@ -73,10 +73,10 @@ public class GroupCallLifecycleHandlerTests
             Params = new TDataJSON { Data = $"{{\"ssrc\":{firstSsrc}}}" }
         });
 
-        // The response carries the groupCall, the joining participant (with the assigned SSRC) and a
-        // connection update.
+        // The response carries the groupCall and the joining participant (with the assigned SSRC). There is
+        // no connection update: an ordinary call needs a media server's transport, and none is deployed.
         joinUpdates.Updates.OfType<TUpdateGroupCall>().ShouldNotBeEmpty();
-        joinUpdates.Updates.OfType<TUpdateGroupCallConnection>().ShouldHaveSingleItem();
+        joinUpdates.Updates.OfType<TUpdateGroupCallConnection>().ShouldBeEmpty();
         var joinedParticipant = joinUpdates.Updates
             .OfType<TUpdateGroupCallParticipants>().ShouldHaveSingleItem()
             .Participants.OfType<TGroupCallParticipant>().ShouldHaveSingleItem();

@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
 using MyTelegram.Messenger.Services.Phone;
@@ -22,6 +23,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class EditGroupCallParticipantHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
     IChannelAdminRightsChecker channelAdminRightsChecker,
     IObjectMessageSender objectMessageSender)
@@ -36,7 +38,7 @@ internal sealed class EditGroupCallParticipantHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestEditGroupCallParticipant obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -49,7 +51,7 @@ internal sealed class EditGroupCallParticipantHandler(
             return null!;
         }
 
-        var peer = peerHelper.GetPeer(obj.Participant, input.UserId);
+        var peer = GroupCallStateHelper.NormalizeSelf(peerHelper.GetPeer(obj.Participant, input.UserId));
         var participant = peer == null
             ? null
             : groupCall.Participants.FirstOrDefault(p => p.PeerId == peer.PeerId && p.PeerType == (int)peer.PeerType);
@@ -75,26 +77,46 @@ internal sealed class EditGroupCallParticipantHandler(
 
         // The same applies to every other participant field: mute/volume/video state may only be
         // changed on one's own participant entry, or by whoever can manage the call.
-        if (!GroupCallStateHelper.IsParticipantControlledByUser(groupCall, participant, input.UserId))
+        var actedOnSomeoneElse = !GroupCallStateHelper.IsParticipantControlledByUser(groupCall, participant, input.UserId);
+        if (actedOnSomeoneElse)
         {
             await GroupCallStateHelper.EnsureCanManageCallAsync(groupCall, input.UserId, channelAdminRightsChecker);
         }
 
+        var canManage = !actedOnSomeoneElse &&
+                        await GroupCallStateHelper.CanManageCallAsync(groupCall, input.UserId, channelAdminRightsChecker);
+        var peerType = participant.PeerType;
+        var peerId = participant.PeerId;
         var prevMuted = participant.Muted;
+        var prevMutedByAdmin = participant.MutedByAdmin;
         var prevVolume = participant.Volume;
-        var actedOnSomeoneElse = !GroupCallStateHelper.IsParticipantControlledByUser(groupCall, participant, input.UserId);
 
-        if (obj.Muted.HasValue) participant.Muted = obj.Muted.Value;
-        if (obj.Volume.HasValue) participant.Volume = obj.Volume.Value;
-        if (obj.RaiseHand.HasValue) participant.RaiseHand = obj.RaiseHand.Value;
-        if (obj.VideoStopped.HasValue) participant.VideoStopped = obj.VideoStopped.Value;
-        if (obj.VideoPaused.HasValue) participant.VideoPaused = obj.VideoPaused.Value;
-        if (obj.PresentationPaused.HasValue) participant.PresentationPaused = obj.PresentationPaused.Value;
-        groupCall.Version++;
+        var updated = await GroupCallStateHelper.UpdateWithRetryAsync(_groupCallCollection, groupCall, call =>
+        {
+            var target = call.Participants.FirstOrDefault(p => p.PeerId == peerId && p.PeerType == peerType);
+            if (target == null)
+            {
+                return false;
+            }
 
-        await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
+            ApplyChanges(target, obj, actedOnSomeoneElse, canManage);
+            return true;
+        });
+        if (updated == null)
+        {
+            RpcErrors.RpcErrors400.GroupcallInvalid.ThrowRpcError();
+            return null!;
+        }
 
-        await LogAdminActionAsync(input, groupCall, participant, actedOnSomeoneElse, prevMuted, prevVolume);
+        groupCall = updated;
+        participant = groupCall.Participants.FirstOrDefault(p => p.PeerId == peerId && p.PeerType == peerType);
+        if (participant == null)
+        {
+            RpcErrors.RpcErrors400.ParticipantJoinMissing.ThrowRpcError();
+            return null!;
+        }
+
+        await LogAdminActionAsync(input, groupCall, participant, actedOnSomeoneElse, prevMuted, prevMutedByAdmin, prevVolume);
 
         var updates = GroupCallStateHelper.Updates(
             GroupCallStateHelper.CreateParticipantsUpdate(groupCall, input.UserId, peerHelper, [participant]));
@@ -107,6 +129,62 @@ internal sealed class EditGroupCallParticipantHandler(
     }
 
     /// <summary>
+    /// Telegram's rules, as observed on the production servers:
+    /// <list type="bullet">
+    /// <item>A participant muted by an admin (or who joined a join_muted call) cannot unmute
+    /// themselves; the request succeeds and leaves them muted.</item>
+    /// <item>An admin "unmuting" somebody only allows them to speak: they stay muted until they
+    /// unmute themselves, and their raised hand is lowered.</item>
+    /// <item>An admin muting somebody also takes away the right to unmute.</item>
+    /// <item>A volume set by the participant themselves is not "by admin".</item>
+    /// </list>
+    /// </summary>
+    private static void ApplyChanges(
+        GroupCallParticipantDoc participant,
+        MyTelegram.Schema.Phone.RequestEditGroupCallParticipant obj,
+        bool actedOnSomeoneElse,
+        bool canManageCall)
+    {
+        if (obj.Muted.HasValue)
+        {
+            if (actedOnSomeoneElse)
+            {
+                if (obj.Muted.Value)
+                {
+                    participant.Muted = true;
+                    participant.MutedByAdmin = true;
+                }
+                else
+                {
+                    participant.MutedByAdmin = false;
+                    participant.RaiseHand = false;
+                }
+            }
+            else if (obj.Muted.Value)
+            {
+                participant.Muted = true;
+            }
+            else if (!participant.MutedByAdmin || canManageCall)
+            {
+                participant.Muted = false;
+                participant.MutedByAdmin = false;
+                participant.RaiseHand = false;
+            }
+        }
+
+        if (obj.Volume.HasValue)
+        {
+            participant.Volume = obj.Volume.Value;
+            participant.VolumeBySelf = !actedOnSomeoneElse;
+        }
+
+        if (obj.RaiseHand.HasValue) participant.RaiseHand = obj.RaiseHand.Value;
+        if (obj.VideoStopped.HasValue) participant.VideoStopped = obj.VideoStopped.Value;
+        if (obj.VideoPaused.HasValue) participant.VideoPaused = obj.VideoPaused.Value;
+        if (obj.PresentationPaused.HasValue) participant.PresentationPaused = obj.PresentationPaused.Value;
+    }
+
+    /// <summary>
     /// Only what an admin does to somebody else belongs in the admin log: a participant muting themselves
     /// or changing their own volume is not a moderation action.
     /// </summary>
@@ -116,6 +194,7 @@ internal sealed class EditGroupCallParticipantHandler(
         GroupCallParticipantDoc participant,
         bool actedOnSomeoneElse,
         bool prevMuted,
+        bool prevMutedByAdmin,
         int? prevVolume)
     {
         if (!actedOnSomeoneElse || groupCall.PeerType != (int)PeerType.Channel)
@@ -125,9 +204,10 @@ internal sealed class EditGroupCallParticipantHandler(
 
         var tlParticipant = GroupCallStateHelper.ToParticipant(participant, input.UserId, peerHelper, call: groupCall);
 
-        if (participant.Muted != prevMuted)
+        // An admin unmute does not change Muted; it lifts the admin's mute (lets the participant speak).
+        if (participant.Muted != prevMuted || participant.MutedByAdmin != prevMutedByAdmin)
         {
-            if (participant.Muted)
+            if (participant.MutedByAdmin)
             {
                 await AdminLogHelper.LogParticipantMute(mongoDatabase, groupCall.PeerId, input.UserId, tlParticipant);
             }

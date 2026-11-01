@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
@@ -16,9 +17,9 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class JoinGroupCallPresentationHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
-    IObjectMessageSender objectMessageSender,
-    IOptionsMonitor<MyTelegramMessengerServerOptions> options)
+    IObjectMessageSender objectMessageSender)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestJoinGroupCallPresentation, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -26,7 +27,7 @@ internal sealed class JoinGroupCallPresentationHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestJoinGroupCallPresentation obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -43,7 +44,6 @@ internal sealed class JoinGroupCallPresentationHandler(
 
         participant.PresentationPaused = false;
         participant.PresentationParamsJson = obj.Params.Data;
-        groupCall.Version++;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
 
         var participantsUpdate = GroupCallStateHelper.CreateParticipantsUpdate(groupCall, input.UserId, peerHelper, [participant]);
@@ -54,8 +54,10 @@ internal sealed class JoinGroupCallPresentationHandler(
             pushUpdates,
             input.UserId);
 
-        return GroupCallStateHelper.Updates(
-            participantsUpdate,
-            GroupCallStateHelper.CreateConnectionUpdate(groupCall, options.CurrentValue.WebRtcConnections, true));
+        // Screen sharing needs the media server's transport too; without one there is nothing to connect to.
+        var connectionUpdate = GroupCallStateHelper.CreateConnectionUpdate(groupCall, presentation: true);
+        return connectionUpdate == null
+            ? GroupCallStateHelper.Updates(participantsUpdate)
+            : GroupCallStateHelper.Updates(participantsUpdate, connectionUpdate);
     }
 }

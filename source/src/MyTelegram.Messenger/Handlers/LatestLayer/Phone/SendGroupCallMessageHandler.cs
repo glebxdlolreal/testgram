@@ -8,6 +8,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 
 internal sealed class SendGroupCallMessageHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IIdGenerator idGenerator,
     IPeerHelper peerHelper,
     IObjectMessageSender objectMessageSender)
@@ -18,7 +19,7 @@ internal sealed class SendGroupCallMessageHandler(
 
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestSendGroupCallMessage obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null || !groupCall.Active || !groupCall.MessagesEnabled)
         {

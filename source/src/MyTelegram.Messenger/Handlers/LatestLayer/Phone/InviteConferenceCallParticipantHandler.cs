@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 
@@ -14,6 +15,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class InviteConferenceCallParticipantHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
     IIdGenerator idGenerator,
     IObjectMessageSender objectMessageSender)
@@ -24,7 +26,7 @@ internal sealed class InviteConferenceCallParticipantHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestInviteConferenceCallParticipant obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null || !groupCall.Conference || !groupCall.Active)
         {

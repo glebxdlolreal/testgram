@@ -1,3 +1,5 @@
+using MyTelegram.Messenger.Converters.ConverterServices;
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 using MyTelegram.Schema;
@@ -15,7 +17,10 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class GetGroupParticipantsHandler(
     IMongoDatabase mongoDatabase,
-    IPeerHelper peerHelper)
+    IAccessHashHelper2 accessHashHelper2,
+    IPeerHelper peerHelper,
+    IUserConverterService userConverterService,
+    IChatConverterService chatConverterService)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestGetGroupParticipants, MyTelegram.Schema.Phone.IGroupParticipants>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -23,7 +28,7 @@ internal sealed class GetGroupParticipantsHandler(
 
     protected override async Task<MyTelegram.Schema.Phone.IGroupParticipants> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestGetGroupParticipants obj)
     {
-        var groupCall = await _groupCallCollection.Find(GroupCallStateHelper.Filter(obj.Call, input.UserId)).FirstOrDefaultAsync();
+        var groupCall = await _groupCallCollection.Find(GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2)).FirstOrDefaultAsync();
         if (groupCall == null)
         {
             RpcErrors.RpcErrors400.GroupcallInvalid.ThrowRpcError();
@@ -52,14 +57,21 @@ internal sealed class GetGroupParticipantsHandler(
         var total = participants.Count();
         var nextOffset = total > offset + page.Count ? (offset + page.Count).ToString() : string.Empty;
 
+        var (users, chats) = await GroupCallStateHelper.LoadUsersAndChatsAsync(
+            input,
+            userConverterService,
+            chatConverterService,
+            GroupCallStateHelper.GetParticipantPeerUserIds(page),
+            GroupCallStateHelper.GetParticipantChannelIds(page));
+
         return new MyTelegram.Schema.Phone.TGroupParticipants
         {
             Count = total,
             Participants = new TVector<IGroupCallParticipant>(
                 page.Select(p => (IGroupCallParticipant)GroupCallStateHelper.ToParticipant(p, input.UserId, peerHelper, call: groupCall))),
             NextOffset = nextOffset,
-            Chats = new TVector<IChat>(),
-            Users = new TVector<IUser>(),
+            Chats = chats,
+            Users = users,
             Version = groupCall.Version
         };
     }

@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
 using MyTelegram.Messenger.Services.Interfaces;
@@ -18,9 +19,11 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class StartScheduledGroupCallHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
     IObjectMessageSender objectMessageSender,
-    IMessageAppService messageAppService)
+    IMessageAppService messageAppService,
+    IChannelAdminRightsChecker channelAdminRightsChecker)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestStartScheduledGroupCall, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -28,7 +31,7 @@ internal sealed class StartScheduledGroupCallHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestStartScheduledGroupCall obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -41,10 +44,16 @@ internal sealed class StartScheduledGroupCallHandler(
             return null!;
         }
 
+        // Only those who can manage the call may start it; Telegram refuses everybody else this way.
+        await GroupCallStateHelper.EnsureCanManageCallAsync(
+            groupCall,
+            input.UserId,
+            channelAdminRightsChecker,
+            RpcErrors.RpcErrors403.GroupcallForbidden);
+
         var subscriberIds = groupCall.ScheduleStartSubscriberIds.ToList();
         groupCall.ScheduleDate = null;
         groupCall.ScheduleStartSubscriberIds.Clear();
-        groupCall.Version++;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
         await GroupCallStateHelper.SendGroupCallServiceMessageAsync(
             messageAppService,

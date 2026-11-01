@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 using MyTelegram.Schema;
@@ -16,7 +17,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
 internal sealed class CheckGroupCallHandler(
-    IMongoDatabase mongoDatabase)
+    IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestCheckGroupCall, TVector<int>>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -24,7 +26,7 @@ internal sealed class CheckGroupCallHandler(
 
     protected override async Task<TVector<int>> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestCheckGroupCall obj)
     {
-        var groupCall = await _groupCallCollection.Find(GroupCallStateHelper.Filter(obj.Call, input.UserId)).FirstOrDefaultAsync();
+        var groupCall = await _groupCallCollection.Find(GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2)).FirstOrDefaultAsync();
         if (groupCall == null)
         {
             RpcErrors.RpcErrors400.GroupcallInvalid.ThrowRpcError();

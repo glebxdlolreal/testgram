@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Interfaces;
 using MyTelegram.Messenger.Services.Phone;
@@ -16,6 +17,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class ExportGroupCallInviteHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IChannelAppService channelAppService,
     IChannelAdminRightsChecker channelAdminRightsChecker)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestExportGroupCallInvite, MyTelegram.Schema.Phone.IExportedGroupCallInvite>
@@ -25,7 +27,7 @@ internal sealed class ExportGroupCallInviteHandler(
 
     protected override async Task<MyTelegram.Schema.Phone.IExportedGroupCallInvite> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestExportGroupCallInvite obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {

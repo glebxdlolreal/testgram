@@ -43,7 +43,8 @@ internal sealed class GetFullChatHandler(
                     PeerType.Channel);
                 if (activeCall != null)
                 {
-                    GroupCallStateHelper.ApplyActiveCallToChatFull(chatFull, activeCall, input.UserId);
+                    GroupCallStateHelper.ApplyActiveCallToChatFull(chatFull, activeCall, input.UserId,
+                    await GroupCallStateHelper.GetSavedDefaultJoinAsAsync(mongoDatabase, input.UserId, (PeerType)activeCall.PeerType, activeCall.PeerId));
                 }
 
                 // ChannelFullReadModel.PinnedMsgId is never written, so the latest pinned message has to

@@ -137,11 +137,62 @@ public static class PhoneTestFixtures
                 continue;
             }
 
+            if (TryCreateDefaultDependency(parameterType) is { } dependency)
+            {
+                filled[i] = dependency;
+                continue;
+            }
+
             throw new InvalidOperationException(
                 $"{handlerType.Name} needs a {parameterType.Name} that the test did not supply.");
         }
 
         return Activator.CreateInstance(handlerType, filled)!;
+    }
+
+    /// <summary>
+    /// Defaults for dependencies most group-call tests do not exercise: the deterministic access-hash fake,
+    /// converters that return no users or chats, and a channel service that treats everybody as a member.
+    /// </summary>
+    public static object? TryCreateDefaultDependency(Type parameterType)
+    {
+        if (parameterType == typeof(IAccessHashHelper2))
+        {
+            return new FakeAccessHashHelper2();
+        }
+
+        if (parameterType == typeof(MyTelegram.Messenger.Converters.ConverterServices.IUserConverterService))
+        {
+            var users = new Mock<MyTelegram.Messenger.Converters.ConverterServices.IUserConverterService>();
+            users.Setup(x => x.GetUserListAsync(It.IsAny<IRequestWithAccessHashKeyId>(), It.IsAny<List<long>>(),
+                    It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<int>()))
+                .ReturnsAsync([]);
+            return users.Object;
+        }
+
+        if (parameterType == typeof(MyTelegram.Messenger.Converters.ConverterServices.IChatConverterService))
+        {
+            var chats = new Mock<MyTelegram.Messenger.Converters.ConverterServices.IChatConverterService>();
+            chats.Setup(x => x.GetChannelListAsync(It.IsAny<IRequestWithAccessHashKeyId>(), It.IsAny<List<long>>(),
+                    It.IsAny<IReadOnlyCollection<IChannelMemberReadModel>?>(), It.IsAny<int>()))
+                .ReturnsAsync([]);
+            return chats.Object;
+        }
+
+        if (parameterType == typeof(IChannelAppService))
+        {
+            var channels = new Mock<IChannelAppService>();
+            channels.Setup(x => x.SendRpcErrorIfNotChannelMemberAsync(It.IsAny<IRequestInput>(), It.IsAny<long>()))
+                .ReturnsAsync(false);
+            return channels.Object;
+        }
+
+        if (parameterType == typeof(IChannelAdminRightsChecker))
+        {
+            return PermissiveAdminRightsChecker();
+        }
+
+        return null;
     }
 
     /// <summary>

@@ -24,7 +24,7 @@ internal sealed class SaveDefaultGroupCallJoinAsHandler(
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestSaveDefaultGroupCallJoinAs obj)
     {
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
-        var joinAs = peerHelper.GetPeer(obj.JoinAs, input.UserId);
+        var joinAs = GroupCallStateHelper.NormalizeSelf(peerHelper.GetPeer(obj.JoinAs, input.UserId));
         if (peer == null || joinAs == null)
         {
             RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();

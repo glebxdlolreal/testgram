@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 using MyTelegram.Schema;
@@ -14,6 +15,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class SaveDefaultSendAsHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestSaveDefaultSendAs, IBool>, IObjectHandler
 {
@@ -22,7 +24,7 @@ internal sealed class SaveDefaultSendAsHandler(
 
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestSaveDefaultSendAs obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         var sendAs = peerHelper.GetPeer(obj.SendAs, input.UserId);
         if (groupCall == null || sendAs == null)

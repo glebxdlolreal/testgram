@@ -1,3 +1,6 @@
+using MyTelegram.Messenger.Services.Interfaces;
+using MyTelegram.Schema;
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 
@@ -19,8 +22,9 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class InviteToGroupCallHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
-    IObjectMessageSender objectMessageSender)
+    IMessageAppService messageAppService)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestInviteToGroupCall, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -28,7 +32,7 @@ internal sealed class InviteToGroupCallHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestInviteToGroupCall obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -41,25 +45,78 @@ internal sealed class InviteToGroupCallHandler(
             return null!;
         }
 
+        // Only someone who is in the call can invite others to it (Telegram answers GROUPCALL_FORBIDDEN),
+        // and not while joined as a channel: the invite would reveal who is behind it.
+        var inviter = GroupCallStateHelper.FindParticipantByUser(groupCall, input.UserId);
+        if (inviter == null)
+        {
+            RpcErrors.RpcErrors403.GroupcallForbidden.ThrowRpcError();
+            return null!;
+        }
+        if (inviter.PeerType != (int)PeerType.User)
+        {
+            RpcErrors.RpcErrors400.InviteForbiddenWithJoinas.ThrowRpcError();
+            return null!;
+        }
+
+        var invitedUserIds = new List<long>();
         foreach (var user in obj.Users)
         {
             var userId = peerHelper.GetPeer(user, input.UserId).PeerId;
-            if (!groupCall.InvitedUserIds.Contains(userId))
+            if (userId <= 0 || userId == input.UserId || peerHelper.IsBotUser(userId))
             {
-                groupCall.InvitedUserIds.Add(userId);
+                RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
+                return null!;
+            }
+            if (GroupCallStateHelper.IsJoinedByUser(groupCall, userId))
+            {
+                RpcErrors.RpcErrors400.UserAlreadyParticipant.ThrowRpcError();
+                return null!;
+            }
+            if (!invitedUserIds.Contains(userId))
+            {
+                invitedUserIds.Add(userId);
             }
         }
 
-        groupCall.Version++;
-        await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
-        var invitedUserIds = obj.Users.Select(user => peerHelper.GetPeer(user, input.UserId).PeerId).ToList();
-        var updates = GroupCallStateHelper.Updates(GroupCallStateHelper.CreateCallUpdate(groupCall, input.UserId, peerHelper));
-        await GroupCallStateHelper.PushUpdatesToCallSubscribersAsync(
-            objectMessageSender,
-            groupCall,
-            updates,
-            input.UserId,
-            invitedUserIds);
-        return updates;
+        if (invitedUserIds.Count == 0)
+        {
+            RpcErrors.RpcErrors400.UserIdInvalid.ThrowRpcError();
+            return null!;
+        }
+
+        var updated = await GroupCallStateHelper.UpdateWithRetryAsync(_groupCallCollection, groupCall, call =>
+        {
+            var added = false;
+            foreach (var userId in invitedUserIds.Where(userId => !call.InvitedUserIds.Contains(userId)))
+            {
+                call.InvitedUserIds.Add(userId);
+                added = true;
+            }
+
+            return added;
+        });
+        if (updated == null)
+        {
+            RpcErrors.RpcErrors400.GroupcallInvalid.ThrowRpcError();
+            return null!;
+        }
+
+        // The invitation is a service message in the call's chat from the inviter; it reaches everybody,
+        // the inviter included, through the normal message push.
+        if (groupCall.PeerType != (int)PeerType.User)
+        {
+            await GroupCallStateHelper.SendGroupCallServiceMessageAsync(
+                messageAppService,
+                input,
+                updated,
+                new TMessageActionInviteToGroupCall
+                {
+                    Call = GroupCallStateHelper.ToInputGroupCall(updated),
+                    Users = new TVector<long>(invitedUserIds)
+                });
+        }
+
+        return GroupCallStateHelper.Updates();
     }
 }

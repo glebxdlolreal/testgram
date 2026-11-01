@@ -38,7 +38,7 @@ public class GroupCallToggleHandlerTests
         // R19.1 / R19.2: setting is applied and the default join-muted state is persisted.
         var stored = LoadGroupCall(store);
         stored.JoinMuted.ShouldBeTrue();
-        stored.Version.ShouldBe(2);
+        stored.Version.ShouldBe(1, "settings do not change the participant set, so the version stays (as on Telegram)");
 
         // R19.1: an updateGroupCall is returned.
         SingleGroupCallUpdate(updates).Call.ShouldBeAssignableTo<MyTelegram.Schema.TGroupCall>();

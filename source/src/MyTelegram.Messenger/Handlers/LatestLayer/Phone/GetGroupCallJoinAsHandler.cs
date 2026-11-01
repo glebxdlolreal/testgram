@@ -1,3 +1,7 @@
+using MyTelegram.Messenger.Services.Interfaces;
+using MyTelegram.Messenger.Converters.ConverterServices;
+using MyTelegram.Messenger.Services.Phone;
+using MyTelegram.Services.Services;
 using MyTelegram.Schema;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
@@ -13,29 +17,47 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
 internal sealed class GetGroupCallJoinAsHandler(
-    IPeerHelper peerHelper)
+    IPeerHelper peerHelper,
+    IAccessHashHelper2 accessHashHelper2,
+    IChannelAdminRightsChecker channelAdminRightsChecker,
+    IUserConverterService userConverterService,
+    IChatConverterService chatConverterService)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestGetGroupCallJoinAs, MyTelegram.Schema.Phone.IJoinAsPeers>
 {
-    protected override Task<MyTelegram.Schema.Phone.IJoinAsPeers> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestGetGroupCallJoinAs obj)
+    protected override async Task<MyTelegram.Schema.Phone.IJoinAsPeers> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestGetGroupCallJoinAs obj)
     {
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
-        if (peer == null)
+        if (peer == null || peer.PeerType is not (PeerType.Channel or PeerType.Chat))
         {
             RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
-            return Task.FromResult<MyTelegram.Schema.Phone.IJoinAsPeers>(null!);
+            return null!;
         }
 
+        await accessHashHelper2.CheckAccessHashAsync(input, obj.Peer);
+
+        // Everybody can join as themselves; an admin who can manage calls can also join anonymously as
+        // the chat itself. A plain member is offered only their own account, as on Telegram.
         var peers = new TVector<IPeer> { new TPeerUser { UserId = input.UserId } };
-        if (peer.PeerId != input.UserId || peer.PeerType != PeerType.User)
+        var channelIds = new List<long>();
+        if (peer.PeerType == PeerType.Channel &&
+            await channelAdminRightsChecker.HasChatAdminRightAsync(peer.PeerId, input.UserId, rights => rights.ManageCall))
         {
-            peers.Add(peerHelper.ToPeer(peer));
+            peers.Add(new TPeerChannel { ChannelId = peer.PeerId });
+            channelIds.Add(peer.PeerId);
         }
 
-        return Task.FromResult<MyTelegram.Schema.Phone.IJoinAsPeers>(new MyTelegram.Schema.Phone.TJoinAsPeers
+        var (users, chats) = await GroupCallStateHelper.LoadUsersAndChatsAsync(
+            input,
+            userConverterService,
+            chatConverterService,
+            [input.UserId],
+            channelIds);
+
+        return new MyTelegram.Schema.Phone.TJoinAsPeers
         {
             Peers = peers,
-            Chats = new TVector<IChat>(),
-            Users = new TVector<IUser>()
-        });
+            Chats = chats,
+            Users = users
+        };
     }
 }

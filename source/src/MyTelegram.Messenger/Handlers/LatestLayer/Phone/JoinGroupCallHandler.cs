@@ -1,6 +1,7 @@
+using MyTelegram.Messenger.Converters.ConverterServices;
+using MyTelegram.Services.Services;
 using MongoDB.Bson;
 using MongoDB.Bson.Serialization;
-using Microsoft.Extensions.Options;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 using MyTelegram.Schema;
@@ -10,10 +11,14 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 
 internal sealed class JoinGroupCallHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
     IObjectMessageSender objectMessageSender,
-    IOptionsMonitor<MyTelegramMessengerServerOptions> options,
-    IChannelAppService channelAppService)
+    IChannelAppService channelAppService,
+    IChannelAdminRightsChecker channelAdminRightsChecker,
+    IUserConverterService userConverterService,
+    IChatConverterService chatConverterService,
+    ILogger<JoinGroupCallHandler> logger)
     : RpcResultObjectHandler<RequestJoinGroupCall, IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -23,11 +28,18 @@ internal sealed class JoinGroupCallHandler(
 
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestJoinGroupCall obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null || !groupCall.Active)
         {
             RpcErrors.RpcErrors400.GroupcallInvalid.ThrowRpcError();
+            return null!;
+        }
+
+        // A scheduled call cannot be joined until an admin starts it.
+        if (groupCall.ScheduleDate.HasValue)
+        {
+            RpcErrors.RpcErrors403.GroupcallForbidden.ThrowRpcError();
             return null!;
         }
 
@@ -36,7 +48,7 @@ internal sealed class JoinGroupCallHandler(
             return null!;
         }
 
-        var joinAs = peerHelper.GetPeer(obj.JoinAs, input.UserId);
+        var joinAs = GroupCallStateHelper.NormalizeSelf(peerHelper.GetPeer(obj.JoinAs, input.UserId));
         if (joinAs == null)
         {
             RpcErrors.RpcErrors400.JoinAsPeerInvalid.ThrowRpcError();
@@ -49,13 +61,29 @@ internal sealed class JoinGroupCallHandler(
             groupCall,
             input.UserId);
 
+        if (joinAs.PeerType != PeerType.User &&
+            !(joinAs.PeerType == PeerType.Channel &&
+              await channelAdminRightsChecker.HasChatAdminRightAsync(joinAs.PeerId, input.UserId, _ => true)))
+        {
+            RpcErrors.RpcErrors400.JoinAsPeerInvalid.ThrowRpcError();
+            return null!;
+        }
+
+        // In a join_muted call only those who can manage it may speak; everybody else joins muted and has
+        // to be allowed to unmute by an admin. Rejoining does not lift an admin's mute.
+        var previous = GroupCallStateHelper.FindParticipantByUser(groupCall, input.UserId);
+        var mutedByAdmin = previous?.MutedByAdmin == true ||
+                           (groupCall.JoinMuted &&
+                            !await GroupCallStateHelper.CanManageCallAsync(groupCall, input.UserId, channelAdminRightsChecker));
+
         var participant = new GroupCallParticipantDoc
         {
             UserId = input.UserId,
             PeerId = joinAs.PeerId,
             PeerType = (int)joinAs.PeerType,
             Source = ssrc,
-            Muted = obj.Muted || groupCall.JoinMuted,
+            Muted = obj.Muted || mutedByAdmin,
+            MutedByAdmin = mutedByAdmin,
             VideoStopped = obj.VideoStopped,
             Date = currentDate,
             ParamsJson = obj.Params?.Data,
@@ -99,12 +127,31 @@ internal sealed class JoinGroupCallHandler(
                 input.UserId);
         }
 
-        responseUpdates.Add(GroupCallStateHelper.CreateConnectionUpdate(
-                groupCall,
-                options.CurrentValue.WebRtcConnections,
-                streamFallback: true));
+        var connectionUpdate = GroupCallStateHelper.CreateConnectionUpdate(groupCall);
+        if (connectionUpdate != null)
+        {
+            responseUpdates.Add(connectionUpdate);
+        }
+        else
+        {
+            logger.LogWarning(
+                "Group call {CallId}: user {UserId} joined, but no media server (SFU) is deployed, so no connection parameters were sent",
+                groupCall.CallId,
+                input.UserId);
+        }
 
-        return GroupCallStateHelper.Updates(responseUpdates.ToArray());
+        var response = GroupCallStateHelper.Updates(responseUpdates.ToArray());
+        (response.Users, response.Chats) = await GroupCallStateHelper.LoadUsersAndChatsAsync(
+            input,
+            userConverterService,
+            chatConverterService,
+            [input.UserId],
+            [
+                ..GroupCallStateHelper.GetParticipantChannelIds([participant]),
+                ..groupCall.PeerType == (int)PeerType.Channel ? [groupCall.PeerId] : Array.Empty<long>()
+            ]);
+
+        return response;
     }
 
     private async Task<bool> EnsureCanJoinCallAsync(

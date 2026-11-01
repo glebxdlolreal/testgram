@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Converters.ConverterServices;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services;
 using MyTelegram.Messenger.Services.Interfaces;
@@ -20,6 +21,30 @@ internal static class GroupCallStateHelper
         return Builders<GroupCallDocument>.Filter.And(
             Builders<GroupCallDocument>.Filter.Eq(g => g.CallId, call.Id),
             Builders<GroupCallDocument>.Filter.Eq(g => g.AccessHash, call.AccessHash));
+    }
+
+    /// <summary>
+    /// Clients quote back whichever hash they were given: the per-session hash minted for
+    /// <c>getGroupCall</c> / <c>updateGroupCall</c> / <c>updateGroupCallParticipants</c>, or the stored one
+    /// carried by chat full info and service messages. Both prove the client legitimately learned of the call.
+    /// </summary>
+    public static FilterDefinition<GroupCallDocument> Filter(
+        IInputGroupCall call,
+        IRequestInput input,
+        IAccessHashHelper2 accessHashHelper2)
+    {
+        if (call is TInputGroupCall inputGroupCall &&
+            inputGroupCall.AccessHash != 0 &&
+            accessHashHelper2.GenerateAccessHash(
+                input.UserId,
+                input.AccessHashKeyId,
+                inputGroupCall.Id,
+                AccessHashType.GroupCall) == inputGroupCall.AccessHash)
+        {
+            return Builders<GroupCallDocument>.Filter.Eq(g => g.CallId, inputGroupCall.Id);
+        }
+
+        return Filter(call, input.UserId);
     }
 
     public static FilterDefinition<GroupCallDocument> Filter(IInputGroupCall call, long userId)
@@ -60,6 +85,76 @@ internal static class GroupCallStateHelper
         }
 
         error.ThrowRpcError();
+    }
+
+    /// <summary><c>inputPeerSelf</c> resolves to <see cref="PeerType.Self"/>; a participant is stored as the user.</summary>
+    public static Peer? NormalizeSelf(Peer? peer)
+    {
+        return peer is { PeerType: PeerType.Self } ? new Peer(PeerType.User, peer.PeerId) : peer;
+    }
+
+    public static async Task<bool> CanManageCallAsync(
+        GroupCallDocument call,
+        long userId,
+        IChannelAdminRightsChecker channelAdminRightsChecker)
+    {
+        if (call.CreatorId == userId)
+        {
+            return true;
+        }
+
+        return (PeerType)call.PeerType == PeerType.Channel &&
+               await channelAdminRightsChecker.HasChatAdminRightAsync(call.PeerId, userId, rights => rights.ManageCall);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="mutate"/> back only if nobody changed the call since it was read, retrying on a
+    /// fresh copy otherwise, so concurrent edits and leaves do not overwrite each other's participant rows.
+    /// <paramref name="mutate"/> returns false to leave the document untouched.
+    /// </summary>
+    public static async Task<GroupCallDocument?> UpdateWithRetryAsync(
+        IMongoCollection<GroupCallDocument> collection,
+        GroupCallDocument call,
+        Func<GroupCallDocument, bool> mutate)
+    {
+        const int maxAttempts = 8;
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            var revision = call.Revision;
+            if (!mutate(call))
+            {
+                return call;
+            }
+
+            call.Revision = revision + 1;
+            var revisionFilter = revision == 0
+                ? Builders<GroupCallDocument>.Filter.Or(
+                    Builders<GroupCallDocument>.Filter.Eq(g => g.Revision, 0),
+                    Builders<GroupCallDocument>.Filter.Exists(g => g.Revision, false))
+                : Builders<GroupCallDocument>.Filter.Eq(g => g.Revision, revision);
+            var result = await collection.ReplaceOneAsync(
+                Builders<GroupCallDocument>.Filter.And(
+                    Builders<GroupCallDocument>.Filter.Eq(g => g.Id, call.Id),
+                    revisionFilter),
+                call);
+            if (result.ModifiedCount > 0 || result.MatchedCount > 0)
+            {
+                return call;
+            }
+
+            var fresh = await collection.Find(Builders<GroupCallDocument>.Filter.Eq(g => g.Id, call.Id))
+                .FirstOrDefaultAsync();
+            if (fresh == null)
+            {
+                return null;
+            }
+
+            call = fresh;
+        }
+
+        // Telegram answers an internal failure with a bare 500 INTERNAL.
+        new RpcError(500, "INTERNAL").ThrowRpcError();
+        return null;
     }
 
     public static TInputGroupCall ToInputGroupCall(GroupCallDocument call)
@@ -124,10 +219,11 @@ internal static class GroupCallStateHelper
     public static void ApplyActiveCallToChatFull(
         MyTelegram.Schema.Messages.IChatFull chatFull,
         GroupCallDocument call,
-        long selfUserId)
+        long selfUserId,
+        IPeer? savedDefaultJoinAs = null)
     {
         var inputCall = ToInputGroupCall(call);
-        var defaultJoinAs = new TPeerUser { UserId = selfUserId };
+        var defaultJoinAs = savedDefaultJoinAs ?? new TPeerUser { UserId = selfUserId };
 
         switch (chatFull.FullChat)
         {
@@ -156,6 +252,20 @@ internal static class GroupCallStateHelper
                     break;
             }
         }
+    }
+
+    /// <summary>The join-as peer the user saved with <c>phone.saveDefaultGroupCallJoinAs</c> for this chat.</summary>
+    public static async Task<IPeer?> GetSavedDefaultJoinAsAsync(
+        IMongoDatabase database,
+        long userId,
+        PeerType peerType,
+        long peerId)
+    {
+        var saved = await database.GetCollection<DefaultGroupCallJoinAsDocument>("default_group_call_join_as")
+            .Find(document => document.Id == $"{userId}:{(int)peerType}:{peerId}")
+            .FirstOrDefaultAsync();
+
+        return saved == null ? null : ToPeer((PeerType)saved.JoinAsPeerType, saved.JoinAsPeerId);
     }
 
     public static async Task SendGroupCallServiceMessageAsync(
@@ -197,7 +307,8 @@ internal static class GroupCallStateHelper
         long selfUserId,
         IPeerHelper peerHelper,
         bool justJoined = false,
-        GroupCallDocument? call = null)
+        GroupCallDocument? call = null,
+        bool versioned = false)
     {
         return new TGroupCallParticipant
         {
@@ -206,16 +317,20 @@ internal static class GroupCallStateHelper
             Date = participant.Date,
             ActiveDate = participant.Date,
             Muted = participant.Muted,
-            CanSelfUnmute = true,
+            // Telegram sets can_self_unmute only on a muted participant who is allowed to speak.
+            CanSelfUnmute = !participant.Left && participant.Muted && !participant.MutedByAdmin,
             JustJoined = justJoined,
             Self = call == null
                 ? IsParticipantControlledByUser(participant, selfUserId)
                 : IsParticipantControlledByUser(call, participant, selfUserId),
             Left = participant.Left,
-            VideoJoined = !participant.Left && !participant.VideoStopped,
+            // Set for everyone in the call, whether or not their camera is on.
+            VideoJoined = !participant.Left,
             Volume = participant.Volume,
+            VolumeByAdmin = !participant.Left && !participant.VolumeBySelf,
             RaiseHandRating = participant.RaiseHand ? participant.Date : null,
-            Versioned = true
+            // Only join and leave change the participant list, so only they are versioned.
+            Versioned = versioned
         };
     }
 
@@ -247,13 +362,14 @@ internal static class GroupCallStateHelper
         long selfUserId,
         IPeerHelper peerHelper,
         IEnumerable<GroupCallParticipantDoc> participants,
-        bool justJoined = false)
+        bool justJoined = false,
+        bool versioned = false)
     {
         return new TUpdateGroupCallParticipants
         {
             Call = ToInputGroupCall(call),
             Participants = new TVector<IGroupCallParticipant>(
-                participants.Select(p => (IGroupCallParticipant)ToParticipant(p, selfUserId, peerHelper, justJoined, call))),
+                participants.Select(p => (IGroupCallParticipant)ToParticipant(p, selfUserId, peerHelper, justJoined, call, versioned || justJoined || p.Left))),
             Version = call.Version
         };
     }
@@ -445,66 +561,32 @@ internal static class GroupCallStateHelper
         return accessHash == 0 ? 1 : accessHash;
     }
 
-    public static TUpdateGroupCallConnection CreateConnectionUpdate(
+    /// <summary>
+    /// The connection parameters a joined client needs. RTMP calls are played in stream mode
+    /// (<c>{"stream":true,"rtmp":true}</c>, see https://corefork.telegram.org/api/group-calls#detecting-stream-mode).
+    /// Every other call needs the Jingle transport of a media server (SFU), and there is none deployed yet,
+    /// so null is returned instead of transport data no server answers: the join is recorded and pushed,
+    /// and the client stays "connecting" until the SFU exists.
+    /// </summary>
+    public static TUpdateGroupCallConnection? CreateConnectionUpdate(
         GroupCallDocument call,
-        IReadOnlyCollection<WebRtcConnection>? webRtcConnections,
-        bool presentation = false,
-        bool streamFallback = false)
+        bool presentation = false)
     {
-        if (streamFallback)
+        if (!call.RtmpStream)
         {
-            // Stream mode: the client plays the call by downloading media chunks instead of using a live
-            // WebRTC connection (see https://corefork.telegram.org/api/group-calls#detecting-stream-mode).
-            //   * RTMP-mode calls (a single external publisher over RTMP)  -> {"stream": true, "rtmp": true}
-            //   * automatically-scaled stream mode (large audiences)        -> {"stream": true}
-            var streamParams = new Dictionary<string, object?>
-            {
-                ["stream"] = true
-            };
-            if (call.RtmpStream)
-            {
-                streamParams["rtmp"] = true;
-            }
-
-            var streamJson = System.Text.Json.JsonSerializer.Serialize(streamParams);
-
-            return new TUpdateGroupCallConnection
-            {
-                Presentation = presentation,
-                Params = new TDataJSON { Data = streamJson }
-            };
+            return null;
         }
 
-        var candidates = CreateConnectionCandidates(webRtcConnections);
-        if (candidates.Count == 0)
+        var streamJson = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
         {
-            throw new InvalidOperationException(
-                "Group call WebRTC candidates are not configured. Please configure App__WebRtcConnections in .env file.");
-        }
-
-        var json = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["transport"] = new Dictionary<string, object?>
-            {
-                ["ufrag"] = CreateIceToken(call.CallId, "ufrag", 8),
-                ["pwd"] = CreateIceToken(call.CallId, "pwd", 24),
-                ["fingerprints"] = new[]
-                {
-                    new Dictionary<string, string>
-                    {
-                        ["hash"] = "sha-256",
-                        ["fingerprint"] = CreateFingerprint(call.CallId),
-                        ["setup"] = "active"
-                    }
-                },
-                ["candidates"] = candidates
-            }
+            ["stream"] = true,
+            ["rtmp"] = true
         });
 
         return new TUpdateGroupCallConnection
         {
             Presentation = presentation,
-            Params = new TDataJSON { Data = json }
+            Params = new TDataJSON { Data = streamJson }
         };
     }
 
@@ -533,6 +615,43 @@ internal static class GroupCallStateHelper
         }
 
         return sources;
+    }
+
+    /// <summary>
+    /// The users and chats a call response refers to: user participants (and other user ids) go to
+    /// <c>users</c>, join-as channels and the call's own channel go to <c>chats</c>, loaded in one batch each.
+    /// </summary>
+    public static async Task<(TVector<IUser> Users, TVector<IChat> Chats)> LoadUsersAndChatsAsync(
+        IRequestInput input,
+        IUserConverterService userConverterService,
+        IChatConverterService chatConverterService,
+        IEnumerable<long> userIds,
+        IEnumerable<long> channelIds)
+    {
+        var userIdList = userIds.Where(id => id > 0).Distinct().ToList();
+        var channelIdList = channelIds.Where(id => id > 0).Distinct().ToList();
+        var users = userIdList.Count == 0
+            ? null
+            : await userConverterService.GetUserListAsync(input, userIdList, false, false, input.Layer);
+        var chats = channelIdList.Count == 0
+            ? null
+            : await chatConverterService.GetChannelListAsync(input, channelIdList, layer: input.Layer);
+
+        return (new TVector<IUser>(users ?? []), new TVector<IChat>(chats ?? []));
+    }
+
+    public static IEnumerable<long> GetParticipantChannelIds(IEnumerable<GroupCallParticipantDoc> participants)
+    {
+        return participants
+            .Where(participant => participant.PeerType == (int)PeerType.Channel)
+            .Select(participant => participant.PeerId);
+    }
+
+    public static IEnumerable<long> GetParticipantPeerUserIds(IEnumerable<GroupCallParticipantDoc> participants)
+    {
+        return participants
+            .Where(participant => participant.PeerType == (int)PeerType.User)
+            .Select(participant => participant.PeerId);
     }
 
     public static TUpdates Updates(params IUpdate[] updates)
@@ -646,49 +765,6 @@ internal static class GroupCallStateHelper
         {
             values.Add(value);
         }
-    }
-
-    private static List<Dictionary<string, string>> CreateConnectionCandidates(IReadOnlyCollection<WebRtcConnection>? webRtcConnections)
-    {
-        var candidates = new List<Dictionary<string, string>>();
-        if (webRtcConnections == null)
-        {
-            return candidates;
-        }
-
-        var id = 1;
-        foreach (var connection in webRtcConnections.Where(c => c.Port > 0 && !string.IsNullOrWhiteSpace(c.Ip)))
-        {
-            var candidateId = id.ToString();
-            candidates.Add(new Dictionary<string, string>
-            {
-                ["port"] = connection.Port.ToString(),
-                ["protocol"] = "udp",
-                ["network"] = candidateId,
-                ["generation"] = "0",
-                ["id"] = candidateId,
-                ["component"] = "1",
-                ["foundation"] = candidateId,
-                ["priority"] = Math.Max(1, 2130706431 - id).ToString(),
-                ["ip"] = connection.Ip,
-                ["type"] = "host"
-            });
-            id++;
-        }
-
-        return candidates;
-    }
-
-    private static string CreateIceToken(long callId, string purpose, int length)
-    {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"testgram-group-call:{callId}:{purpose}"));
-        return Convert.ToHexString(hash)[..length].ToLowerInvariant();
-    }
-
-    private static string CreateFingerprint(long callId)
-    {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes($"testgram-group-call:{callId}:fingerprint"));
-        return string.Join(':', hash.Select(value => value.ToString("X2")));
     }
 
     public static IPeer ToPeer(PeerType peerType, long peerId)

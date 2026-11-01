@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 
@@ -16,8 +17,10 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class ToggleGroupCallRecordHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
-    IObjectMessageSender objectMessageSender)
+    IObjectMessageSender objectMessageSender,
+    IChannelAdminRightsChecker channelAdminRightsChecker)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestToggleGroupCallRecord, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -25,7 +28,7 @@ internal sealed class ToggleGroupCallRecordHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestToggleGroupCallRecord obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -37,6 +40,12 @@ internal sealed class ToggleGroupCallRecordHandler(
             RpcErrors.RpcErrors403.GroupcallForbidden.ThrowRpcError();
             return null!;
         }
+        await GroupCallStateHelper.EnsureCanManageCallAsync(
+            groupCall,
+            input.UserId,
+            channelAdminRightsChecker,
+            RpcErrors.RpcErrors403.GroupcallForbidden);
+
         var recordingActive = groupCall.RecordStartDate.HasValue;
         if (recordingActive == obj.Start)
         {
@@ -56,7 +65,6 @@ internal sealed class ToggleGroupCallRecordHandler(
             groupCall.RecordVideoActive = false;
             groupCall.RecordTitle = null;
         }
-        groupCall.Version++;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
         var updates = GroupCallStateHelper.Updates(GroupCallStateHelper.CreateCallUpdate(groupCall, input.UserId, peerHelper));
         await GroupCallStateHelper.PushUpdatesToCallSubscribersAsync(

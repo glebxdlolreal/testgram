@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 
@@ -15,8 +16,10 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class ToggleGroupCallStartSubscriptionHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
-    IObjectMessageSender objectMessageSender)
+    IObjectMessageSender objectMessageSender,
+    IChannelAppService channelAppService)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestToggleGroupCallStartSubscription, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -24,7 +27,7 @@ internal sealed class ToggleGroupCallStartSubscriptionHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestToggleGroupCallStartSubscription obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -37,12 +40,18 @@ internal sealed class ToggleGroupCallStartSubscriptionHandler(
             return null!;
         }
 
+        // Any member of the chat may subscribe; outsiders get the usual not-a-member error.
+        if ((PeerType)groupCall.PeerType == PeerType.Channel &&
+            await channelAppService.SendRpcErrorIfNotChannelMemberAsync(input, groupCall.PeerId))
+        {
+            return null!;
+        }
+
         groupCall.ScheduleStartSubscriberIds.Remove(input.UserId);
         if (obj.Subscribed)
         {
             groupCall.ScheduleStartSubscriberIds.Add(input.UserId);
         }
-        groupCall.Version++;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
         var updates = GroupCallStateHelper.Updates(GroupCallStateHelper.CreateCallUpdate(groupCall, input.UserId, peerHelper));
         await GroupCallStateHelper.PushUpdatesToCallSubscribersAsync(

@@ -222,7 +222,7 @@ public class SsrcUniquenessPropertyTests
             "MyTelegram.Messenger.Handlers.LatestLayer.Phone.JoinGroupCallHandler",
             throwOnError: true)!;
 
-        return Activator.CreateInstance(
+        return PhoneTestFixtures.CreateGroupCallHandler(
             type,
             database,
             new PeerHelper(),

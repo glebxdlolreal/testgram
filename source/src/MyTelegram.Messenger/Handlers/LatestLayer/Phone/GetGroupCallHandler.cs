@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Converters.ConverterServices;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 using MyTelegram.Schema;
@@ -10,6 +11,8 @@ internal sealed class GetGroupCallHandler(
     IMongoDatabase mongoDatabase,
     IPeerHelper peerHelper,
     IAccessHashHelper2 accessHashHelper2,
+    IUserConverterService userConverterService,
+    IChatConverterService chatConverterService,
     ILogger<GetGroupCallHandler> logger)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestGetGroupCall, MyTelegram.Schema.Phone.IGroupCall>
 {
@@ -18,7 +21,7 @@ internal sealed class GetGroupCallHandler(
 
     protected override async Task<MyTelegram.Schema.Phone.IGroupCall> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestGetGroupCall obj)
     {
-        var groupCall = await _groupCallCollection.Find(GroupCallStateHelper.Filter(obj.Call, input.UserId)).FirstOrDefaultAsync();
+        var groupCall = await _groupCallCollection.Find(GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2)).FirstOrDefaultAsync();
         if (groupCall == null)
         {
             RpcErrors.RpcErrors400.GroupcallInvalid.ThrowRpcError();
@@ -32,8 +35,8 @@ internal sealed class GetGroupCallHandler(
         }
 
         var limit = obj.Limit > 0 ? obj.Limit : 100;
-        var participants = groupCall.Participants
-            .Take(limit)
+        var participantPage = groupCall.Participants.Take(limit).ToList();
+        var participants = participantPage
             .Select(p => (MyTelegram.Schema.IGroupCallParticipant)GroupCallStateHelper.ToParticipant(p, input.UserId, peerHelper, call: groupCall))
             .ToList();
 
@@ -51,13 +54,20 @@ internal sealed class GetGroupCallHandler(
             groupCall.Active,
             participants.Count);
 
+        var (users, chats) = await GroupCallStateHelper.LoadUsersAndChatsAsync(
+            input,
+            userConverterService,
+            chatConverterService,
+            GroupCallStateHelper.GetParticipantPeerUserIds(participantPage),
+            GroupCallStateHelper.GetParticipantChannelIds(participantPage));
+
         return new MyTelegram.Schema.Phone.TGroupCall
         {
             Call = call,
             Participants = new TVector<MyTelegram.Schema.IGroupCallParticipant>(participants),
             ParticipantsNextOffset = groupCall.Participants.Count > limit ? limit.ToString() : string.Empty,
-            Chats = new TVector<IChat>(),
-            Users = new TVector<IUser>()
+            Chats = chats,
+            Users = users
         };
     }
 }

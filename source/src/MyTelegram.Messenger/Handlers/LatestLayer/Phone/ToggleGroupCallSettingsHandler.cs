@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
 using MyTelegram.Messenger.Services.Phone;
@@ -16,6 +17,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class ToggleGroupCallSettingsHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
     IChannelAdminRightsChecker channelAdminRightsChecker,
     IObjectMessageSender objectMessageSender)
@@ -26,7 +28,7 @@ internal sealed class ToggleGroupCallSettingsHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestToggleGroupCallSettings obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -67,7 +69,6 @@ internal sealed class ToggleGroupCallSettingsHandler(
             return null!;
         }
 
-        groupCall.Version++;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
         if (joinMutedChanged)
         {

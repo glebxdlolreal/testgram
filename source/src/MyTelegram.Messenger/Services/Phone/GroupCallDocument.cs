@@ -29,6 +29,9 @@ public class GroupCallDocument
     public long? DefaultSendAsPeerId { get; set; }
     public int? DefaultSendAsPeerType { get; set; }
     public int Version { get; set; } = 1;
+    /// <summary>Optimistic-concurrency counter for read-modify-write updates; unlike <see cref="Version"/>
+    /// (the participant-list version clients see) it changes on every write.</summary>
+    public long Revision { get; set; }
     public int Date { get; set; }
     public List<GroupCallParticipantDoc> Participants { get; set; } = new();
     public List<long> InvitedUserIds { get; set; } = new();
@@ -45,11 +48,16 @@ public class GroupCallParticipantDoc
     public int PeerType { get; set; }
     public int Source { get; set; }
     public bool Muted { get; set; }
+    /// <summary>Muted by an admin, or joined a join_muted call without the right to manage it: the
+    /// participant cannot unmute themselves until an admin lets them speak.</summary>
+    public bool MutedByAdmin { get; set; }
     public bool VideoStopped { get; set; }
     public bool VideoPaused { get; set; }
     public bool PresentationPaused { get; set; }
     public bool RaiseHand { get; set; }
     public int? Volume { get; set; }
+    /// <summary>The volume was set by the participant themselves rather than by an admin.</summary>
+    public bool VolumeBySelf { get; set; }
     public int Date { get; set; }
     public bool Left { get; set; }
     public string? ParamsJson { get; set; }

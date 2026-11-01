@@ -12,9 +12,10 @@ namespace MyTelegram.Services.Tests.Phone;
 /// <summary>
 /// Property-based test for design Property 10 (Version monotonicity - group).
 ///
-/// <para><b>Property 10:</b> every participant-set / call-state change strictly increases
-/// <see cref="GroupCallDocument.Version"/>, and the new value is carried on the emitted
-/// <c>updateGroupCall</c> / <c>updateGroupCallParticipants</c>.</para>
+/// <para><b>Property 10:</b> <see cref="GroupCallDocument.Version"/> is the participant-list version: as on
+/// Telegram's servers, it increases by exactly one when the participant set changes (join / leave) and stays
+/// put for title, settings, recording and participant edits. Whatever its value, it is the one carried on the
+/// emitted <c>updateGroupCall</c> / <c>updateGroupCallParticipants</c>.</para>
 ///
 /// The property drives the real group-call handlers over an in-memory Mongo store, applying a
 /// randomly-generated sequence of state-changing operations:
@@ -24,9 +25,9 @@ namespace MyTelegram.Services.Tests.Phone;
 ///   * <c>EditGroupCallParticipantHandler</c>  - flips a participant mute -> emits updateGroupCallParticipants
 ///   * <c>LeaveGroupCallHandler</c>            - removes a participant   -> emits updateGroupCall + updateGroupCallParticipants
 ///
-/// Every generated operation is constructed to be a genuine state change (never a no-op), so after each
-/// one the test asserts the persisted <c>Version</c> strictly increased by exactly one and that the
-/// version carried on both the returned and the fanned-out update equals the newly persisted value.
+/// Every generated operation is constructed to be a genuine state change (never a no-op). After each one
+/// the test asserts the persisted <c>Version</c> moved by exactly one for a leave and not at all otherwise,
+/// and that the version carried on both the returned and the fanned-out update equals the persisted value.
 ///
 /// <b>Validates: Requirements 30.3</b>
 /// </summary>
@@ -146,10 +147,11 @@ public class GroupVersionPropertyTests
                     throw new InvalidOperationException($"Unhandled op {op}.");
             }
 
-            // Property 10: the persisted version strictly increases (by exactly one) on every change.
+            // Property 10: only a change of the participant set moves the version, by exactly one.
             var storedVersion = LoadGroupCall(store).Version;
-            storedVersion.ShouldBe(expectedVersion + 1,
-                $"version did not strictly increase after {op}: {expectedVersion} -> {storedVersion}");
+            var bump = op == Op.Leave ? 1 : 0;
+            storedVersion.ShouldBe(expectedVersion + bump,
+                $"unexpected version after {op}: {expectedVersion} -> {storedVersion}");
             expectedVersion = storedVersion;
 
             // Property 10: the new version is carried on the returned update.

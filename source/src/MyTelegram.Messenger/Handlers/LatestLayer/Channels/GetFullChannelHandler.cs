@@ -152,7 +152,8 @@ internal sealed class GetFullChannelHandler(IQueryProcessor queryProcessor, //IL
             PeerType.Channel);
         if (activeCall != null)
         {
-            GroupCallStateHelper.ApplyActiveCallToChatFull(chatFull, activeCall, input.UserId);
+            GroupCallStateHelper.ApplyActiveCallToChatFull(chatFull, activeCall, input.UserId,
+                    await GroupCallStateHelper.GetSavedDefaultJoinAsAsync(mongoDatabase, input.UserId, (PeerType)activeCall.PeerType, activeCall.PeerId));
         }
     }
 

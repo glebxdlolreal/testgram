@@ -160,7 +160,7 @@ public class CallConformanceTests
         AssertChannelPush(afterEdit[2], typeof(TUpdateGroupCallParticipants), excludeUserId: SecondJoinerId);
         sender.PushesToUser(SecondJoinerId).ShouldBeEmpty("the originating (editing) device must not receive its own update");
         var editVersion = harness.LoadCall().Version;
-        editVersion.ShouldBeGreaterThan(secondJoinVersion, "edit must increment the group-call version (R30.3)");
+        editVersion.ShouldBe(secondJoinVersion, "an edit does not change the participant set, so the version stays (as on Telegram)");
 
         // leave (second joiner) → updateGroupCallParticipants (marking the participant left) to the remaining
         // subscribers (first joiner + creator) and the channel peer, excluding the leaver.

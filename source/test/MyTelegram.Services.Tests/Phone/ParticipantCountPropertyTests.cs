@@ -223,6 +223,6 @@ public class ParticipantCountPropertyTests
     {
         var assembly = typeof(GroupCallDocument).Assembly;
         var type = assembly.GetType($"MyTelegram.Messenger.Handlers.LatestLayer.Phone.{handlerTypeName}", throwOnError: true)!;
-        return Activator.CreateInstance(type, args)!;
+        return PhoneTestFixtures.CreateGroupCallHandler(type, args);
     }
 }

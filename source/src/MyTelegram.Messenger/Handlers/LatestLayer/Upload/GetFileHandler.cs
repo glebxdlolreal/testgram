@@ -257,7 +257,7 @@ internal sealed class GetFileHandler : RpcResultObjectHandler<MyTelegram.Schema.
         }
 
         var groupCalls = _database.GetCollection<GroupCallDocument>("group_calls");
-        var groupCall = await groupCalls.Find(GroupCallStateHelper.Filter(inputGroupCall)).FirstOrDefaultAsync();
+        var groupCall = await groupCalls.Find(GroupCallStateHelper.Filter(inputGroupCall, input, _accessHashHelper)).FirstOrDefaultAsync();
         if (groupCall == null || !groupCall.Active)
         {
             RpcErrors.RpcErrors400.LocationInvalid.ThrowRpcError();

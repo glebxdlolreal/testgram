@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 
@@ -14,6 +15,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class LeaveGroupCallPresentationHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
     IObjectMessageSender objectMessageSender)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestLeaveGroupCallPresentation, MyTelegram.Schema.IUpdates>
@@ -23,7 +25,7 @@ internal sealed class LeaveGroupCallPresentationHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestLeaveGroupCallPresentation obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null)
         {
@@ -39,7 +41,6 @@ internal sealed class LeaveGroupCallPresentationHandler(
 
         participant.PresentationPaused = true;
         participant.PresentationParamsJson = null;
-        groupCall.Version++;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
 
         var updates = GroupCallStateHelper.Updates(

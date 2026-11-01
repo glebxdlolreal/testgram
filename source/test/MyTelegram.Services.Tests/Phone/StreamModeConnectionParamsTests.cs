@@ -29,15 +29,15 @@ public class StreamModeConnectionParamsTests
     private const long AccessHash = 24680;
 
     [Fact]
-    public async Task Join_NonRtmpCall_ReturnsAutoScaledStreamParams()
+    public async Task Join_NonRtmpCall_IsNotPutIntoStreamMode()
     {
+        // An ordinary video chat is a live WebRTC call, not a stream. Its transport comes from the media
+        // server; with none deployed the join is recorded but no connection parameters are invented.
         var updates = await JoinAsync(rtmpStream: false);
-        var connection = SingleConnection(updates);
 
-        using var doc = JsonDocument.Parse(connection.Params.Data);
-        doc.RootElement.GetProperty("stream").GetBoolean().ShouldBeTrue();
-        doc.RootElement.TryGetProperty("rtmp", out _).ShouldBeFalse(
-            "a non-RTMP (automatically-scaled) stream-mode call must not carry the rtmp flag");
+        var tUpdates = updates.ShouldBeOfType<TUpdates>();
+        tUpdates.Updates.OfType<TUpdateGroupCallConnection>().ShouldBeEmpty();
+        tUpdates.Updates.OfType<TUpdateGroupCallParticipants>().ShouldHaveSingleItem();
     }
 
     [Fact]
@@ -89,7 +89,7 @@ public class StreamModeConnectionParamsTests
         var type = assembly.GetType(
             "MyTelegram.Messenger.Handlers.LatestLayer.Phone.JoinGroupCallHandler",
             throwOnError: true)!;
-        var handler = Activator.CreateInstance(
+        var handler = PhoneTestFixtures.CreateGroupCallHandler(
             type, database, new PeerHelper(), sender, optionsMonitor.Object, channelAppService.Object)!;
         var method = type.GetMethod("HandleAsync", new[] { typeof(IRequestInput), typeof(IObject) })!;
 

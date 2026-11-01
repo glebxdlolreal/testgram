@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Phone;
 using MyTelegram.Schema;
@@ -14,6 +15,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Phone;
 /// </remarks>
 internal sealed class DeleteGroupCallParticipantMessagesHandler(
     IMongoDatabase mongoDatabase,
+    IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
     IObjectMessageSender objectMessageSender)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestDeleteGroupCallParticipantMessages, MyTelegram.Schema.IUpdates>, IObjectHandler
@@ -23,7 +25,7 @@ internal sealed class DeleteGroupCallParticipantMessagesHandler(
 
     protected override async Task<MyTelegram.Schema.IUpdates> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Phone.RequestDeleteGroupCallParticipantMessages obj)
     {
-        var filter = GroupCallStateHelper.Filter(obj.Call, input.UserId);
+        var filter = GroupCallStateHelper.Filter(obj.Call, input, accessHashHelper2);
         var groupCall = await _groupCallCollection.Find(filter).FirstOrDefaultAsync();
         if (groupCall == null || !groupCall.Active)
         {
