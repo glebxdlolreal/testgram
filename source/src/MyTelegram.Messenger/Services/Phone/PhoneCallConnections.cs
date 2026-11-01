@@ -55,6 +55,41 @@ public static class PhoneCallConnections
         return connections;
     }
 
+    /// <summary>
+    /// Appends the reflectors as <c>phoneConnection</c> entries. Both participants must get the same
+    /// <paramref name="peerTag"/>: tgcalls pairs the two sides on its first 12 bytes, and names a peer's
+    /// relayed candidate <c>reflector-{n}-{tag}</c>, with n being the reflector's rank by connection id.
+    /// </summary>
+    public static void AddReflectors(
+        TVector<IPhoneConnection> connections,
+        IReadOnlyList<MyTelegram.Messenger.CallReflectorConfig>? reflectors,
+        byte[] peerTag)
+    {
+        if (reflectors == null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < reflectors.Count; i++)
+        {
+            var reflector = reflectors[i];
+            if (string.IsNullOrWhiteSpace(reflector.Ip) || reflector.Port <= 0)
+            {
+                continue;
+            }
+
+            connections.Add(new TPhoneConnection
+            {
+                Id = reflector.Id != 0 ? reflector.Id : 1_000_000 + i,
+                Ip = reflector.Ip,
+                Ipv6 = reflector.Ipv6 ?? string.Empty,
+                Port = reflector.Port,
+                PeerTag = peerTag,
+                Tcp = false
+            });
+        }
+    }
+
     public static (string Username, string Password) IssueCredentials(
         WebRtcConnection server,
         long userId,

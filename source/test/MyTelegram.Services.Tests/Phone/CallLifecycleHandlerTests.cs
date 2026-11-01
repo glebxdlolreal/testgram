@@ -321,6 +321,36 @@ public class CallLifecycleHandlerTests
         harness.MessageApp.SentMessages.Count.ShouldBe(1);
     }
 
+    // ---- reflectors ---------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task Confirm_ListsTheReflector_WithOnePeerTagSharedByBothSides()
+    {
+        var harness = new CallHarness();
+        await harness.RequestCallAsync();
+        await harness.ReceivedCallAsync();
+        await harness.AcceptCallAsync();
+        harness.Sender.Clear();
+
+        var result = await harness.ConfirmCallAsync();
+
+        var callers = result.ShouldBeOfType<MyTelegram.Schema.Phone.TPhoneCall>().PhoneCall.ShouldBeOfType<MyTelegram.Schema.TPhoneCall>()
+            .Connections.OfType<MyTelegram.Schema.TPhoneConnection>().ShouldHaveSingleItem();
+        var callees = harness.Sender.PushesToUser(CalleeId)
+            .SelectMany(push => push.Updates.OfType<TUpdatePhoneCall>())
+            .Select(update => update.PhoneCall).OfType<MyTelegram.Schema.TPhoneCall>().ShouldHaveSingleItem()
+            .Connections.OfType<MyTelegram.Schema.TPhoneConnection>().ShouldHaveSingleItem();
+
+        callers.Id.ShouldBe(2574219217251);
+        callers.Ip.ShouldBe("5.6.7.8");
+        callers.Port.ShouldBe(599);
+        callers.Tcp.ShouldBeFalse();
+        callers.PeerTag.Length.ShouldBe(16);
+        callees.Id.ShouldBe(callers.Id);
+        callees.PeerTag.ToArray().ShouldBe(callers.PeerTag.ToArray());
+        (await FirstSessionAsync(harness.Sessions)).ReflectorPeerTag.ShouldBe(callers.PeerTag.ToArray());
+    }
+
     // ---- malformed Diffie-Hellman values ----------------------------------------------------------
 
     [Fact]
@@ -462,7 +492,8 @@ public class CallLifecycleHandlerTests
                         UserName = "user",
                         Password = "pass"
                     }
-                ]
+                ],
+                CallReflectors = [new CallReflectorConfig { Ip = "5.6.7.8", Port = 599, Id = 2574219217251 }]
             });
 
             _requestHandler = CreateHandler("RequestCallHandler",

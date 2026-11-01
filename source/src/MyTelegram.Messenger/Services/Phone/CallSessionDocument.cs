@@ -13,6 +13,8 @@ public class CallSessionDocument
     public byte[]? GAHash { get; set; }
     public byte[]? GA { get; set; }
     public byte[]? GB { get; set; }
+    /// <summary>The call's reflector peer_tag; both participants get the same one.</summary>
+    public byte[]? ReflectorPeerTag { get; set; }
     public long KeyFingerprint { get; set; }
     public string State { get; set; } = CallSessionStates.Requested;
     public bool Video { get; set; }

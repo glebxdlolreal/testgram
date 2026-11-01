@@ -102,6 +102,11 @@ internal sealed class ConfirmCallHandler(
             return null!;
         }
 
+        // Telegram also lists its UDP reflectors, with one random peer_tag per call shared by both sides.
+        var reflectorPeerTag = session.ReflectorPeerTag ?? System.Security.Cryptography.RandomNumberGenerator.GetBytes(16);
+        PhoneCallConnections.AddReflectors(connections, optionsAccessor.Value.CallReflectors, reflectorPeerTag);
+        PhoneCallConnections.AddReflectors(calleeConnections, optionsAccessor.Value.CallReflectors, reflectorPeerTag);
+
         if (!PhoneCallProtocolHelper.HasCommonLibraryVersion(session.CallerLibraryVersions, session.CalleeLibraryVersions))
         {
             RpcErrors.RpcErrors406.CallProtocolCompatLayerInvalid.ThrowRpcError();
@@ -112,6 +117,7 @@ internal sealed class ConfirmCallHandler(
         var update = Builders<CallSessionDocument>.Update
             .Set(s => s.GA, obj.GA)
             .Set(s => s.KeyFingerprint, obj.KeyFingerprint)
+            .Set(s => s.ReflectorPeerTag, reflectorPeerTag)
             .Set(s => s.State, CallSessionStates.Confirmed)
             .Set(s => s.StateChangedDate, currentDate);
 
