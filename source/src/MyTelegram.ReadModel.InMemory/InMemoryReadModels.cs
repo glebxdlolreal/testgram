@@ -56,6 +56,10 @@ public class DialogFilterSettingsReadModel : Impl.DialogFilterSettingsReadModel
 {
 }
 
+public class QuickReplyListReadModel : Impl.QuickReplyListReadModel
+{
+}
+
 
 public class DialogReadModel : Impl.DialogReadModel
 {

@@ -128,7 +128,16 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
             }
         }
 
-        var messageReadModel = await queryProcessor.ProcessAsync(new GetMessageByIdQuery(MessageId.Create(ownerPeerId, obj.Id).Value));
+        // A quick reply message lives under its own aggregate id and must belong to the given shortcut.
+        // See https://corefork.telegram.org/api/business#quick-reply-shortcuts
+        var isQuickReply = obj.QuickReplyShortcutId.HasValue;
+        var messageReadModel = await queryProcessor.ProcessAsync(new GetMessageByIdQuery(MessageId.Create(ownerPeerId, obj.Id, isQuickReply).Value));
+        if (isQuickReply && (messageReadModel == null || messageReadModel.ShortcutId != obj.QuickReplyShortcutId ||
+                             peer.PeerId != input.UserId))
+        {
+            RpcErrors.RpcErrors400.MessageIdInvalid.ThrowRpcError();
+        }
+
         if (messageReadModel == null)
         {
             // The id may address the schedule queue of the peer instead of the history: clients edit and
@@ -279,8 +288,6 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
             await CreateEditMessageAdminLogAsync(input, peer, messageReadModel, obj.Message ?? message, encryptedData);
         }
 
-        // Notify connected business bots about edited message
-        await NotifyBusinessBotsEditAsync(input.UserId, peer.PeerId, obj.Id, obj.Message ?? message);
 
         // A live location that just moved may have entered another member's proximity radius. Runs
         // after the edit is published so the alert reflects the stored position, and only while the
@@ -435,85 +442,6 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
         }
 
         return updates;
-    }
-
-    private async Task NotifyBusinessBotsEditAsync(long userId, long peerId, int messageId, string newText)
-    {
-        var collection = mongoDatabase.GetCollection<BsonDocument>("connected_business_bots");
-        var filter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-        var connections = await collection.Find(filter).ToListAsync();
-
-        foreach (var conn in connections)
-        {
-            var botId = conn["BotId"].AsInt64;
-            var connectionId = conn["ConnectionId"].AsString;
-
-            // Check if chat is paused
-            var pausedCollection = mongoDatabase.GetCollection<BsonDocument>("paused_business_bot_chats");
-            var pausedFilter = Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("UserId", userId),
-                Builders<BsonDocument>.Filter.Eq("PeerId", peerId)
-            );
-            var isPaused = await pausedCollection.Find(pausedFilter).AnyAsync();
-            if (isPaused) continue;
-
-            // Optional parts of a connection are stored as null when unset; reading them as arrays or
-            // documents regardless failed every edit in a chat of a user with a business bot.
-            if (conn.GetValue("Recipients", BsonNull.Value) is BsonDocument recipientsDoc &&
-                recipientsDoc.GetValue("ExcludeUsers", BsonNull.Value) is BsonArray excludeArray &&
-                excludeArray.Any(u => u.ToInt64() == peerId))
-            {
-                continue;
-            }
-
-            // Check if bot has ReadMessages right
-            if (conn.GetValue("Rights", BsonNull.Value) is not BsonDocument rightsDoc) continue;
-            if (!rightsDoc.Contains("ReadMessages") || !rightsDoc["ReadMessages"].AsBoolean)
-                continue;
-
-            // Get Qts
-            var countersCollection = mongoDatabase.GetCollection<BsonDocument>("counters");
-            var qtsFilter = Builders<BsonDocument>.Filter.Eq("_id", $"qts_{botId}");
-            var qtsUpdate = Builders<BsonDocument>.Update.Inc("seq", 1);
-            var qtsOptions = new FindOneAndUpdateOptions<BsonDocument>
-            {
-                IsUpsert = true,
-                ReturnDocument = ReturnDocument.After
-            };
-            var qtsResult = await countersCollection.FindOneAndUpdateAsync(qtsFilter, qtsUpdate, qtsOptions);
-            var qts = qtsResult["seq"].AsInt32;
-
-            // Create updateBotEditBusinessMessage
-            var updateBotEditBusinessMessage = new TUpdateBotEditBusinessMessage
-            {
-                ConnectionId = connectionId,
-                Message = new TMessage
-                {
-                    Id = messageId,
-                    FromId = new TPeerUser { UserId = userId },
-                    PeerId = new TPeerUser { UserId = peerId },
-                    Message = newText,
-                    Date = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                    Out = false
-                },
-                Qts = qts,
-                ReplyToMessage = null
-            };
-
-            var botUpdates = new TUpdates
-            {
-                Updates = new TVector<IUpdate> { updateBotEditBusinessMessage },
-                Users = new TVector<IUser>(),
-                Chats = new TVector<IChat>(),
-                Date = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-            };
-
-            await objectMessageSender.PushMessageToPeerAsync(
-                new Peer(PeerType.User, botId),
-                botUpdates,
-                pts: 0
-            );
-        }
     }
 
     private async Task CreateEditMessageAdminLogAsync(IRequestInput input, Peer peer, IMessageReadModel oldMessage, string newMessageText, byte[]? newEncryptedData)

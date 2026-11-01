@@ -45,7 +45,7 @@ internal sealed class MessageMapper
         destination.SavedPeerId = source.SavedPeerId.ToPeer();
         //destination.FwdFrom = source.FwdFrom;
         //destination.ViaBotId = source.ViaBotId;
-        //destination.ViaBusinessBotId = source.ViaBusinessBotId;
+        destination.ViaBusinessBotId = source.ViaBusinessBotId;
         //destination.ReplyTo = source.ReplyTo;
         destination.ReplyTo = source.ReplyTo.ToMessageReplyHeader(source.ForumTopic);
         destination.Date = source.Date;
@@ -139,7 +139,7 @@ internal sealed class MessageMapper
         destination.SavedPeerId = source.SavedPeerId.ToPeer();
         //destination.FwdFrom = source.FwdFrom;
         //destination.ViaBotId = source.ViaBotId;
-        //destination.ViaBusinessBotId = source.ViaBusinessBotId;
+        destination.ViaBusinessBotId = source.ViaBusinessBotId;
         destination.ReplyTo = source.InputReplyTo.ToMessageReplyHeader(source.ForumTopic);
         destination.Date = source.Date;
         destination.Message = source.Message;
@@ -160,7 +160,7 @@ internal sealed class MessageMapper
         //destination.Reactions = source.Reactions;
         //destination.RestrictionReason = source.RestrictionReason;
         destination.TtlPeriod = source.TtlPeriod;
-        //destination.QuickReplyShortcutId = source.QuickReplyShortcutId;
+        destination.QuickReplyShortcutId = source.QuickReplyItem?.ShortcutId;
         destination.Effect = source.Effect;
         //destination.Factcheck = source.Factcheck;
         //destination.ReportDeliveryUntilDate = source.ReportDeliveryUntilDate;

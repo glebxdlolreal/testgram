@@ -14,5 +14,12 @@ public enum UpdatesType
     /// </summary>
     NewMessages,
     NewEncryptedMessages,
-    EncryptedUpdates
+    EncryptedUpdates,
+
+    /// <summary>
+    /// A qts-sequenced update for a bot (callback queries, business messages, ...), kept so
+    /// updates.getDifference can replay what the bot missed while offline. Replayed by GlobalSeqNo like
+    /// <see cref="EncryptedUpdates"/>.
+    /// </summary>
+    BotQtsUpdates
 }

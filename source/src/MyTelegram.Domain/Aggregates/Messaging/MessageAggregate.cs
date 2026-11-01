@@ -238,6 +238,22 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
             _state.SenderMessageId));
     }
 
+    /// <summary>
+    /// Removes a message of a <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">quick
+    /// reply shortcut</a>. Such a message lives outside every dialog, so unlike <see cref="DeleteMessage"/>
+    /// it takes no pts and touches no dialog.
+    /// </summary>
+    [DoNotInheritRequestCommand]
+    public void DeleteQuickReplyMessage(RequestInfo requestInfo)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        var shortcutId = _state.MessageItem.QuickReplyItem?.ShortcutId ?? 0;
+        Emit(new QuickReplyMessageDeletedEvent(requestInfo,
+            _state.MessageItem.OwnerPeer.PeerId,
+            shortcutId,
+            _state.MessageItem.MessageId));
+    }
+
     public void DeleteOtherPartyMessage(RequestInfo requestInfo)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
@@ -313,7 +329,9 @@ public class MessageAggregate : SnapshotAggregateRoot<MessageAggregate, MessageI
         )
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
-        if (_state.MessageItem.Date + MyTelegramConsts.EditTimeLimit < DateTime.UtcNow.ToTimestamp())
+        // Quick reply messages are templates, editable at any time.
+        if (_state.MessageItem.QuickReplyItem == null &&
+            _state.MessageItem.Date + MyTelegramConsts.EditTimeLimit < DateTime.UtcNow.ToTimestamp())
         {
             RpcErrors.RpcErrors400.MessageEditTimeExpired.ThrowRpcError();
         }

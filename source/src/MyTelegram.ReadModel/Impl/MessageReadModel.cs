@@ -19,6 +19,7 @@ public class MessageReadModel : IMessageReadModel,
     //IAmReadModelFor<SendMessageSaga, SendMessageSagaId, SendOutboxMessageCompletedEvent>,
     //IAmReadModelFor<SendMessageSaga, SendMessageSagaId, ReceiveInboxMessageCompletedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, MessageDeleted4Event>,
+    IAmReadModelFor<MessageAggregate, MessageId, QuickReplyMessageDeletedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, ReplyChannelMessageCompletedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, ChannelMessagePinnedEvent>,
     IAmReadModelFor<MessageAggregate, MessageId, MessageReplyUpdatedEvent>,
@@ -95,6 +96,7 @@ public class MessageReadModel : IMessageReadModel,
     public long? PostChannelId { get; private set; }
     public int? PostMessageId { get; private set; }
     public bool IsQuickReplyMessage { get; private set; }
+    public long? ViaBusinessBotId { get; private set; }
     public int? ShortcutId { get; private set; }
     public QuickReplyItem? QuickReplyItem { get; private set; }
     public Guid BatchId { get; private set; }
@@ -186,6 +188,7 @@ public class MessageReadModel : IMessageReadModel,
         FwdHeader = messageItem.FwdHeader;
         SendMessageType = messageItem.SendMessageType;
         Media2 = messageItem.Media;
+        ViaBusinessBotId = messageItem.ViaBusinessBotId;
         ApplyGeoLive(messageItem.Media);
         GroupedId = messageItem.GroupId;
         Out = messageItem.IsOut;
@@ -240,7 +243,18 @@ public class MessageReadModel : IMessageReadModel,
         PaidSuggestedPostStars = messageItem.PaidSuggestedPostStars;
         PaidSuggestedPostTon = messageItem.PaidSuggestedPostTon;
         SavedPeerId = messageItem.SavedPeerId;
+        QuickReplyItem = messageItem.QuickReplyItem;
+        IsQuickReplyMessage = messageItem.QuickReplyItem != null;
+        ShortcutId = messageItem.QuickReplyItem?.ShortcutId;
 
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context,
+        IDomainEvent<MessageAggregate, MessageId, QuickReplyMessageDeletedEvent> domainEvent,
+        CancellationToken cancellationToken)
+    {
+        context.MarkForDeletion();
         return Task.CompletedTask;
     }
 
@@ -267,6 +281,7 @@ public class MessageReadModel : IMessageReadModel,
         FwdHeader = messageItem.FwdHeader;
         SendMessageType = messageItem.SendMessageType;
         Media2 = messageItem.Media;
+        ViaBusinessBotId = messageItem.ViaBusinessBotId;
         ApplyGeoLive(messageItem.Media);
         GroupedId = messageItem.GroupId;
         Out = messageItem.IsOut;

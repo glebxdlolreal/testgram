@@ -7,7 +7,7 @@ public class GetUpdatesByGlobalSeqNoQueryHandler(IQueryOnlyReadModelStore<Update
     {
         // Parity with the MongoDB handler: EncryptedUpdates marker + device scoping.
         return await store.FindAsync(p => p.OwnerPeerId == query.UserId &&
-                                          p.UpdatesType == UpdatesType.EncryptedUpdates &&
+                                          (p.UpdatesType == UpdatesType.EncryptedUpdates || p.UpdatesType == UpdatesType.BotQtsUpdates) &&
                                           p.GlobalSeqNo > query.MinGlobalSeqNo &&
                                           (p.OnlySendToThisAuthKeyId == null || p.OnlySendToThisAuthKeyId == query.PermAuthKeyId) &&
                                           (p.ExcludeAuthKeyId == null || p.ExcludeAuthKeyId != query.PermAuthKeyId), cancellationToken: cancellationToken);

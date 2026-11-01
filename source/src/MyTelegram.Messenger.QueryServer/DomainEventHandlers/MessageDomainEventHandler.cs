@@ -14,6 +14,7 @@ public partial class MessageDomainEventHandler(
     IQueryProcessor queryProcessor,
     IUpdatesConverterService updatesConverterService,
     IMessageConverterService messageConverterService,
+    MyTelegram.Messenger.Services.Business.IBusinessBotNotifier businessBotNotifier,
     IUserConverterService userConverterService,
     IChatConverterService chatConverterService,
     IChannelAppService channelAppService,
@@ -61,12 +62,21 @@ public partial class MessageDomainEventHandler(
         var updates = editMessageConverterService.ToEditMessageUpdates(domainEvent.AggregateEvent.RequestInfo.UserId, domainEvent.AggregateEvent, domainEvent.AggregateEvent.RequestInfo.Layer);
         var updatesForOtherParticipant = editMessageConverterService.ToEditMessageUpdates(-1, domainEvent.AggregateEvent, 0);
 
-        await SendRpcMessageToClientAsync(domainEvent.AggregateEvent.RequestInfo,
-            updates,
-            domainEvent.AggregateEvent.RequestInfo.UserId,
-            domainEvent.AggregateEvent.NewMessageItem.Pts,
-            domainEvent.AggregateEvent.NewMessageItem.ToPeer.PeerType
-        );
+        var businessResult = await businessBotNotifier.BuildSentResultAsync(domainEvent.AggregateEvent.RequestInfo,
+            [domainEvent.AggregateEvent.NewMessageItem]);
+        if (businessResult != null)
+        {
+            await SendRpcMessageToClientAsync(domainEvent.AggregateEvent.RequestInfo, businessResult);
+        }
+        else
+        {
+            await SendRpcMessageToClientAsync(domainEvent.AggregateEvent.RequestInfo,
+                updates,
+                domainEvent.AggregateEvent.RequestInfo.UserId,
+                domainEvent.AggregateEvent.NewMessageItem.Pts,
+                domainEvent.AggregateEvent.NewMessageItem.ToPeer.PeerType
+            );
+        }
         await PushUpdatesToPeerAsync(
             domainEvent.AggregateEvent.NewMessageItem.SenderUserId.ToUserPeer(),
             updatesForOtherParticipant,
@@ -173,6 +183,72 @@ public partial class MessageDomainEventHandler(
             logger.LogWarning("Cannot find cached channel info, channelId: {ChannelId}",
                 item.ToPeer.PeerId);
         }
+    }
+
+    /// <summary>
+    /// A message sent into a <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">quick
+    /// reply shortcut</a>. tdlib accepts the answer only as <c>updates</c> holding an <c>updateMessageID</c>
+    /// per random_id, the stored messages as <c>updateQuickReplyMessage</c>, and exactly one
+    /// <c>updateNewQuickReply</c> when the shortcut was created by this send.
+    /// </summary>
+    private async Task HandleSendQuickReplyMessageAsync(SendOutboxMessageCompletedSagaEvent aggregateEvent)
+    {
+        var items = aggregateEvent.MessageItems.Where(p => p.QuickReplyItem != null).ToList();
+        var requestInfo = aggregateEvent.RequestInfo;
+        var selfUserId = requestInfo.UserId;
+        var date = DateTime.UtcNow.ToTimestamp();
+
+        TUpdates Build(bool withMessageIds, int layer)
+        {
+            var updates = new List<IUpdate>();
+            if (withMessageIds)
+            {
+                updates.AddRange(items.Select(p => (IUpdate)new TUpdateMessageID
+                {
+                    Id = p.MessageId,
+                    RandomId = p.RandomId
+                }));
+            }
+
+            var created = items.FirstOrDefault(p => p.QuickReplyItem!.ShouldCreateNewQuickReply);
+            if (created != null)
+            {
+                updates.Add(new TUpdateNewQuickReply
+                {
+                    QuickReply = new TQuickReply
+                    {
+                        ShortcutId = created.QuickReplyItem!.ShortcutId,
+                        Shortcut = created.QuickReplyItem.Title,
+                        TopMessage = items.Min(p => p.MessageId),
+                        Count = items.Count
+                    }
+                });
+            }
+
+            updates.AddRange(items.Select(p => (IUpdate)new TUpdateQuickReplyMessage
+            {
+                Message = messageConverterService.ToMessage(selfUserId, p, layer: layer)
+            }));
+
+            return new TUpdates
+            {
+                Updates = new TVector<IUpdate>(updates),
+                Users = [],
+                Chats = [],
+                Date = date,
+                Seq = 0
+            };
+        }
+
+        if (requestInfo.ReqMsgId != 0)
+        {
+            await SendRpcMessageToClientAsync(requestInfo, Build(true, requestInfo.Layer));
+        }
+
+        // Other sessions only reload what changed; tdlib re-fetches shortcuts on start anyway, so these
+        // are not stored for getDifference.
+        await PushUpdatesToPeerAsync(selfUserId.ToUserPeer(), Build(false, 0), requestInfo.PermAuthKeyId,
+            skipSaveUpdates: true);
     }
 
     private async Task HandleEditQuickReplyMessageAsync(OutboxMessageEditCompletedSagaEvent aggregateEvent)
@@ -427,9 +503,18 @@ public partial class MessageDomainEventHandler(
             updatesType = UpdatesType.NewMessages;
         }
 
+        // Sent by a connected business bot for its owner: the bot is answered in the business form, the
+        // owner's sessions get the ordinary updates below.
+        var businessResult = aggregateEvent.RequestInfo.ReqMsgId != 0
+            ? await businessBotNotifier.BuildSentResultAsync(aggregateEvent.RequestInfo, aggregateEvent.MessageItems)
+            : null;
+        if (businessResult != null)
+        {
+            await SendRpcMessageToClientAsync(aggregateEvent.RequestInfo, businessResult);
+        }
         // when reqMsgId==0?
         // forward message/bot message
-        if (aggregateEvent.RequestInfo.ReqMsgId == 0 || item.MessageSubType == MessageSubType.PhoneCall)
+        else if (aggregateEvent.RequestInfo.ReqMsgId == 0 || item.MessageSubType == MessageSubType.PhoneCall)
         {
             await PushUpdatesToPeerAsync(item.SenderPeer,
                 selfUpdates,
@@ -688,6 +773,11 @@ public partial class MessageDomainEventHandler(
     private Task HandleSendOutboxMessageCompletedAsync(SendOutboxMessageCompletedSagaEvent aggregateEvent)
     {
         var item = aggregateEvent.MessageItem;
+        if (item.QuickReplyItem != null)
+        {
+            return HandleSendQuickReplyMessageAsync(aggregateEvent);
+        }
+
         return item.MessageSubType switch
         {
             //MessageSubType.CreateChat => HandleCreateChatAsync(aggregateEvent),

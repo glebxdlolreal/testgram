@@ -5,7 +5,7 @@ public class GetTopMessageIdQueryHandler(IQueryOnlyReadModelStore<MessageReadMod
     public Task<int> ExecuteQueryAsync(GetTopMessageIdQuery query, CancellationToken cancellationToken)
     {
         return store.FirstOrDefaultAsync(
-            p => p.OwnerPeerId == query.OwnerPeerId && !query.MessageIds.Contains(p.MessageId), p => p.MessageId,
+            p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && !query.MessageIds.Contains(p.MessageId), p => p.MessageId,
             new SortOptions<MessageReadModel>(p => p.MessageId, SortType.Descending), cancellationToken);
     }
 }

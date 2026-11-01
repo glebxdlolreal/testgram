@@ -1,75 +1,63 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Messenger.Services.Interfaces;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
+using MyTelegram.Messenger.Services.Stickers;
 using MyTelegram.Schema.Account;
-using TBusinessIntro = MyTelegram.Schema.TBusinessIntro;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 
-internal sealed class UpdateBusinessIntroHandler : RpcResultObjectHandler<RequestUpdateBusinessIntro, IBool>
+/// <summary>
+/// Set or remove the <a href="https://corefork.telegram.org/api/business#business-introduction">Telegram Business introduction »</a>.
+/// <para><c>See <a href="https://corefork.telegram.org/method/account.updateBusinessIntro"/> </c></para>
+/// </summary>
+internal sealed class UpdateBusinessIntroHandler(
+    ICommandBus commandBus,
+    IUserAppService userAppService,
+    IAccessHashHelper2 accessHashHelper,
+    IStickerDocumentValidator stickerDocumentValidator,
+    IBusinessProfileService businessProfileService)
+    : RpcResultObjectHandler<RequestUpdateBusinessIntro, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IUserAppService _userAppService;
-    private readonly IFileReferenceHelper _fileReferenceHelper;
+    /// <summary>appConfig <c>intro_title_length_limit</c>.</summary>
+    private const int TitleLengthLimit = 32;
 
-    public UpdateBusinessIntroHandler(IMongoDatabase database, IUserAppService userAppService,
-        IFileReferenceHelper fileReferenceHelper)
-    {
-        _database = database;
-        _userAppService = userAppService;
-        _fileReferenceHelper = fileReferenceHelper;
-    }
+    /// <summary>appConfig <c>intro_description_length_limit</c>.</summary>
+    private const int DescriptionLengthLimit = 70;
 
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, RequestUpdateBusinessIntro obj)
     {
-        var userId = input.UserId;
-        var collection = _database.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var filter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-
-        if (obj.Flags.IsBitSet(0) && obj.Intro != null)
+        BusinessIntroItem? item = null;
+        if (obj.Intro is TInputBusinessIntro intro)
         {
-            var intro = obj.Intro;
-            IDocument? sticker = null;
-            if (intro.Sticker is TInputDocument inputDoc)
+            await userAppService.CheckAccountPremiumStatusAsync(input.UserId);
+
+            long? stickerId = null;
+            if (intro.Sticker is TInputDocument inputDocument)
             {
-                sticker = new TDocument
+                await accessHashHelper.CheckAccessHashAsync(input, inputDocument.Id, inputDocument.AccessHash,
+                    AccessHashType.Document);
+                if (!await stickerDocumentValidator.IsStickerAsync(inputDocument.Id))
                 {
-                    Id = inputDoc.Id,
-                    AccessHash = inputDoc.AccessHash,
-                    // Derived here rather than echoed back from the request: the value is stored on the
-                    // user row and served to everyone who opens the profile, so it cannot be the client's
-                    // to choose. See https://corefork.telegram.org/api/file-references
-                    FileReference = _fileReferenceHelper.Create(AccessHashType.Document, inputDoc.Id),
-                    Date = 0,
-                    MimeType = string.Empty,
-                    Size = 0,
-                    // Never advertise dc_id=0: the client would try to fetch the sticker
-                    // from a non-existent datacenter and spam help.getConfig.
-                    DcId = MyTelegramConsts.MediaDcId,
-                    Attributes = new TVector<IDocumentAttribute>()
-                };
+                    RpcErrors.RpcErrors400.StickerDocumentInvalid.ThrowRpcError();
+                }
+
+                stickerId = inputDocument.Id;
             }
 
-            var businessIntro = new TBusinessIntro
-            {
-                Flags = intro.Flags,
-                Title = intro.Title ?? string.Empty,
-                Description = intro.Description ?? string.Empty,
-                Sticker = sticker
-            };
-
-            var update = Builders<BsonDocument>.Update.Set("BusinessIntro", businessIntro.ToBsonDocument());
-            await collection.UpdateOneAsync(filter, update);
-        }
-        else
-        {
-            var update = Builders<BsonDocument>.Update.Unset("BusinessIntro");
-            await collection.UpdateOneAsync(filter, update);
+            // Clients enforce the advertised limits; anything longer is cut rather than refused, as the
+            // method documents no error for it.
+            item = new BusinessIntroItem(Truncate(intro.Title, TitleLengthLimit),
+                Truncate(intro.Description, DescriptionLengthLimit), stickerId);
         }
 
-        _userAppService.InvalidateCache(userId);
+        await commandBus.PublishAsync(new UpdateBusinessIntroCommand(UserId.Create(input.UserId), item));
+        await businessProfileService.NotifyUserUpdatedAsync(input);
 
         return new TBoolTrue();
+    }
+
+    private static string Truncate(string? value, int limit)
+    {
+        value ??= string.Empty;
+        var info = new System.Globalization.StringInfo(value);
+        return info.LengthInTextElements <= limit ? value : info.SubstringByTextElements(0, limit);
     }
 }

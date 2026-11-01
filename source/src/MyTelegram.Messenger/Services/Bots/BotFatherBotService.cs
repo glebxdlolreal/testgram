@@ -25,7 +25,10 @@ public class BotFatherBotService(
     ICommandBus commandBus,
     IQueryProcessor queryProcessor,
     IPassportBotResolver passportBotResolver,
-    IPremiumLimitResolver premiumLimitResolver) : IBotFatherBotService, ISingletonDependency
+    IPremiumLimitResolver premiumLimitResolver,
+    IReadModelCacheHelper<IUserReadModel> userReadModelCacheHelper,
+    MyTelegram.Messenger.Services.Business.IBusinessConnectionStore businessConnectionStore,
+    MyTelegram.Messenger.Services.Business.IBusinessBotNotifier businessBotNotifier) : IBotFatherBotService, ISingletonDependency
 {
     public const long BotUserId = MyTelegramConsts.BotFatherUserId;
     private const string BotCollection = "botfather-bot-state";
@@ -1107,6 +1110,8 @@ public class BotFatherBotService(
         });
 
         await userCollection.UpdateOneAsync(filter, update);
+        // user.bot_business is served from the cached read model.
+        userReadModelCacheHelper.RemoveById(botUserId);
     }
 
     private async Task DisableBotBusinessModeAsync(IRequestInput input, long ownerId, string username)
@@ -1125,10 +1130,15 @@ public class BotFatherBotService(
         });
 
         await userCollection.UpdateOneAsync(filter, update);
+        userReadModelCacheHelper.RemoveById(botUserId);
 
-        // Disconnect all business connections for this bot
-        var connectionsCollection = mongoDatabase.GetCollection<BsonDocument>("connected_business_bots");
-        await connectionsCollection.DeleteManyAsync(new BsonDocument("BotId", botUserId));
+        // Disconnect every account that had this bot connected, and tell the bot.
+        foreach (var connection in await businessConnectionStore.GetByBotAsync(botUserId))
+        {
+            await businessConnectionStore.DeleteAsync(connection.UserId);
+            await businessConnectionStore.ClearPausedAsync(connection.UserId);
+            await businessBotNotifier.NotifyConnectionAsync(connection, true);
+        }
     }
 
     // --- Web apps (mini apps) ---

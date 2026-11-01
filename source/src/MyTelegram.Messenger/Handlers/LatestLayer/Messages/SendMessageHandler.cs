@@ -221,11 +221,6 @@ internal sealed class SendMessageHandler(IMessageAppService messageAppService, I
         var sendMessageInput = new SendMessageInput(input.ToRequestInfo(), input.UserId, toPeer, obj.Message, obj.RandomId, obj.Entities, obj.ReplyTo, obj.ClearDraft, media: media, replyMarkup: obj.ReplyMarkup, topMsgId: topMsgId, sendAs: sendAs, effect: effect, inputQuickReplyShortcut: obj.QuickReplyShortcut, silent: obj.Silent, scheduleDate: obj.ScheduleDate, scheduleRepeatPeriod: obj.ScheduleRepeatPeriod, invertMedia: obj.InvertMedia, paidMessageStars: paidMessageStars, ttlPeriod: ttlPeriod, savedPeerId: savedPeerId, suggestedPost: obj.SuggestedPost, noForwards: obj.Noforwards);
         await messageAppService.SendMessageAsync([sendMessageInput]);
 
-        // Send updateBotNewBusinessMessage to connected business bots
-        if (toPeer.PeerType == PeerType.User)
-        {
-            _ = NotifyConnectedBusinessBotsSafelyAsync(input.UserId, toPeer.PeerId, obj.Message, obj.RandomId);
-        }
 
         if (toPeer.PeerType == PeerType.User && toPeer.PeerId == BotFatherBotService.BotUserId)
             _ = Task.Run(() => botFatherBotService.HandleMessageAsync(input, input.UserId, obj.Message));
@@ -365,99 +360,4 @@ internal sealed class SendMessageHandler(IMessageAppService messageAppService, I
         return await collection.Find(Builders<BsonDocument>.Filter.Eq("ChannelId", channelId)).FirstOrDefaultAsync();
     }
 
-    private async Task NotifyConnectedBusinessBotsSafelyAsync(long userId, long peerId, string message, long randomId)
-    {
-        try
-        {
-            await NotifyConnectedBusinessBotsAsync(userId, peerId, message, randomId);
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to notify connected business bots for user {UserId}, peer {PeerId}", userId, peerId);
-        }
-    }
-
-    private async Task NotifyConnectedBusinessBotsAsync(long userId, long peerId, string message, long randomId)
-    {
-        // Skip if sending to BotFather bot
-        if (peerId == BotFatherBotService.BotUserId)
-            return;
-
-        var collection = mongoDatabase.GetCollection<BsonDocument>("connected_business_bots");
-        var filter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-        var connections = await collection.Find(filter).ToListAsync();
-
-        foreach (var conn in connections)
-        {
-            var botId = conn["BotId"].AsInt64;
-            var connectionId = conn["ConnectionId"].AsString;
-
-            // Check if chat is paused
-            var pausedCollection = mongoDatabase.GetCollection<BsonDocument>("paused_business_bot_chats");
-            var pausedFilter = Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("UserId", userId),
-                Builders<BsonDocument>.Filter.Eq("PeerId", peerId)
-            );
-            var isPaused = await pausedCollection.Find(pausedFilter).AnyAsync();
-            if (isPaused) continue;
-
-            // Check if peer is in ExcludeUsers
-            var recipientsDoc = conn["Recipients"].AsBsonDocument;
-            if (recipientsDoc.Contains("ExcludeUsers") && !recipientsDoc["ExcludeUsers"].IsBsonNull)
-            {
-                var excludeArray = recipientsDoc["ExcludeUsers"].AsBsonArray;
-                if (excludeArray.Any(u => u.AsInt64 == peerId)) continue;
-            }
-
-            // Check if bot has ReadMessages right
-            if (!conn.Contains("Rights") || conn["Rights"].IsBsonNull)
-                continue;
-            var rightsDoc = conn["Rights"].AsBsonDocument;
-            if (!rightsDoc.Contains("ReadMessages") || !rightsDoc["ReadMessages"].AsBoolean)
-                continue;
-
-            // Get Qts
-            var countersCollection = mongoDatabase.GetCollection<BsonDocument>("counters");
-            var qtsFilter = Builders<BsonDocument>.Filter.Eq("_id", $"qts_{botId}");
-            var qtsUpdate = Builders<BsonDocument>.Update.Inc("seq", 1);
-            var qtsOptions = new FindOneAndUpdateOptions<BsonDocument>
-            {
-                IsUpsert = true,
-                ReturnDocument = ReturnDocument.After
-            };
-            var qtsResult = await countersCollection.FindOneAndUpdateAsync(qtsFilter, qtsUpdate, qtsOptions);
-            var qts = qtsResult["seq"].AsInt32;
-
-            // Create updateBotNewBusinessMessage
-            var updateBotNewBusinessMessage = new TUpdateBotNewBusinessMessage
-            {
-                ConnectionId = connectionId,
-                Message = new TMessage
-                {
-                    Id = 0, // Will be set by message service
-                    FromId = new TPeerUser { UserId = userId },
-                    PeerId = new TPeerUser { UserId = peerId },
-                    Message = message,
-                    Date = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                    Out = false
-                },
-                Qts = qts,
-                ReplyToMessage = null
-            };
-
-            var botUpdates = new TUpdates
-            {
-                Updates = new TVector<IUpdate> { updateBotNewBusinessMessage },
-                Users = new TVector<IUser>(),
-                Chats = new TVector<IChat>(),
-                Date = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-            };
-
-            await objectMessageSender.PushMessageToPeerAsync(
-                new Peer(PeerType.User, botId),
-                botUpdates,
-                pts: 0
-            );
-        }
-    }
 }

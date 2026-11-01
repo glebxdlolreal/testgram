@@ -2,6 +2,7 @@ using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Caching;
 using MyTelegram.Services.Services;
+using MyTelegram.Domain.Aggregates.Updates;
 
 namespace MyTelegram.Messenger.Services.Bots;
 
@@ -62,6 +63,9 @@ public class BotUpdatesSender(
     IObjectMessageSender objectMessageSender,
     IMongoDatabase mongoDatabase,
     IPtsHelper ptsHelper,
+    IIdGenerator idGenerator,
+    ICommandBus commandBus,
+    IBotQtsCounter botQtsCounter,
     ILogger<BotUpdatesSender> logger) : IBotUpdatesSender, ISingletonDependency
 {
     /// <summary>
@@ -73,8 +77,10 @@ public class BotUpdatesSender(
 
     public async Task<int> NextQtsAsync(long botId)
     {
-        var currentQts = (await ptsHelper.GetPtsForUserAsync(botId)).Qts;
-        return await ptsHelper.IncrementQtsAsync(botId, currentQts);
+        var qts = await botQtsCounter.NextAsync(botId);
+        // Keep this process' view in step, getState also reads it.
+        await ptsHelper.IncrementQtsAsync(botId, qts, 0);
+        return qts;
     }
 
     public async Task PushUpdateToBotAsync(long botId, IUpdate update, IList<IUser>? users = null,
@@ -102,7 +108,35 @@ public class BotUpdatesSender(
             Seq = 0
         };
 
-        await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, botId), updates, qts: qts);
+        // Stored first so a bot that is offline now gets it from updates.getDifference; the qts inside the
+        // update is what lets it detect the gap.
+        long globalSeqNo = 0;
+        try
+        {
+            globalSeqNo = await idGenerator.NextLongIdAsync(IdType.GlobalSeqNo);
+            await commandBus.PublishAsync(new CreateUpdatesCommand(
+                UpdatesId.New,
+                botId,
+                null,
+                null,
+                null,
+                null,
+                UpdatesType.BotQtsUpdates,
+                0,
+                null,
+                updates.Date,
+                globalSeqNo,
+                [update],
+                updates.Users.Select(p => p.Id).ToList(),
+                updates.Chats.Select(p => p.Id).ToList()), default);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not store qts {Qts} update for bot {BotId}", qts, botId);
+        }
+
+        await objectMessageSender.PushMessageToPeerAsync(new Peer(PeerType.User, botId), updates, qts: qts,
+            globalSeqNo: globalSeqNo);
     }
 
     public async Task<BotQueryResult> SendQueryAndWaitAsync(

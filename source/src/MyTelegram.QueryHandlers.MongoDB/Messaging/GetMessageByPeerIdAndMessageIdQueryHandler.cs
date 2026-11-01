@@ -7,6 +7,6 @@ public class GetMessageByPeerIdAndMessageIdQueryHandler
     public async Task<IMessageReadModel?> ExecuteQueryAsync(GetMessageByPeerIdAndMessageIdQuery query, CancellationToken cancellationToken)
     {
         return await store.FirstOrDefaultAsync(
-            p => p.OwnerPeerId == query.OwnerPeerId && p.MessageId == query.MessageId, cancellationToken);
+            p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.MessageId == query.MessageId, cancellationToken);
     }
 }

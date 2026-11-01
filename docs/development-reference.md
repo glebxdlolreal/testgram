@@ -296,8 +296,12 @@ NullReferenceException.
 | `eventflow-userreadmodel` | Users | UserId, Phone, UserName, Usernames |
 | `call_sessions` | Calls | CallId, AccessHash, Date (TTL 30 days) |
 | `stories` | Stories | OwnerPeerId, StoryId, Date |
-| `businesschatlinks` | Business links | UserId, Slug (unique) |
-| `quickreplys` | Quick replies | UserId, ShortcutId |
+| `businesschatlinks` | Business chat links | UserId, Slug (unique), Title, Message, Entities (TL vector bytes), Views, CreatedAt |
+| `eventflow-quickreplylistreadmodel` | Quick reply shortcuts, one row per user | OwnerUserId, Shortcuts [{ShortcutId, Name}] in user order |
+| `connected_business_bots` | The account's connected business bot (one per user) | UserId, BotId, ConnectionId (unique), Recipients{…, Users, ExcludeUsers}, Rights, Date |
+| `paused_business_bot_chats` | Chats where the business bot is paused | UserId, PeerId, PausedAt |
+| `bot-qts-counters` | Shared qts sequence of bots | `_id` = bot user id, Value |
+| `business_auto_replies` | Greeting/away claims, one per chat and kind | `_id` = `{BusinessUserId}:{PeerUserId}:{greeting|away}`, LastSentDate, PeriodKey |
 | `star-gifts` | Star gifts | GiftId, Stars |
 | `fragment_collectibles` | Fragment NFT | type, username/phone |
 | `channel_admin_log` | Admin log (recent actions) | channel_id, event_id (per-channel counter), filters[], search_text, date (TTL 48 h) |
@@ -1613,6 +1617,57 @@ the default list.
 See https://corefork.telegram.org/api/wallpapers
 
 ---
+
+## Telegram Business
+
+Spec: https://core.telegram.org/api/business, https://core.telegram.org/api/bots/connected-business-bots. Client
+reference: tdlib `QuickReplyManager.cpp`, `BusinessConnectionManager.cpp`, `BusinessWorkHours.cpp`.
+
+### Quick reply shortcuts
+- Shortcut list: `QuickReplyListAggregate` (one per user, `quickreplies_{userId}`); every event carries the whole
+  resulting list. Shortcut ids come from `counters` (`quick_reply_shortcut_{userId}`).
+- Messages are ordinary `MessageAggregate`s under `MessageId.Create(owner, id, quickReplyMessage: true)` with
+  `MessageItem.QuickReplyItem` set. Ids come from the owner's normal message counter, so they never collide.
+  They take **no pts**, touch no dialog (saga, `DialogReadModelLocator`, `PtsEventHandler`) and every owner-scoped
+  history query filters `!IsQuickReplyMessage`. A new owner query must do the same.
+- A shortcut is created by sending with `quick_reply_shortcut` to `inputPeerSelf` (`QuickReplyService.ResolveForSendAsync`).
+  tdlib only accepts `updates` with one `updateMessageID` per random_id, `updateQuickReplyMessage` per message and
+  exactly one `updateNewQuickReply` when created (`MessageDomainEventHandler.HandleSendQuickReplyMessageAsync`).
+- Hashes are tdlib's: `getQuickReplies` = vector hash of (shortcut id, md5-hash of name, first message id, its
+  edit_date) per listed shortcut; `getQuickReplyMessages` = (id, edit_date) ascending. A shortcut without messages
+  is not listed (tdlib drops `count == 0`).
+- `sendQuickReplyMessages` copies the stored messages (`QuickReplyService.BuildSendInputs`) into one send saga.
+
+### Profile settings
+- Work hours, location, greeting, away and intro are `UserAggregate` events stored in `UserReadModel` as
+  `Business*Settings` records. The old handlers wrote TL objects into `eventflow-userreadmodel` under
+  `BusinessWorkHours` etc.; `BusinessProfileLegacyMigrator` (command server, on start) republishes those as commands.
+- `open_now` is computed per request (`BusinessProfileService.IsOpen`, Monday-based week minutes). Intervals are
+  normalised with tdlib's `sanitize_work_hours` port. Greeting/away settings are returned to the owner only.
+- `user.bot_business` stays a raw read-model field: BotFather bots have no aggregate.
+
+### Greeting and away messages
+`BusinessAutoReplyTrigger` (query server) → `BusinessIncomingMessageEvent` → `BusinessAutoReplyService` (command
+server). Greeting: first message or silence ≥ `no_activity_days`. Away: per schedule, `offline_only` = not online for
+10 minutes, once per chat per away period. Claims in `business_auto_replies`; sent messages carry
+`MessageItem.IsBusinessAutoReply`, which never triggers another account's automatic replies.
+
+### Connected bots
+- `BusinessConnectionStore` over `connected_business_bots`; one bot per account; a new `connection_id` on every change,
+  as the docs describe. Every change and disconnect reaches the bot as `updateBotBusinessConnect`.
+- `invokeWithBusinessConnection` allows only the documented methods (`BusinessConnectionRightsMap`), checks rights,
+  recipients/paused chats and the 24 h "can reply" window, and runs the inner request inside `BusinessConnectionScope`,
+  so its `RequestInfo.BusinessBotId` is set. Sent messages get `via_business_bot_id`; the bot is answered with
+  `updates` made of `updateBotNewBusinessMessage` (tdlib rejects anything else).
+- `BusinessBotFeedHandler` feeds the bot incoming/outgoing messages, edits and deletions of its chats.
+- All bot qts updates go through `IBotUpdatesSender`. qts comes from the shared Mongo counter `bot-qts-counters`
+  (`IBotQtsCounter`), also reported by `getState`/`getDifference`: per-process counters handed out overlapping values
+  and clients dropped the second update as a duplicate. Updates are stored as `UpdatesType.BotQtsUpdates` for
+  `getDifference`, but only those produced in the query server reach the read model (`UpdatesAggregate` events are not
+  persisted and the command server keeps only anti-spam rows); `updateBotBusinessConnect` from the command server is
+  live-only, and tdlib recovers it with `account.getBotBusinessConnection`.
+- Telethon probes: connect on port 20543 with `receive_updates` left on (the session-server rejects
+  `invokeWithoutUpdates` around `initConnection`).
 
 ## Account deletion
 

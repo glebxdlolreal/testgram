@@ -7,7 +7,7 @@ public class
     public async Task<IReadOnlyCollection<IMessageReadModel>> ExecuteQueryAsync(GetMessagesByUserIdQuery query,
         CancellationToken cancellationToken)
     {
-        return await store.FindAsync(p => p.OwnerPeerId == query.OwnerPeerId && p.ToPeerId == query.ToPeerId,
+        return await store.FindAsync(p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.ToPeerId == query.ToPeerId,
                 cancellationToken: cancellationToken);
     }
 }

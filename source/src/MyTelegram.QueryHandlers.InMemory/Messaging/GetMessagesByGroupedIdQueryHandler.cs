@@ -9,7 +9,7 @@ public class GetMessagesByGroupedIdQueryHandler(IQueryOnlyReadModelStore<Message
         CancellationToken cancellationToken)
     {
         return await store
-            .FindAsync(p => p.OwnerPeerId == query.OwnerPeerId && p.GroupedId == query.GroupedId,
+            .FindAsync(p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.GroupedId == query.GroupedId,
                 cancellationToken: cancellationToken);
     }
 }

@@ -117,6 +117,12 @@ public record SendMessageInput
     public long? Effect { get; }
     public bool IsSendGroupedMessage { get; }
     public bool IsSendQuickReplyMessage { get; }
+
+    /// <summary>A greeting or away message the server sends for a business account.</summary>
+    public bool IsBusinessAutoReply { get; init; }
+
+    /// <summary>Set when a connected business bot sends this through <c>invokeWithBusinessConnection</c>.</summary>
+    public long? ViaBusinessBotId { get; init; }
     public bool Silent { get; }
     public int? ScheduleDate { get; }
 

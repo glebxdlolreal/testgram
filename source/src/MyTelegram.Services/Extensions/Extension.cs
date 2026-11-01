@@ -330,7 +330,8 @@ public static class Extension
             requestInput.RequestId,
             requestInput.Layer,
             requestInput.Date,
-            requestInput.DeviceType);
+            requestInput.DeviceType,
+            BusinessBotId: BusinessConnectionScope.CurrentBotId);
     }
 
     public static TRpcError ToRpcError(this string rpcErrorMessage, int rpcCode = 400)

@@ -29,6 +29,41 @@ public class UserAggregate : MyInMemorySnapshotAggregateRoot<UserAggregate, User
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
         Emit(new BirthdayUpdatedEvent(birthday));
     }
+    /// <summary>
+    /// The <a href="https://corefork.telegram.org/api/business">Telegram Business</a> profile settings.
+    /// The aggregate does not need them for any decision, so they live in the read model only; a null
+    /// value removes the setting.
+    /// </summary>
+    public void UpdateBusinessWorkHours(BusinessWorkHoursItem? workHours)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        Emit(new BusinessWorkHoursUpdatedEvent(_state.UserId, workHours));
+    }
+
+    public void UpdateBusinessLocation(BusinessLocationItem? location)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        Emit(new BusinessLocationUpdatedEvent(_state.UserId, location));
+    }
+
+    public void UpdateBusinessGreetingMessage(BusinessGreetingItem? greetingMessage)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        Emit(new BusinessGreetingMessageUpdatedEvent(_state.UserId, greetingMessage));
+    }
+
+    public void UpdateBusinessAwayMessage(BusinessAwayItem? awayMessage)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        Emit(new BusinessAwayMessageUpdatedEvent(_state.UserId, awayMessage));
+    }
+
+    public void UpdateBusinessIntro(BusinessIntroItem? intro)
+    {
+        Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);
+        Emit(new BusinessIntroUpdatedEvent(_state.UserId, intro));
+    }
+
     public void UpdatePersonalChannel(RequestInfo requestInfo, long? personalChannelId)
     {
         Specs.AggregateIsCreated.ThrowDomainErrorIfNotSatisfied(this);

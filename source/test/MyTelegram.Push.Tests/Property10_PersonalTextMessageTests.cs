@@ -175,11 +175,12 @@ internal sealed class StubUserReadModel : IUserReadModel
     public int? ProfilePhotoUpdateDate => null;
     public int? UserNameUpdateDate => null;
     public bool? IsDeleted => null;
-    public TBusinessWorkHours? BusinessWorkHours => null;
-    public TBusinessLocation? BusinessLocation => null;
-    public TBusinessGreetingMessage? BusinessGreetingMessage => null;
-    public TBusinessAwayMessage? BusinessAwayMessage => null;
-    public TBusinessIntro? BusinessIntro => null;
+    public BusinessWorkHoursItem? BusinessWorkHoursSettings => null;
+    public BusinessLocationItem? BusinessLocationSettings => null;
+    public BusinessGreetingItem? BusinessGreetingSettings => null;
+    public BusinessAwayItem? BusinessAwaySettings => null;
+    public BusinessIntroItem? BusinessIntroSettings => null;
+    public bool BotBusiness => false;
     public int? DefaultHistoryTTL => null;
     public string? MainProfileTab => null;
 }

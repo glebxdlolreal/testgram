@@ -58,6 +58,11 @@ public class PtsEventHandler(IPtsHelper ptsHelper,
         IDomainEvent<EditMessageSaga, EditMessageSagaId, OutboxMessageEditCompletedSagaEvent> domainEvent,
         CancellationToken cancellationToken)
     {
+        if (domainEvent.AggregateEvent.NewMessageItem.QuickReplyItem != null)
+        {
+            return Task.CompletedTask;
+        }
+
         return UpdatePtsAsync(domainEvent.AggregateEvent.NewMessageItem.OwnerPeer.PeerId,
             domainEvent.AggregateEvent.NewMessageItem.Pts);
     }
@@ -117,7 +122,8 @@ public class PtsEventHandler(IPtsHelper ptsHelper,
             await IncrementGlobalSeqNoAsync(domainEvent.AggregateEvent.RequestInfo.UserId);
         }
 
-        foreach (var item in domainEvent.AggregateEvent.MessageItems)
+        // Quick reply messages take no pts (see SendMessageSaga).
+        foreach (var item in domainEvent.AggregateEvent.MessageItems.Where(p => p.QuickReplyItem == null))
         {
             //await ptsHelper.IncrementPtsAsync(item.OwnerPeer.PeerId, item.Pts);
             await UpdatePtsAsync(item.OwnerPeer.PeerId, item.Pts, messageId: item.MessageId);

@@ -6,7 +6,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class UpdatePersonalChannelHandler(ICommandBus commandBus, IChannelAppService channelAppService) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestUpdatePersonalChannel, IBool>
+internal sealed class UpdatePersonalChannelHandler(ICommandBus commandBus, IChannelAppService channelAppService, IAccessHashHelper2 accessHashHelper) : RpcResultObjectHandler<MyTelegram.Schema.Account.RequestUpdatePersonalChannel, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Account.RequestUpdatePersonalChannel obj)
     {
@@ -14,7 +14,14 @@ internal sealed class UpdatePersonalChannelHandler(ICommandBus commandBus, IChan
         switch (obj.Channel)
         {
             case TInputChannel inputChannel:
-                var channelReadModel = await channelAppService.GetAsync(inputChannel.ChannelId);
+                await accessHashHelper.CheckAccessHashAsync(input, inputChannel);
+                var channelReadModel = await channelAppService.GetAsync((long?)inputChannel.ChannelId);
+                // Only a broadcast channel can be shown on a profile; a megagroup has no posts to preview.
+                if (channelReadModel == null || channelReadModel.IsDeleted || !channelReadModel.Broadcast)
+                {
+                    RpcErrors.RpcErrors400.ChannelInvalid.ThrowRpcError();
+                }
+
                 if (channelReadModel!.CreatorId != input.UserId)
                 {
                     RpcErrors.RpcErrors400.ChatIdInvalid.ThrowRpcError();

@@ -1,73 +1,63 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Messages;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 
-internal sealed class DeleteQuickReplyMessagesHandler : RpcResultObjectHandler<RequestDeleteQuickReplyMessages, IUpdates>
+/// <summary>
+/// Delete one or more messages from a <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">quick reply shortcut</a>. This will also emit an <a href="https://corefork.telegram.org/constructor/updateDeleteQuickReplyMessages">updateDeleteQuickReplyMessages</a> update.
+/// Possible errors
+/// Code Type Description
+/// 400 SHORTCUT_INVALID The specified shortcut is invalid.
+/// <para><c>See <a href="https://corefork.telegram.org/method/messages.deleteQuickReplyMessages"/> </c></para>
+/// </summary>
+internal sealed class DeleteQuickReplyMessagesHandler(ICommandBus commandBus, IQuickReplyService quickReplyService)
+    : RpcResultObjectHandler<RequestDeleteQuickReplyMessages, IUpdates>
 {
-    private readonly IMongoDatabase _database;
-
-    public DeleteQuickReplyMessagesHandler(IMongoDatabase database)
-    {
-        _database = database;
-    }
-
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestDeleteQuickReplyMessages obj)
     {
         var userId = input.UserId;
-        var shortcutId = obj.ShortcutId;
-        var messageIdsToDelete = obj.Id.ToList();
-
-        var collection = _database.GetCollection<BsonDocument>("quickreplys");
-        var filter = Builders<BsonDocument>.Filter.And(
-            Builders<BsonDocument>.Filter.Eq("UserId", userId),
-            Builders<BsonDocument>.Filter.Eq("ShortcutId", shortcutId)
-        );
-        
-        var doc = await collection.Find(filter).FirstOrDefaultAsync();
-        if (doc == null)
+        var shortcuts = await quickReplyService.GetShortcutsAsync(userId);
+        if (shortcuts.All(p => p.ShortcutId != obj.ShortcutId))
         {
             RpcErrors.RpcErrors400.ShortcutInvalid.ThrowRpcError();
         }
 
-        var currentMessageIds = new List<int>();
-        if (doc.Contains("MessageIds"))
+        var messages = await quickReplyService.GetMessagesAsync(userId, [obj.ShortcutId]);
+        var requested = obj.Id?.ToHashSet() ?? [];
+        var deletedIds = messages.Where(p => requested.Contains(p.MessageId)).Select(p => p.MessageId).ToList();
+        var requestInfo = input.ToRequestInfo();
+        foreach (var messageId in deletedIds)
         {
-            var msgIds = doc["MessageIds"].AsBsonArray;
-            foreach (var msgId in msgIds)
+            await commandBus.PublishAsync(new DeleteQuickReplyMessageCommand(
+                MessageId.Create(userId, messageId, true), requestInfo));
+        }
+
+        var updates = new List<IUpdate>
+        {
+            new TUpdateDeleteQuickReplyMessages
             {
-                currentMessageIds.Add(msgId.AsInt32);
+                ShortcutId = obj.ShortcutId,
+                Messages = new TVector<int>(deletedIds)
             }
-        }
+        };
 
-        var remainingIds = currentMessageIds.Except(messageIdsToDelete).ToList();
-        var deletedCount = currentMessageIds.Count - remainingIds.Count;
-
-        var update = Builders<BsonDocument>.Update.Set("MessageIds", remainingIds)
-            .Set("Count", remainingIds.Count);
-        
-        if (remainingIds.Count > 0)
+        // A shortcut without messages no longer exists for clients (tdlib drops count == 0).
+        if (deletedIds.Count > 0 && deletedIds.Count == messages.Count)
         {
-            update = update.Set("TopMessage", remainingIds.Last());
+            await commandBus.PublishAsync(new DeleteShortcutCommand(QuickReplyListId.Create(userId), requestInfo,
+                userId, obj.ShortcutId, deletedIds));
+            updates.Add(new TUpdateDeleteQuickReply { ShortcutId = obj.ShortcutId });
         }
-        
-        await collection.UpdateOneAsync(filter, update);
+
+        await quickReplyService.PushToOtherSessionsAsync(input, [.. updates]);
 
         return new TUpdates
         {
-            Updates = new TVector<IUpdate>
-            {
-                new TUpdateDeleteQuickReplyMessages
-                {
-                    ShortcutId = shortcutId,
-                    Messages = new TVector<int>(messageIdsToDelete)
-                }
-            },
-            Users = new TVector<IUser>(),
-            Chats = new TVector<IChat>(),
-            Date = CurrentDate
+            Updates = new TVector<IUpdate>(updates),
+            Users = [],
+            Chats = [],
+            Date = DateTime.UtcNow.ToTimestamp(),
+            Seq = 0
         };
     }
 }

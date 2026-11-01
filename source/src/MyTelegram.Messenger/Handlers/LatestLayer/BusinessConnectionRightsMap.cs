@@ -1,109 +1,62 @@
-using MongoDB.Bson;
+using MyTelegram.Messenger.Services.Business;
+using MyTelegram.Schema.Account;
+using MyTelegram.Schema.Messages;
+using MyTelegram.Schema.Payments;
+using MyTelegram.Schema.Stories;
 
 namespace MyTelegram.Messenger.Handlers;
 
 /// <summary>
-/// Maps each method that may be wrapped in <c>invokeWithBusinessConnection</c> to the business-bot
-/// right it requires.
-/// <para>
-/// <c>invokeWithBusinessConnection</c> executes the inner request under the connected user's identity,
-/// so without an allowlist a bot holding any single right could reach every registered constructor as
-/// that user — including account and auth methods. Per
-/// <a href="https://corefork.telegram.org/api/bots/connected-business-bots">the API docs</a> only a
-/// fixed set of methods is wrappable, and each is governed by a specific right from
-/// <c>botBusinessRights</c>; anything outside the set must fail with
-/// <c>BUSINESS_CONNECTION_NOT_ALLOWED</c>.
-/// </para>
+/// What a method wrapped in <c>invokeWithBusinessConnection</c> needs.
+/// </summary>
+/// <param name="IsAllowed">Whether the connection's rights cover this call.</param>
+/// <param name="ChatPeer">The private chat the call acts in, checked against the connection's recipients.</param>
+/// <param name="NeedsRecentIncomingMessage">
+/// Sending is only possible into chats the peer wrote to within the last 24 hours ("can reply").
+/// </param>
+/// <param name="SelfPeer">A peer the method names that has to be the business account itself.</param>
+internal sealed record BusinessCallRule(
+    Func<BusinessBotRightsItem, bool> IsAllowed,
+    IInputPeer? ChatPeer = null,
+    bool NeedsRecentIncomingMessage = false,
+    IInputPeer? SelfPeer = null);
+
+/// <summary>
+/// The closed set of methods a <a href="https://corefork.telegram.org/api/bots/connected-business-bots">connected
+/// business bot</a> may wrap, each mapped to the <c>businessBotRights</c> it needs. The inner request runs as the
+/// account, so everything outside this table fails with <c>BUSINESS_CONNECTION_NOT_ALLOWED</c>.
+/// The list is the documented one plus <c>account.updateUsername</c>, which tdlib wraps for
+/// <c>setBusinessAccountUsername</c>.
 /// </summary>
 internal static class BusinessConnectionRightsMap
 {
-    /// <summary>Right names as persisted in the <c>Rights</c> subdocument of <c>connected_business_bots</c>.</summary>
-    private const string Reply = "Reply";
-    private const string ReadMessages = "ReadMessages";
-    private const string DeleteSentMessages = "DeleteSentMessages";
-    private const string EditName = "EditName";
-    private const string EditBio = "EditBio";
-    private const string EditUsername = "EditUsername";
-    private const string ManageStories = "ManageStories";
-
-    /// <summary>
-    /// Constructor id of every wrappable method, mapped to the right it needs. A method absent from
-    /// this table is not wrappable at all.
-    /// </summary>
-    private static readonly Dictionary<uint, string> RequiredRightByConstructorId = new()
+    public static BusinessCallRule? GetRule(IObject query)
     {
-        // Sending and editing on the user's behalf — "can reply" in the UI.
-        [0x545cd15a] = Reply, // messages.sendMessage
-        [0x330e77f] = Reply,  // messages.sendMedia
-        [0x1bf89d74] = Reply, // messages.sendMultiMedia
-        [0x14967978] = Reply, // messages.uploadMedia
-        [0x51e842e1] = Reply, // messages.editMessage
-        [0x13704a7c] = Reply, // messages.forwardMessages
-        [0x58943ee2] = Reply, // messages.setTyping
-        [0xd30d78d4] = Reply, // messages.sendReaction
-        [0xd2aaf7ec] = Reply, // messages.updatePinnedMessage
-        [0x62dd747] = Reply,  // messages.unpinAllMessages
-
-        // Reading the conversation.
-        [0x4423e6c5] = ReadMessages, // messages.getHistory
-        [0x63c66506] = ReadMessages, // messages.getMessages
-        [0xe306d3a] = ReadMessages,  // messages.readHistory
-        [0x9ec44f93] = ReadMessages, // messages.readReactions
-        [0x8bba90e6] = ReadMessages, // messages.getMessagesReactions
-        [0x461b3f48] = ReadMessages, // messages.getMessageReactionsList
-
-        // Deleting messages the bot itself sent.
-        [0xe58e95d2] = DeleteSentMessages, // messages.deleteMessages
-
-        // Profile management — each gated on its own right, not on Reply.
-        [0x78515775] = EditName,     // account.updateProfile (also covers bio; see note below)
-        [0x3e0bdd7c] = EditUsername, // account.updateUsername
-
-        // Stories posted as the connected user.
-        [0x8f9e6898] = ManageStories // stories.sendStory
-    };
-
-    /// <summary>
-    /// True when <paramref name="constructorId"/> may be wrapped at all. Callers must reject with
-    /// <c>BUSINESS_CONNECTION_NOT_ALLOWED</c> when this is false.
-    /// </summary>
-    public static bool IsWrappable(uint constructorId)
-    {
-        return RequiredRightByConstructorId.ContainsKey(constructorId);
-    }
-
-    /// <summary>
-    /// True when the connection's stored rights permit <paramref name="constructorId"/>. Returns false
-    /// for a method that is not wrappable, so a caller that checks this alone still fails closed.
-    /// </summary>
-    /// <remarks>
-    /// <c>account.updateProfile</c> can change both first/last name and bio in one call, so it is
-    /// accepted when the bot holds either <c>EditName</c> or <c>EditBio</c>. Splitting that per-field
-    /// would need the inner request's flags, which this table deliberately does not inspect.
-    /// </remarks>
-    public static bool IsAllowed(uint constructorId, BsonDocument? rights)
-    {
-        if (!RequiredRightByConstructorId.TryGetValue(constructorId, out var requiredRight))
+        return query switch
         {
-            return false;
-        }
-
-        if (HasRight(rights, requiredRight))
-        {
-            return true;
-        }
-
-        // account.updateProfile covers name and bio; EditBio is an equally valid grant for it.
-        return requiredRight == EditName
-               && constructorId == 0x78515775
-               && HasRight(rights, EditBio);
-    }
-
-    private static bool HasRight(BsonDocument? rights, string rightName)
-    {
-        return rights != null
-               && rights.TryGetValue(rightName, out var value)
-               && value.IsBoolean
-               && value.AsBoolean;
+            RequestSendMessage r => new(p => p.Reply, r.Peer, true),
+            RequestSendMedia r => new(p => p.Reply, r.Peer, true),
+            RequestSendMultiMedia r => new(p => p.Reply, r.Peer, true),
+            RequestEditMessage r => new(p => p.Reply, r.Peer),
+            RequestSetTyping r => new(p => p.Reply, r.Peer),
+            RequestUpdatePinnedMessage r => new(p => p.Reply, r.Peer),
+            MyTelegram.Schema.Messages.RequestReadHistory r => new(p => p.ReadMessages, r.Peer),
+            // Which of the two rights applies depends on each message; the handler checks that.
+            MyTelegram.Schema.Messages.RequestDeleteMessages => new(p => p.DeleteSentMessages || p.DeleteReceivedMessages),
+            RequestUpdateProfile r => new(p =>
+                (r.FirstName == null && r.LastName == null || p.EditName) && (r.About == null || p.EditBio)),
+            MyTelegram.Schema.Account.RequestUpdateUsername => new(p => p.EditUsername),
+            RequestSetGlobalPrivacySettings => new(p => p.ChangeGiftSettings),
+            RequestGetSavedStarGifts r => new(p => p.ViewGifts, SelfPeer: r.Peer),
+            RequestGetStarsStatus r => new(p => p.ViewGifts, SelfPeer: r.Peer),
+            RequestConvertStarGift => new(p => p.SellGifts),
+            RequestTransferStarGift => new(p => p.TransferAndUpgradeGifts),
+            RequestUpgradeStarGift => new(p => p.TransferAndUpgradeGifts),
+            RequestGetPaymentForm => new(p => p.TransferAndUpgradeGifts || p.TransferStars),
+            RequestSendStarsForm => new(p => p.TransferAndUpgradeGifts || p.TransferStars),
+            RequestExportInvoice => new(p => p.TransferStars),
+            RequestDeleteStories r => new(p => p.ManageStories, SelfPeer: r.Peer),
+            _ => null
+        };
     }
 }

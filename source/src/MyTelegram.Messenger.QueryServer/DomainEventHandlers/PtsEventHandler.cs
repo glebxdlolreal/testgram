@@ -66,6 +66,11 @@ public class PtsEventHandler(
         IDomainEvent<EditMessageSaga, EditMessageSagaId, OutboxMessageEditCompletedSagaEvent> domainEvent,
         CancellationToken cancellationToken)
     {
+        if (domainEvent.AggregateEvent.NewMessageItem.QuickReplyItem != null)
+        {
+            return;
+        }
+
         await ptsHelper.IncrementPtsAsync(domainEvent.AggregateEvent.NewMessageItem.OwnerPeer.PeerId,
             domainEvent.AggregateEvent.NewMessageItem.Pts);
     }

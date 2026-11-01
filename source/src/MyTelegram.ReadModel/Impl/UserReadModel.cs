@@ -1,10 +1,5 @@
 ﻿using MyTelegram.Domain.Extensions;
 using MyTelegram.Schema;
-using TBusinessWorkHours = MyTelegram.Schema.TBusinessWorkHours;
-using TBusinessLocation = MyTelegram.Schema.TBusinessLocation;
-using TBusinessGreetingMessage = MyTelegram.Schema.TBusinessGreetingMessage;
-using TBusinessAwayMessage = MyTelegram.Schema.TBusinessAwayMessage;
-using TBusinessIntro = MyTelegram.Schema.TBusinessIntro;
 
 namespace MyTelegram.ReadModel.Impl;
 
@@ -31,7 +26,12 @@ public class UserReadModel : IUserReadModel,
     IAmReadModelFor<UserAggregate, UserId, BirthdayUpdatedEvent>,
     IAmReadModelFor<UserAggregate, UserId, UserAboutUpdatedEvent>,
     IAmReadModelFor<UserAggregate, UserId, UserFirstNameUpdatedEvent>,
-    IAmReadModelFor<UserAggregate, UserId, UserDeletedEvent>
+    IAmReadModelFor<UserAggregate, UserId, UserDeletedEvent>,
+    IAmReadModelFor<UserAggregate, UserId, BusinessWorkHoursUpdatedEvent>,
+    IAmReadModelFor<UserAggregate, UserId, BusinessLocationUpdatedEvent>,
+    IAmReadModelFor<UserAggregate, UserId, BusinessGreetingMessageUpdatedEvent>,
+    IAmReadModelFor<UserAggregate, UserId, BusinessAwayMessageUpdatedEvent>,
+    IAmReadModelFor<UserAggregate, UserId, BusinessIntroUpdatedEvent>
 {
     public virtual string? About { get; private set; }
     public virtual long AccessHash { get; private set; }
@@ -88,11 +88,16 @@ public class UserReadModel : IUserReadModel,
     public VideoSizeEmojiMarkup? VideoEmojiMarkup { get; private set; }
 
     // Business fields
-    public TBusinessWorkHours? BusinessWorkHours { get; private set; }
-    public TBusinessLocation? BusinessLocation { get; private set; }
-    public TBusinessGreetingMessage? BusinessGreetingMessage { get; private set; }
-    public TBusinessAwayMessage? BusinessAwayMessage { get; private set; }
-    public TBusinessIntro? BusinessIntro { get; private set; }
+    public BusinessWorkHoursItem? BusinessWorkHoursSettings { get; private set; }
+    public BusinessLocationItem? BusinessLocationSettings { get; private set; }
+    public BusinessGreetingItem? BusinessGreetingSettings { get; private set; }
+    public BusinessAwayItem? BusinessAwaySettings { get; private set; }
+    public BusinessIntroItem? BusinessIntroSettings { get; private set; }
+    /// <summary>
+    /// Written by @BotFather's business mode toggle. BotFather bots have no aggregate behind them (their read
+    /// model is created directly), so there is no event for this flag.
+    /// </summary>
+    public bool BotBusiness { get; private set; }
 
     // Auto-delete default TTL (in seconds)
     public int? DefaultHistoryTTL { get; private set; }
@@ -306,6 +311,36 @@ public class UserReadModel : IUserReadModel,
         return Task.CompletedTask;
     }
 
+    public Task ApplyAsync(IReadModelContext context, IDomainEvent<UserAggregate, UserId, BusinessWorkHoursUpdatedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        BusinessWorkHoursSettings = domainEvent.AggregateEvent.WorkHours;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context, IDomainEvent<UserAggregate, UserId, BusinessLocationUpdatedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        BusinessLocationSettings = domainEvent.AggregateEvent.Location;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context, IDomainEvent<UserAggregate, UserId, BusinessGreetingMessageUpdatedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        BusinessGreetingSettings = domainEvent.AggregateEvent.GreetingMessage;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context, IDomainEvent<UserAggregate, UserId, BusinessAwayMessageUpdatedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        BusinessAwaySettings = domainEvent.AggregateEvent.AwayMessage;
+        return Task.CompletedTask;
+    }
+
+    public Task ApplyAsync(IReadModelContext context, IDomainEvent<UserAggregate, UserId, BusinessIntroUpdatedEvent> domainEvent, CancellationToken cancellationToken)
+    {
+        BusinessIntroSettings = domainEvent.AggregateEvent.Intro;
+        return Task.CompletedTask;
+    }
+
     public Task ApplyAsync(IReadModelContext context, IDomainEvent<UserAggregate, UserId, BirthdayUpdatedEvent> domainEvent, CancellationToken cancellationToken)
     {
         Birthday = domainEvent.AggregateEvent.Birthday;
@@ -367,11 +402,11 @@ public class UserReadModel : IUserReadModel,
         HasPassword = false;
         Premium = false;
         IsOnline = false;
-        BusinessWorkHours = null;
-        BusinessLocation = null;
-        BusinessGreetingMessage = null;
-        BusinessAwayMessage = null;
-        BusinessIntro = null;
+        BusinessWorkHoursSettings = null;
+        BusinessLocationSettings = null;
+        BusinessGreetingSettings = null;
+        BusinessAwaySettings = null;
+        BusinessIntroSettings = null;
         LastUpdateDate = DateTime.UtcNow;
 
         return Task.CompletedTask;

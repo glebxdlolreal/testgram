@@ -19,6 +19,11 @@ public class UserState : AggregateState<UserAggregate, UserId, UserState>,
     IApply<UserPremiumStatusChangedEvent>,
     IApply<PersonalChannelUpdatedEvent>,
     IApply<BirthdayUpdatedEvent>,
+    IApply<BusinessWorkHoursUpdatedEvent>,
+    IApply<BusinessLocationUpdatedEvent>,
+    IApply<BusinessGreetingMessageUpdatedEvent>,
+    IApply<BusinessAwayMessageUpdatedEvent>,
+    IApply<BusinessIntroUpdatedEvent>,
     IApply<UserAboutUpdatedEvent>,
     IApply<UserFirstNameUpdatedEvent>,
     IApply<UserDeletedEvent>
@@ -235,6 +240,27 @@ public class UserState : AggregateState<UserAggregate, UserId, UserState>,
     public void Apply(BirthdayUpdatedEvent aggregateEvent)
     {
         Birthday = aggregateEvent.Birthday;
+    }
+
+    // Telegram Business settings live in the read model only; the aggregate decides nothing from them.
+    public void Apply(BusinessWorkHoursUpdatedEvent aggregateEvent)
+    {
+    }
+
+    public void Apply(BusinessLocationUpdatedEvent aggregateEvent)
+    {
+    }
+
+    public void Apply(BusinessGreetingMessageUpdatedEvent aggregateEvent)
+    {
+    }
+
+    public void Apply(BusinessAwayMessageUpdatedEvent aggregateEvent)
+    {
+    }
+
+    public void Apply(BusinessIntroUpdatedEvent aggregateEvent)
+    {
     }
 
     public void Apply(UserAboutUpdatedEvent aggregateEvent)

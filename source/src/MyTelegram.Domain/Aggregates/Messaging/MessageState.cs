@@ -23,6 +23,7 @@ public class MessageState : AggregateState<MessageAggregate, MessageId, MessageS
     IApply<InboxMessageDeletedEvent>,
     IApply<InboxItemsAddedToOutboxMessageEvent>,
     IApply<MessageDeleted4Event>,
+    IApply<QuickReplyMessageDeletedEvent>,
     IApply<ReplyChannelMessageCompletedEvent>,
     IApply<ChannelMessagePinnedEvent>,
     IApply<ChannelMessageDeletedEvent>,
@@ -129,6 +130,11 @@ public class MessageState : AggregateState<MessageAggregate, MessageId, MessageS
     }
 
     public void Apply(MessageDeleted4Event aggregateEvent)
+    {
+        IsDeleted = true;
+    }
+
+    public void Apply(QuickReplyMessageDeletedEvent aggregateEvent)
     {
         IsDeleted = true;
     }

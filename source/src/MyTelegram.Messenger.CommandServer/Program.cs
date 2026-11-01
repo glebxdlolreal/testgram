@@ -149,6 +149,7 @@ builder.ConfigureServices((ctx,
     services.AddHostedService(sp => sp.GetRequiredService<MyTelegram.Messenger.Services.Mentions.MentionReadIntentService>());
     services.AddHostedService(sp => sp.GetRequiredService<MyTelegram.Messenger.Services.AntiSpam.AntiSpamMentionRecountService>());
     services.AddHostedService<MyTelegram.Messenger.Services.AntiSpam.AntiSpamWorker>();
+    services.AddHostedService<MyTelegram.Messenger.CommandServer.Maintenance.BusinessProfileLegacyMigrator>();
 
     services.Configure<HostOptions>(options =>
     {

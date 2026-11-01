@@ -1,56 +1,41 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Account;
-using TBusinessChatLink = MyTelegram.Schema.TBusinessChatLink;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 
-internal sealed class EditBusinessChatLinkHandler : RpcResultObjectHandler<RequestEditBusinessChatLink, IBusinessChatLink>
+/// <summary>
+/// Edit a created <a href="https://corefork.telegram.org/api/business#business-chat-links">business chat deep link »</a>.
+/// Possible errors
+/// Code Type Description
+/// 400 CHATLINK_SLUG_EMPTY The specified slug is empty.
+/// 400 CHATLINK_SLUG_EXPIRED The specified business chat link has expired.
+/// 403 PREMIUM_ACCOUNT_REQUIRED A premium account is required to execute this action.
+/// <para><c>See <a href="https://corefork.telegram.org/method/account.editBusinessChatLink"/> </c></para>
+/// </summary>
+internal sealed class EditBusinessChatLinkHandler(
+    IUserAppService userAppService,
+    IMessageAppService messageAppService,
+    IBusinessChatLinkStore chatLinkStore,
+    IOptionsMonitor<MyTelegramMessengerServerOptions> options)
+    : RpcResultObjectHandler<RequestEditBusinessChatLink, IBusinessChatLink>
 {
-    private readonly IMongoDatabase _database;
-
-    public EditBusinessChatLinkHandler(IMongoDatabase database)
+    protected override async Task<IBusinessChatLink> HandleCoreAsync(IRequestInput input,
+        RequestEditBusinessChatLink obj)
     {
-        _database = database;
-    }
-
-    protected override async Task<IBusinessChatLink> HandleCoreAsync(IRequestInput input, RequestEditBusinessChatLink obj)
-    {
-        var userId = input.UserId;
-        var slug = obj.Slug;
-        var linkInput = obj.Link;
-
-        if (string.IsNullOrEmpty(slug))
+        await userAppService.CheckAccountPremiumStatusAsync(input.UserId);
+        var slug = chatLinkStore.ParseSlug(obj.Slug);
+        if (slug.Length == 0)
         {
-            RpcErrors.RpcErrors400.ChatLinkSlugEmpty.ThrowRpcError();
+            RpcErrors.RpcErrors400.ChatlinkSlugEmpty.ThrowRpcError();
         }
 
-        var collection = _database.GetCollection<BsonDocument>("businesschatlinks");
-        var filter = Builders<BsonDocument>.Filter.And(
-            Builders<BsonDocument>.Filter.Eq("UserId", userId),
-            Builders<BsonDocument>.Filter.Eq("Slug", slug)
-        );
-
-        var update = Builders<BsonDocument>.Update
-            .Set("Title", linkInput.Title ?? "")
-            .Set("Message", linkInput.Message ?? "");
-
-        var result = await collection.UpdateOneAsync(filter, update);
-
-        if (result.MatchedCount == 0)
+        var (title, message, entities) = await BusinessChatLinkHelper.ReadAsync(input, obj.Link, messageAppService);
+        var link = await chatLinkStore.UpdateAsync(input.UserId, slug, title, message, entities);
+        if (link == null)
         {
-            RpcErrors.RpcErrors400.ChatLinkSlugExpired.ThrowRpcError();
+            RpcErrors.RpcErrors400.ChatlinkSlugExpired.ThrowRpcError();
         }
 
-        var doc = await collection.Find(filter).FirstOrDefaultAsync();
-
-        return new TBusinessChatLink
-        {
-            Link = TelegramDeepLinkHelper.GetBusinessChatLink(slug),
-            Title = doc?.GetValue("Title", "").AsString ?? "",
-            Message = doc?.GetValue("Message", "").AsString ?? "",
-            Views = doc?.GetValue("Views", 0).AsInt32 ?? 0
-        };
+        return BusinessChatLinkHelper.ToTl(link!, options.CurrentValue.JoinChatDomain);
     }
 }

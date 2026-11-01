@@ -360,10 +360,7 @@ public class UserConverterService(
         {
             var userCollection = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
             var botUserDoc = userCollection.Find(Builders<BsonDocument>.Filter.Eq("UserId", userReadModel.UserId)).FirstOrDefault();
-            if (botUserDoc != null && botUserDoc.Contains("BotBusiness"))
-            {
-                tUser.BotBusiness = botUserDoc["BotBusiness"].AsBoolean;
-            }
+            tUser.BotBusiness = userReadModel.BotBusiness;
 
             // Set BotCanEdit flag if current user owns this bot
             if (botUserDoc != null && botUserDoc.Contains("CreatorUserId"))

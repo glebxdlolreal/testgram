@@ -12,6 +12,11 @@
 /// <param name="Date">Request date</param>
 /// <param name="DeviceType">Client device type</param>
 /// <param name="AddRequestIdToCache">Add the request id to cache(used by InvokeAfterMsgHandler)</param>
+/// <param name="BusinessBotId">
+/// Set when a connected business bot made this request on behalf of <paramref name="UserId"/> through
+/// <c>invokeWithBusinessConnection</c>: the answer goes to the bot in the business form.
+/// See https://corefork.telegram.org/api/bots/connected-business-bots
+/// </param>
 public record RequestInfo(
     string ConnectionId,
     long SessionId,
@@ -25,7 +30,8 @@ public record RequestInfo(
     long Date,
     DeviceType DeviceType = DeviceType.Desktop,
     bool AddRequestIdToCache = true,
-    bool IsSubRequest = false
+    bool IsSubRequest = false,
+    long? BusinessBotId = null
     ) : IRequestWithAccessHashKeyId
 {
     public static RequestInfo Empty { get; } = new(string.Empty, 0, 0, 0, 0, 0, 0, Guid.Empty, 0, 0);

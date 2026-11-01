@@ -8,14 +8,14 @@ public class GetMessageItemListToBeDeletedQueryHandler(IQueryOnlyReadModelStore<
         if (!query.Revoke)
         {
             return await store.FindAsync(
-                p => p.OwnerPeerId == query.OwnerPeerId && query.MessageIds.Contains(p.MessageId),
+                p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && query.MessageIds.Contains(p.MessageId),
                 p => new MessageItemToBeDeleted(p.OwnerPeerId, p.MessageId, p.ToPeerType, p.ToPeerId),
                 cancellationToken: cancellationToken);
         }
 
         var batchIds =
                 (await store.FindAsync(
-                    p => p.OwnerPeerId == query.OwnerPeerId && query.MessageIds.Contains(p.MessageId),
+                    p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && query.MessageIds.Contains(p.MessageId),
                     p => p.BatchId, cancellationToken: cancellationToken));
 
         if (batchIds.Count == 0)

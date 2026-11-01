@@ -1,64 +1,92 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Account;
-using TBusinessChatLink = MyTelegram.Schema.TBusinessChatLink;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 
-internal sealed class CreateBusinessChatLinkHandler : RpcResultObjectHandler<RequestCreateBusinessChatLink, IBusinessChatLink>
+/// <summary>
+/// Create a <a href="https://corefork.telegram.org/api/business#business-chat-links">business chat deep link »</a>.
+/// Possible errors
+/// Code Type Description
+/// 400 CHATLINKS_TOO_MUCH Too many <a href="https://corefork.telegram.org/api/business#business-chat-links">business chat links</a> were created, please delete some older links.
+/// 403 PREMIUM_ACCOUNT_REQUIRED A premium account is required to execute this action.
+/// <para><c>See <a href="https://corefork.telegram.org/method/account.createBusinessChatLink"/> </c></para>
+/// </summary>
+internal sealed class CreateBusinessChatLinkHandler(
+    IUserAppService userAppService,
+    IMessageAppService messageAppService,
+    IBusinessChatLinkStore chatLinkStore,
+    IOptionsMonitor<MyTelegramMessengerServerOptions> options)
+    : RpcResultObjectHandler<RequestCreateBusinessChatLink, IBusinessChatLink>
 {
-    private readonly IMongoDatabase _database;
-    private const int MaxLinks = 10;
+    /// <summary>appConfig <c>business_chat_links_limit</c>.</summary>
+    public const int ChatLinksLimit = 100;
 
-    public CreateBusinessChatLinkHandler(IMongoDatabase database)
+    protected override async Task<IBusinessChatLink> HandleCoreAsync(IRequestInput input,
+        RequestCreateBusinessChatLink obj)
     {
-        _database = database;
-    }
-
-    protected override async Task<IBusinessChatLink> HandleCoreAsync(IRequestInput input, RequestCreateBusinessChatLink obj)
-    {
-        var userId = input.UserId;
-        var linkInput = obj.Link;
-
-        var collection = _database.GetCollection<BsonDocument>("businesschatlinks");
-        
-        var count = await collection.CountDocumentsAsync(Builders<BsonDocument>.Filter.Eq("UserId", userId));
-        if (count >= MaxLinks)
+        await userAppService.CheckAccountPremiumStatusAsync(input.UserId);
+        if (await chatLinkStore.CountAsync(input.UserId) >= ChatLinksLimit)
         {
-            RpcErrors.RpcErrors400.ChatLinksTooMuch.ThrowRpcError();
+            RpcErrors.RpcErrors400.ChatlinksTooMuch.ThrowRpcError();
         }
 
-        var slug = GenerateSlug();
-        var title = linkInput.Title ?? "";
-        var message = linkInput.Message ?? "";
-        var views = 0;
-
-        var doc = new BsonDocument
-        {
-            { "UserId", userId },
-            { "Slug", slug },
-            { "Title", title },
-            { "Message", message },
-            { "Views", views },
-            { "CreatedAt", DateTime.UtcNow }
-        };
-
-        await collection.InsertOneAsync(doc);
-
-        return new TBusinessChatLink
-        {
-            Link = TelegramDeepLinkHelper.GetBusinessChatLink(slug),
-            Title = title,
-            Message = message,
-            Views = views
-        };
+        var (title, message, entities) = await BusinessChatLinkHelper.ReadAsync(input, obj.Link, messageAppService);
+        var link = await chatLinkStore.CreateAsync(input.UserId, title, message, entities);
+        return BusinessChatLinkHelper.ToTl(link, options.CurrentValue.JoinChatDomain);
     }
+}
 
-    private string GenerateSlug()
+internal static class BusinessChatLinkHelper
+{
+    /// <summary>The pre-filled text is an ordinary message draft, so the ordinary message limit applies.</summary>
+    private const int MaxMessageLength = 4096;
+
+    private const int MaxTitleLength = 32;
+
+    public static async Task<(string? Title, string Message, TVector<IMessageEntity>? Entities)> ReadAsync(
+        IRequestInput input, IInputBusinessChatLink link, IMessageAppService messageAppService)
     {
-        const string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        var random = new Random();
-        return new string(Enumerable.Repeat(chars, 8).Select(s => s[random.Next(s.Length)]).ToArray());
+        if (link is not TInputBusinessChatLink l)
+        {
+            RpcErrors.RpcErrors400.MessageEmpty.ThrowRpcError();
+            return default;
+        }
+
+        var message = l.Message ?? string.Empty;
+        if (message.Length > MaxMessageLength)
+        {
+            RpcErrors.RpcErrors400.MessageTooLong.ThrowRpcError();
+        }
+
+        var title = string.IsNullOrWhiteSpace(l.Title) ? null : l.Title.Trim();
+        if (title?.Length > MaxTitleLength)
+        {
+            title = title[..MaxTitleLength];
+        }
+
+        TVector<IMessageEntity>? entities = null;
+        if (l.Entities?.Count > 0)
+        {
+            var processed = await messageAppService.ProcessMessageEntitiesAsync(message, l.Entities,
+                input.UserId.ToUserPeer());
+            entities = processed.Entities;
+        }
+
+        return (title, message, entities);
     }
+
+    public static string ToLink(string domain, string slug)
+    {
+        var baseUrl = string.IsNullOrWhiteSpace(domain) ? "https://t.me" : domain.TrimEnd('/');
+        return $"{baseUrl}/m/{slug}";
+    }
+
+    public static TBusinessChatLink ToTl(BusinessChatLinkItem link, string domain) => new()
+    {
+        Link = ToLink(domain, link.Slug),
+        Message = link.Message,
+        Entities = link.Entities,
+        Title = link.Title,
+        Views = link.Views
+    };
 }

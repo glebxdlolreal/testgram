@@ -9,7 +9,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Updates;
 /// <remarks>
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetStateHandler(IPtsHelper ptsHelper, ISecretChatMessageStore secretChatMessageStore) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetState, MyTelegram.Schema.Updates.IState>
+internal sealed class GetStateHandler(IPtsHelper ptsHelper, ISecretChatMessageStore secretChatMessageStore, MyTelegram.Messenger.Services.Bots.IBotQtsCounter botQtsCounter) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetState, MyTelegram.Schema.Updates.IState>
 {
     protected override async Task<IState> HandleCoreAsync(IRequestInput input, RequestGetState obj)
     {
@@ -26,7 +26,8 @@ internal sealed class GetStateHandler(IPtsHelper ptsHelper, ISecretChatMessageSt
         {
             Date = CurrentDate,
             Pts = cacheItem.Pts,
-            Qts = Math.Max(cacheItem.Qts, secretChatQts),
+            // A bot's qts comes from the shared counter (business, callback and inline updates).
+            Qts = Math.Max(Math.Max(cacheItem.Qts, secretChatQts), await botQtsCounter.GetAsync(input.UserId)),
             Seq = cacheItem.Seq,
             UnreadCount = cacheItem.UnreadCount,
         };

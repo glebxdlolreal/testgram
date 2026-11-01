@@ -17,7 +17,7 @@ public class
 
         Expression<Func<MessageReadModel, bool>> predicate = query.ToPeer.PeerType == PeerType.Channel
             ? p => p.OwnerPeerId == query.ToPeer.PeerId
-            : p => p.OwnerPeerId == query.OwnerPeerId && p.ToPeerId == query.ToPeer.PeerId;
+            : p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.ToPeerId == query.ToPeer.PeerId;
 
         return predicate
                 .WhereIf(query.Pinned.HasValue, p => p.Pinned == query.Pinned!.Value)

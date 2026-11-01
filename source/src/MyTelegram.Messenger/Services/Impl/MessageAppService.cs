@@ -2,6 +2,7 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Helpers;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Messenger.Services.Entities;
 using MyTelegram.Messenger.Services.Scheduled;
 using MyTelegram.Messenger.Services.VideoProcessing;
@@ -26,7 +27,8 @@ public class MessageAppService(
     IObjectMessageSender objectMessageSender,
     IScheduledMessageStore scheduledMessageStore,
     IVideoProcessingService videoProcessingService,
-    IMessageEntityService messageEntityService)
+    IMessageEntityService messageEntityService,
+    IQuickReplyService quickReplyService)
     : BaseAppService, IMessageAppService, ITransientDependency
 {
     private static byte[]? _encryptionKey;
@@ -311,6 +313,7 @@ public class MessageAppService(
         var requestInfo = firstInput.RequestInfo;
 
         await ValidateScheduledMessagesAsync(inputs);
+        var quickReplies = new Dictionary<string, QuickReplyItem>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var input in inputs)
         {
@@ -325,7 +328,7 @@ public class MessageAppService(
                 ? CurrentDate + videoProcessingService.EstimateConversionSeconds(input.Media)
                 : (int?)null;
 
-            var item = await CreateSendMessageItemAsync(input, conversionDate);
+            var item = await CreateSendMessageItemAsync(input, conversionDate, quickReplies);
 
             // Separate scheduled messages from immediate messages
             if (item.MessageItem.ScheduleDate.HasValue)
@@ -769,8 +772,25 @@ public class MessageAppService(
     /// estimated conversion date even though the client asked for an immediate send.
     /// </param>
     private async Task<SendMessageItem> CreateSendMessageItemAsync(SendMessageInput input,
-        int? scheduleDateOverride = null)
+        int? scheduleDateOverride = null,
+        Dictionary<string, QuickReplyItem>? quickReplies = null)
     {
+        // A message sent with quick_reply_shortcut is not delivered anywhere: it is stored as a message of
+        // that shortcut. Clients address it to inputPeerSelf.
+        // See https://corefork.telegram.org/api/business#quick-reply-shortcuts
+        QuickReplyItem? quickReplyItem = null;
+        if (input.InputQuickReplyShortcut != null)
+        {
+            if (input.ToPeer.PeerType is not (PeerType.Self or PeerType.User) ||
+                input.ToPeer.PeerId != input.SenderUserId)
+            {
+                RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
+            }
+
+            quickReplyItem = await quickReplyService.ResolveForSendAsync(input.SenderUserId,
+                input.InputQuickReplyShortcut, quickReplies ?? new(StringComparer.OrdinalIgnoreCase));
+        }
+
         //await CheckSendAsAsync(input);
         await CheckGlobalPrivacySettingsAsync(input);
         var channelReadModel = await CheckChannelBannedRightsAsync(input);
@@ -853,7 +873,7 @@ public class MessageAppService(
         postAuthor = input.PostAuthor ?? postAuthor;
         views = input.Views ?? views;
 
-        var scheduleDate = scheduleDateOverride ?? input.ScheduleDate;
+        var scheduleDate = quickReplyItem != null ? null : scheduleDateOverride ?? input.ScheduleDate;
         if (scheduleDate.HasValue && !scheduleDateOverride.HasValue &&
             ScheduledMessageRules.ShouldSendImmediately(scheduleDate.Value, CurrentDate))
         {
@@ -952,8 +972,11 @@ public class MessageAppService(
             SuggestedPost: input.SuggestedPost,
             PaidSuggestedPostStars: input.SuggestedPost?.Price is TStarsAmount,
             PaidSuggestedPostTon: input.SuggestedPost?.Price is TStarsTonAmount,
-            TtlPeriod: input.TtlPeriod,
-            NoForwards: input.NoForwards || targetNoForwards
+            TtlPeriod: quickReplyItem != null ? null : input.TtlPeriod,
+            NoForwards: quickReplyItem == null && (input.NoForwards || targetNoForwards),
+            QuickReplyItem: quickReplyItem,
+            IsBusinessAutoReply: input.IsBusinessAutoReply,
+            ViaBusinessBotId: input.ViaBusinessBotId ?? input.RequestInfo.BusinessBotId
         );
 
         var sendMessageItem = new SendMessageItem(messageItem, input.ClearDraft, mentionedUserIds, []);

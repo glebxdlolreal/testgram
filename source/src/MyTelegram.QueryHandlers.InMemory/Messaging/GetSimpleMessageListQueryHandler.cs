@@ -17,7 +17,7 @@ public class
                 cancellationToken: cancellationToken);
         }
 
-        Expression<Func<MessageReadModel, bool>> predicate = p => p.OwnerPeerId == query.OwnerPeerId && p.ToPeerId == query.ToPeer.PeerId;
+        Expression<Func<MessageReadModel, bool>> predicate = p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.ToPeerId == query.ToPeer.PeerId;
         predicate = predicate
                 .WhereIf(query.Pinned.HasValue, p => p.Pinned == query.Pinned!.Value)
                 .WhereIf(query.MessageIds?.Count > 0, p => query.MessageIds!.Contains(p.MessageId))

@@ -1,72 +1,53 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Messenger.Converters.ConverterServices.Messages;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Messages;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 
-internal sealed class GetQuickReplyMessagesHandler : RpcResultObjectHandler<RequestGetQuickReplyMessages, IMessages>
+/// <summary>
+/// Fetch (a subset or all) messages in a <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">quick reply shortcut »</a>.
+/// Possible errors
+/// Code Type Description
+/// 400 SHORTCUT_INVALID The specified shortcut is invalid.
+/// <para><c>See <a href="https://corefork.telegram.org/method/messages.getQuickReplyMessages"/> </c></para>
+/// </summary>
+internal sealed class GetQuickReplyMessagesHandler(
+    IQuickReplyService quickReplyService,
+    IMessageConverterService messageConverterService,
+    IUserConverterService userConverterService)
+    : RpcResultObjectHandler<RequestGetQuickReplyMessages, IMessages>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IMessageAppService _messageAppService;
-    private readonly IGetHistoryConverterService _getHistoryConverterService;
-
-    public GetQuickReplyMessagesHandler(
-        IMongoDatabase database,
-        IMessageAppService messageAppService,
-        IGetHistoryConverterService getHistoryConverterService)
-    {
-        _database = database;
-        _messageAppService = messageAppService;
-        _getHistoryConverterService = getHistoryConverterService;
-    }
-
     protected override async Task<IMessages> HandleCoreAsync(IRequestInput input, RequestGetQuickReplyMessages obj)
     {
         var userId = input.UserId;
-        var shortcutId = obj.ShortcutId;
-        
-        var collection = _database.GetCollection<BsonDocument>("quickreplys");
-        var filter = Builders<BsonDocument>.Filter.And(
-            Builders<BsonDocument>.Filter.Eq("UserId", userId),
-            Builders<BsonDocument>.Filter.Eq("ShortcutId", shortcutId)
-        );
-        
-        var doc = await collection.Find(filter).FirstOrDefaultAsync();
-        if (doc == null)
+        var shortcuts = await quickReplyService.GetShortcutsAsync(userId);
+        if (shortcuts.All(p => p.ShortcutId != obj.ShortcutId))
         {
             RpcErrors.RpcErrors400.ShortcutInvalid.ThrowRpcError();
         }
 
-        var messageIds = new List<int>();
-        if (doc != null && doc.Contains("MessageIds"))
+        var messages = await quickReplyService.GetMessagesAsync(userId, [obj.ShortcutId],
+            obj.Id?.Count > 0 ? obj.Id.ToList() : null);
+
+        // tdlib hashes its whole cached shortcut, so the hash only means something for a full fetch.
+        if (obj.Hash != 0 && !(obj.Id?.Count > 0))
         {
-            var msgIds = doc["MessageIds"].AsBsonArray;
-            foreach (var msgId in msgIds)
+            var hash = QuickReplyService.ComputeMessagesHash(messages.Select(p => (p.MessageId, p.EditDate ?? 0)));
+            if (hash == obj.Hash)
             {
-                messageIds.Add(msgId.AsInt32);
+                return new TMessagesNotModified { Count = messages.Count };
             }
         }
 
-        if (obj.Id != null && obj.Id.Count > 0)
+        var users = await userConverterService.GetUserListAsync(input, [userId], layer: input.Layer);
+        var ordered = messages.OrderByDescending(p => p.MessageId).ToList();
+
+        return new TMessages
         {
-            messageIds = messageIds.Where(m => obj.Id.Contains(m)).ToList();
-        }
-
-        if (messageIds.Count == 0)
-        {
-            return new TMessages
-            {
-                Messages = new TVector<IMessage>(),
-                Chats = new TVector<IChat>(),
-                Users = new TVector<IUser>()
-            };
-        }
-
-        var getMessageOutput = await _messageAppService.GetMessagesAsync(
-            new GetMessagesInput(userId, userId, messageIds, null) { Limit = 50 });
-
-        return _getHistoryConverterService.ToMessages(input, getMessageOutput, input.Layer);
+            Messages = new TVector<IMessage>(messageConverterService.ToMessageList(userId, ordered, null, null,
+                null, input.Layer)),
+            Chats = [],
+            Users = new TVector<IUser>(users),
+            Topics = []
+        };
     }
 }

@@ -666,16 +666,14 @@ public record GetAllAnimatedStickerIdListQuery : IQuery<IReadOnlyCollection<long
 
 public record GetAllStickerIdListQuery : IQuery<IReadOnlyCollection<long>>;
 
-public record GetQuickReplyByIdQuery(long UserId, int ShortcutId) : IQuery<IQuickReplyReadModel?>;
+public record GetQuickReplyListQuery(long OwnerUserId) : IQuery<IQuickReplyListReadModel?>;
 
-public record GetQuickReplyByTitleQuery(long UserId, string Title) : IQuery<IQuickReplyReadModel?>;
-
-public record GetQuickReplyCountQuery(long UserId) : IQuery<long>;
-
-public record GetQuickRepliesByUserIdQuery(long UserId) : IQuery<IReadOnlyCollection<IQuickReplyReadModel>>;
-
-public record GetQuickReplyMessagesQuery(long UserId, int? ShortcutId, List<int> MessageIds)
-    : IQuery<IReadOnlyCollection<IMessageReadModel>>;
+/// <summary>
+/// Messages of the user's quick reply shortcuts, ordered by message id. <paramref name="ShortcutIds"/> and
+/// <paramref name="MessageIds"/> narrow the result when non-empty.
+/// </summary>
+public record GetQuickReplyMessagesQuery(long OwnerUserId, IReadOnlyCollection<int>? ShortcutIds,
+    IReadOnlyCollection<int>? MessageIds) : IQuery<IReadOnlyCollection<IMessageReadModel>>;
 
 //public record GetQuickReplyMessagesByShortcutIdQuery(long UserId, int ShortcutId, List<int> MessageIds)
 //    : IQuery<IReadOnlyCollection<IMentionsReadModel>>;

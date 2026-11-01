@@ -51,6 +51,12 @@ public class MessageDomainEventHandler(ICommandBus commandBus,
 
     private void UpdateMessageTokens(MessageItem item)
     {
+        // Quick reply messages are not searchable chat history.
+        if (item.QuickReplyItem != null)
+        {
+            return;
+        }
+
         var message = item.Message;
         if (string.IsNullOrEmpty(message) && item.EncryptedData != null)
         {

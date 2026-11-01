@@ -56,11 +56,16 @@ public interface IUserReadModel : IReadModel
     int? UserNameUpdateDate { get; }
     bool? IsDeleted { get; }
 
-    TBusinessWorkHours? BusinessWorkHours { get; }
-    TBusinessLocation? BusinessLocation { get; }
-    TBusinessGreetingMessage? BusinessGreetingMessage { get; }
-    TBusinessAwayMessage? BusinessAwayMessage { get; }
-    TBusinessIntro? BusinessIntro { get; }
+    // Telegram Business profile, see https://corefork.telegram.org/api/business. Stored under new names:
+    // documents written by the old handlers kept TL objects under BusinessWorkHours & co.
+    BusinessWorkHoursItem? BusinessWorkHoursSettings { get; }
+    BusinessLocationItem? BusinessLocationSettings { get; }
+    BusinessGreetingItem? BusinessGreetingSettings { get; }
+    BusinessAwayItem? BusinessAwaySettings { get; }
+    BusinessIntroItem? BusinessIntroSettings { get; }
+
+    /// <summary><c>user.bot_business</c>: the bot can be connected to business accounts.</summary>
+    bool BotBusiness { get; }
 
     int? DefaultHistoryTTL { get; }
     string? MainProfileTab { get; }

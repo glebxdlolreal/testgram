@@ -64,14 +64,12 @@ public class SendMessageSaga : MyInMemoryAggregateSaga<SendMessageSaga, SendMess
                 {
                     idType = IdType.ScheduleMessageId;
                 }
-                else if (messageItem.QuickReplyItem != null)
-                {
-                    idType = IdType.QuickReplyMessageId;
-                }
                 messageId = await _idGenerator.NextIdAsync(idType, messageItem.OwnerPeer.PeerId);
             }
 
-            if (messageItem.Pts == 0)
+            // A quick reply message is stored outside every dialog: it never enters the update sequence
+            // of its owner, so it takes no pts. See https://corefork.telegram.org/api/business#quick-reply-shortcuts
+            if (messageItem.Pts == 0 && messageItem.QuickReplyItem == null)
             {
                 var pts = await _idGenerator.NextIdAsync(IdType.Pts, messageItem.OwnerPeer.PeerId);
 
@@ -133,7 +131,7 @@ public class SendMessageSaga : MyInMemoryAggregateSaga<SendMessageSaga, SendMess
 
     private void ClearDraft(OutboxMessageCreatedEvent aggregateEvent)
     {
-        if (!aggregateEvent.ClearDraft)
+        if (!aggregateEvent.ClearDraft || aggregateEvent.OutboxMessageItem.QuickReplyItem != null)
         {
             return;
         }
@@ -285,6 +283,17 @@ public class SendMessageSaga : MyInMemoryAggregateSaga<SendMessageSaga, SendMess
                 _state.IsSendGroupedMessages,
                 []
                 ));
+        }
+
+        if (outboxMessageItem.QuickReplyItem != null)
+        {
+            // Not part of any dialog: Saved Messages must not pick it up as its top message.
+            if (_state.IsSendOutboxMessageCompleted)
+            {
+                await CompleteAsync();
+            }
+
+            return;
         }
 
         var defaultHistoryTtl = outboxMessageItem.IsTtlFromDefaultSetting ? outboxMessageItem.TtlPeriod : null;

@@ -10,7 +10,7 @@ public class GetMessagesByOwnerAndMessageIdListQueryHandler(IQueryOnlyReadModelS
         CancellationToken cancellationToken)
     {
         return await store.FindAsync(
-            p => p.OwnerPeerId == query.OwnerPeerId && query.MessageIdList.Contains(p.MessageId),
+            p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && query.MessageIdList.Contains(p.MessageId),
             cancellationToken: cancellationToken);
     }
 }

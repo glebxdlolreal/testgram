@@ -1,9 +1,12 @@
-﻿namespace MyTelegram.ReadModel.Interfaces;
+namespace MyTelegram.ReadModel.Interfaces;
 
-public interface IQuickReplyReadModel : IReadModel
+/// <summary>
+/// The <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">quick reply shortcuts</a>
+/// of one user, in the user's order. The messages of each shortcut are message read models flagged with
+/// <see cref="IMessageReadModel.IsQuickReplyMessage"/>.
+/// </summary>
+public interface IQuickReplyListReadModel : IReadModel
 {
-    long UserId { get; }
-    string Title { get; }
-    int ShortcutId { get; }
-    List<int> MessageIds { get; }
+    long OwnerUserId { get; }
+    IReadOnlyList<QuickReplyShortcut> Shortcuts { get; }
 }

@@ -19,6 +19,12 @@ public class DialogReadModelLocator : IDialogReadModelLocator, ITransientDepende
                     break;
 
                 case OutboxMessageCreatedEvent outboxCreatedEvent:
+                    // A quick reply message belongs to no dialog.
+                    if (outboxCreatedEvent.OutboxMessageItem.QuickReplyItem != null)
+                    {
+                        break;
+                    }
+
                     //yield return outboxCreatedEvent.DialogId.Value;
                     yield return DialogId.Create(outboxCreatedEvent.RequestInfo.UserId,
                         outboxCreatedEvent.OutboxMessageItem.ToPeer).Value;

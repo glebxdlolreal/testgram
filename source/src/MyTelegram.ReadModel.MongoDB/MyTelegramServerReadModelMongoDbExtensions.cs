@@ -137,6 +137,7 @@ public static class MyTelegramServerReadModelMongoDbExtensions
 
             .UseMongoDbReadModel<DialogFilterAggregate, DialogFilterId, DialogFilterReadModel>()
             .UseMongoDbReadModel<DialogFilterSettingsAggregate, DialogFilterSettingsId, DialogFilterSettingsReadModel>()
+            .UseMongoDbReadModel<QuickReplyListAggregate, QuickReplyListId, QuickReplyListReadModel>()
             .UseMongoDbReadModel<PollAggregate, PollId, PollReadModel>()
             .UseMongoDbReadModel<PollAnswerVoterReadModel, IPollAnswerVoterReadModelLocator>()
             .UseMongoDbReadModel<AccessHashReadModel, IAccessHashReadModelLocator>()

@@ -1,59 +1,41 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Messenger.Services.Interfaces;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Account;
-using TBusinessLocation = MyTelegram.Schema.TBusinessLocation;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 
-internal sealed class UpdateBusinessLocationHandler : RpcResultObjectHandler<RequestUpdateBusinessLocation, IBool>
+/// <summary>
+/// <a href="https://corefork.telegram.org/api/business#location">Businesses »</a> may advertise their location using this method, see <a href="https://corefork.telegram.org/api/business#location">here »</a> for more info.<br/>
+/// To remove business location information invoke the method without setting any of the parameters.
+/// <para><c>See <a href="https://corefork.telegram.org/method/account.updateBusinessLocation"/> </c></para>
+/// </summary>
+internal sealed class UpdateBusinessLocationHandler(
+    ICommandBus commandBus,
+    IUserAppService userAppService,
+    IBusinessProfileService businessProfileService)
+    : RpcResultObjectHandler<RequestUpdateBusinessLocation, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IUserAppService _userAppService;
-
-    public UpdateBusinessLocationHandler(IMongoDatabase database, IUserAppService userAppService)
-    {
-        _database = database;
-        _userAppService = userAppService;
-    }
+    /// <summary>"a textual description of the address (max 96 UTF-8 chars)".</summary>
+    private const int MaxAddressLength = 96;
 
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, RequestUpdateBusinessLocation obj)
     {
-        var userId = input.UserId;
-        var collection = _database.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var filter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-
-        if (obj.Flags.IsBitSet(0) && obj.Address != null)
+        BusinessLocationItem? item = null;
+        if (obj.Address != null || obj.GeoPoint != null)
         {
-            IGeoPoint? geoPoint = null;
-            if (obj.GeoPoint is TInputGeoPoint inputGeoPoint)
+            // The address is mandatory whenever a location is set; a point alone is not a location.
+            var address = obj.Address?.Trim();
+            if (string.IsNullOrEmpty(address) || address.Length > MaxAddressLength)
             {
-                geoPoint = new TGeoPoint
-                {
-                    Lat = inputGeoPoint.Lat,
-                    Long = inputGeoPoint.Long,
-                    AccessHash = 0
-                };
+                RpcErrors.RpcErrors400.AddressInvalid.ThrowRpcError();
             }
 
-            var businessLocation = new TBusinessLocation
-            {
-                Flags = obj.Flags,
-                GeoPoint = geoPoint,
-                Address = obj.Address
-            };
-
-            var update = Builders<BsonDocument>.Update.Set("BusinessLocation", businessLocation.ToBsonDocument());
-            await collection.UpdateOneAsync(filter, update);
-        }
-        else
-        {
-            var update = Builders<BsonDocument>.Update.Unset("BusinessLocation");
-            await collection.UpdateOneAsync(filter, update);
+            await userAppService.CheckAccountPremiumStatusAsync(input.UserId);
+            var point = obj.GeoPoint as TInputGeoPoint;
+            item = new BusinessLocationItem(address!, point?.Lat, point?.Long, point?.AccuracyRadius);
         }
 
-        _userAppService.InvalidateCache(userId);
+        await commandBus.PublishAsync(new UpdateBusinessLocationCommand(UserId.Create(input.UserId), item));
+        await businessProfileService.NotifyUserUpdatedAsync(input);
 
         return new TBoolTrue();
     }

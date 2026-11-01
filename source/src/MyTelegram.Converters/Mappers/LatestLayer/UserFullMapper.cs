@@ -62,32 +62,8 @@ internal sealed class UserFullMapper
             };
         }
 
-        // Map Business fields
-        if (source.BusinessWorkHours != null)
-        {
-            destination.BusinessWorkHours = source.BusinessWorkHours;
-            destination.Flags2 = destination.Flags2.SetBit(0);
-        }
-        if (source.BusinessLocation != null)
-        {
-            destination.BusinessLocation = source.BusinessLocation;
-            destination.Flags2 = destination.Flags2.SetBit(1);
-        }
-        if (source.BusinessGreetingMessage != null)
-        {
-            destination.BusinessGreetingMessage = source.BusinessGreetingMessage;
-            destination.Flags2 = destination.Flags2.SetBit(2);
-        }
-        if (source.BusinessAwayMessage != null)
-        {
-            destination.BusinessAwayMessage = source.BusinessAwayMessage;
-            destination.Flags2 = destination.Flags2.SetBit(3);
-        }
-        if (source.BusinessIntro != null)
-        {
-            destination.BusinessIntro = NormalizeBusinessIntro(source.BusinessIntro);
-            destination.Flags2 = destination.Flags2.SetBit(4);
-        }
+        // Business fields are filled by IBusinessProfileService: they depend on who is asking and on the
+        // current time (open_now).
 
         // Map MainProfileTab (flags2.20)
         if (!string.IsNullOrEmpty(source.MainProfileTab))

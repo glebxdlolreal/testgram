@@ -53,6 +53,10 @@ public class DialogFilterSettingsReadModel : Impl.DialogFilterSettingsReadModel,
 {
 }
 
+public class QuickReplyListReadModel : Impl.QuickReplyListReadModel, IMongoDbReadModel
+{
+}
+
 public class DialogReadModel : Impl.DialogReadModel, IMongoDbReadModel
 {
 }

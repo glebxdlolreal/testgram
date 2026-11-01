@@ -74,7 +74,17 @@ public record MessageItem
     /// at that point, so the <c>from_scheduled</c> flag has to be carried separately.
     /// See https://corefork.telegram.org/api/scheduled-messages
     /// </summary>
-    bool FromScheduled = false
+    bool FromScheduled = false,
+    /// <summary>
+    /// Sent by the server on behalf of a business account: a greeting or away message. Such a message never
+    /// triggers the recipient's own automatic replies. See https://corefork.telegram.org/api/business
+    /// </summary>
+    bool IsBusinessAutoReply = false,
+    /// <summary>
+    /// The connected business bot that sent this message on behalf of its owner (<c>via_business_bot_id</c>).
+    /// See https://corefork.telegram.org/api/bots/connected-business-bots
+    /// </summary>
+    long? ViaBusinessBotId = null
 //int? DefaultHistoryTtl = null,
 //int? Ttl = null
 );

@@ -1,6 +1,4 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Account;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
@@ -9,57 +7,53 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// Possible errors
 /// Code Type Description
 /// 400 BOT_ALREADY_DISABLED The connected business bot was already disabled for the specified peer.
-/// 400 BOT_NOT_CONNECTED_YET No <a href="https://corefork.telegram.org/api/business#connected-bots">business bot</a> is connected to the currently logged in user.
+/// 400 BOT_NOT_CONNECTED_YET No business bot is connected to the currently logged in user.
 /// 400 PEER_ID_INVALID The provided peer id is invalid.
 /// <para><c>See <a href="https://corefork.telegram.org/method/account.disablePeerConnectedBot"/> </c></para>
 /// </summary>
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class DisablePeerConnectedBotHandler : RpcResultObjectHandler<RequestDisablePeerConnectedBot, IBool>
+internal sealed class DisablePeerConnectedBotHandler(
+    IAccessHashHelper2 accessHashHelper,
+    IPeerHelper peerHelper,
+    IBusinessConnectionStore connectionStore,
+    IBusinessBotNotifier notifier)
+    : RpcResultObjectHandler<RequestDisablePeerConnectedBot, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IPeerHelper _peerHelper;
-
-    public DisablePeerConnectedBotHandler(IMongoDatabase database, IPeerHelper peerHelper)
-    {
-        _database = database;
-        _peerHelper = peerHelper;
-    }
-
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, RequestDisablePeerConnectedBot obj)
     {
-        var userId = input.UserId;
-        var peer = _peerHelper.GetPeer(obj.Peer, userId);
-
-        if (peer.PeerId == 0)
+        await accessHashHelper.CheckAccessHashAsync(input, obj.Peer);
+        var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
+        if (peer.PeerType != PeerType.User || peer.PeerId == input.UserId)
         {
             RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
         }
 
-        var collection = _database.GetCollection<BsonDocument>("connected_business_bots");
-        var filter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-        var connection = await collection.Find(filter).FirstOrDefaultAsync();
-
+        var connection = await connectionStore.GetByUserAsync(input.UserId);
         if (connection == null)
         {
             RpcErrors.RpcErrors400.BotNotConnectedYet.ThrowRpcError();
         }
 
-        // Check if already disabled
-        var recipientsDoc = connection["Recipients"].AsBsonDocument;
-        if (recipientsDoc.Contains("ExcludeUsers"))
+        if (connection!.ExcludeUserIds.Contains(peer.PeerId))
         {
-            var excludeArray = recipientsDoc["ExcludeUsers"].AsBsonArray;
-            if (excludeArray.Any(u => u.AsInt64 == peer.PeerId))
-            {
-                RpcErrors.RpcErrors400.BotAlreadyDisabled.ThrowRpcError();
-            }
+            RpcErrors.RpcErrors400.BotAlreadyDisabled.ThrowRpcError();
         }
 
-        // Add peer to ExcludeUsers
-        var update = Builders<BsonDocument>.Update.AddToSet("Recipients.ExcludeUsers", peer.PeerId);
-        await collection.UpdateOneAsync(filter, update);
+        // exclude_users wins over every other selection, whatever exclude_selected says.
+        var updated = connection with
+        {
+            ExcludeUserIds = [.. connection.ExcludeUserIds, peer.PeerId],
+            Recipients = connection.Recipients with
+            {
+                UserIds = connection.Recipients.UserIds.Where(p => p != peer.PeerId).ToList()
+            },
+            ConnectionId = connectionStore.NewConnectionId()
+        };
+        await connectionStore.SaveAsync(updated);
+        await connectionStore.SetPausedAsync(input.UserId, peer.PeerId, false);
+        await notifier.NotifyConnectionAsync(updated, false);
 
         return new TBoolTrue();
     }

@@ -12,7 +12,7 @@ public class GetUpdatesByGlobalSeqNoQueryHandler(IQueryOnlyReadModelStore<Update
         // The Pts == 0 predicate is intentionally gone: it is implied by the marker, and keeping it would
         // silently drop these rows if they were ever given a pts.
         return await store.FindAsync(p => p.OwnerPeerId == query.UserId &&
-                                          p.UpdatesType == UpdatesType.EncryptedUpdates &&
+                                          (p.UpdatesType == UpdatesType.EncryptedUpdates || p.UpdatesType == UpdatesType.BotQtsUpdates) &&
                                           p.GlobalSeqNo > query.MinGlobalSeqNo &&
                                           (p.OnlySendToThisAuthKeyId == null || p.OnlySendToThisAuthKeyId == query.PermAuthKeyId) &&
                                           (p.ExcludeAuthKeyId == null || p.ExcludeAuthKeyId != query.PermAuthKeyId),

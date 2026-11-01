@@ -1,6 +1,7 @@
 using MongoDB.Bson;
 using MongoDB.Driver;
 using MyTelegram.Messenger.Services.Bots;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Messenger.Services.Impl;
 using MyTelegram.Messenger.Services.Stories;
 using MyTelegram.Messenger.Services.StarGifts;
@@ -14,7 +15,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Users;
 /// Returns extended user info by ID.
 /// <para><c>See <a href="https://corefork.telegram.org/method/users.getFullUser"/> </c></para>
 /// </summary>
-internal sealed class GetFullUserHandler(IPeerHelper peerHelper, IQueryProcessor queryProcessor, IUserConverterService userConverterService, ILayeredService<IPeerSettingsConverter> peerSettingsLayeredService, ILayeredService<IPeerNotifySettingsConverter> peerNotifySettingsLayeredService, IBlockCacheAppService blockCacheAppService, IContactHelper contactHelper, IPeerSettingsAppService peerSettingsAppService, IPhotoAppService photoAppService, IUserAppService userAppService, IPrivacyAppService privacyAppService, IMongoDatabase mongoDatabase, IBotVerificationStore botVerificationStore, IPinnedMessageResolver pinnedMessageResolver, IAccessHashHelper2 accessHashHelper, IFromMessagePeerResolver fromMessagePeerResolver, IChatWallPaperService chatWallPaperService, IPeerTranslationSettingsStore peerTranslationSettings, IFileReferenceHelper fileReferenceHelper, ILogger<GetFullUserHandler> logger) : RpcResultObjectHandler<MyTelegram.Schema.Users.RequestGetFullUser, MyTelegram.Schema.Users.IUserFull>
+internal sealed class GetFullUserHandler(IPeerHelper peerHelper, IQueryProcessor queryProcessor, IUserConverterService userConverterService, ILayeredService<IPeerSettingsConverter> peerSettingsLayeredService, ILayeredService<IPeerNotifySettingsConverter> peerNotifySettingsLayeredService, IBlockCacheAppService blockCacheAppService, IContactHelper contactHelper, IPeerSettingsAppService peerSettingsAppService, IPhotoAppService photoAppService, IUserAppService userAppService, IPrivacyAppService privacyAppService, IMongoDatabase mongoDatabase, IBotVerificationStore botVerificationStore, IPinnedMessageResolver pinnedMessageResolver, IAccessHashHelper2 accessHashHelper, IFromMessagePeerResolver fromMessagePeerResolver, IChatWallPaperService chatWallPaperService, IPeerTranslationSettingsStore peerTranslationSettings, IFileReferenceHelper fileReferenceHelper, IChatConverterService chatConverterService, IBusinessProfileService businessProfileService, IBusinessBotNotifier businessBotNotifier, ILogger<GetFullUserHandler> logger) : RpcResultObjectHandler<MyTelegram.Schema.Users.RequestGetFullUser, MyTelegram.Schema.Users.IUserFull>
 {
     protected override async Task<MyTelegram.Schema.Users.IUserFull> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Users.RequestGetFullUser obj)
     {
@@ -61,7 +62,8 @@ internal sealed class GetFullUserHandler(IPeerHelper peerHelper, IQueryProcessor
         userFull.NotifySettings = peerNotifySettings;
         userFull.Blocked = await blockCacheAppService.IsBlockedAsync(input.UserId, targetPeer.PeerId);
         var user = userConverterService.ToUser(input, userReadModel, photoReadModels, myContactReadModel, targetUserContactReadModel, privacyReadModels, input.Layer);
-        await SetPersonalChannelAsync(input, userReadModel, userFull);
+        await businessProfileService.FillUserFullAsync(userReadModel, userFull, input.UserId == targetUserId);
+        var personalChannel = await SetPersonalChannelAsync(input, userReadModel, userFull);
         await SetCommonChatCountAsync(input, userReadModel, userFull);
         await SetStarGiftsCountAsync(targetUserId, userFull, input.UserId);
         await SetStarsRatingAsync(targetUserId, userFull, isSelf: input.UserId == targetUserId);
@@ -94,7 +96,7 @@ internal sealed class GetFullUserHandler(IPeerHelper peerHelper, IQueryProcessor
 
         return new TUserFull
         {
-            Chats = new TVector<IChat>(),
+            Chats = personalChannel == null ? new TVector<IChat>() : new TVector<IChat>(personalChannel),
             FullUser = userFull,
             Users = new TVector<IUser>(usersList)
         };
@@ -268,17 +270,33 @@ internal sealed class GetFullUserHandler(IPeerHelper peerHelper, IQueryProcessor
         userFull.CommonChatsCount = count;
     }
 
-    private async Task SetPersonalChannelAsync(IRequestInput input, IUserReadModel userReadModel, IUserFull userFull)
+    /// <summary>
+    /// Fills <c>personal_channel_id</c>/<c>personal_channel_message</c> and returns the channel itself:
+    /// clients resolve the id against <c>users.userFull.chats</c>, so the field alone shows nothing.
+    /// </summary>
+    private async Task<IChat?> SetPersonalChannelAsync(IRequestInput input, IUserReadModel userReadModel, IUserFull userFull)
     {
-        if (userReadModel.PersonalChannelId.HasValue)
+        if (!userReadModel.PersonalChannelId.HasValue)
         {
-            var channelTopMessageId = await queryProcessor.ProcessAsync(new GetChannelTopMessageIdQuery(userReadModel.PersonalChannelId.Value));
-            if (channelTopMessageId.HasValue)
-            {
-                userFull.PersonalChannelId = userReadModel.PersonalChannelId;
-                userFull.PersonalChannelMessage = channelTopMessageId.Value;
-            }
+            return null;
         }
+
+        var channelId = userReadModel.PersonalChannelId.Value;
+        var channelTopMessageId = await queryProcessor.ProcessAsync(new GetChannelTopMessageIdQuery(channelId));
+        if (!channelTopMessageId.HasValue)
+        {
+            return null;
+        }
+
+        var channel = await chatConverterService.GetChannelAsync(input, channelId, true, null, input.Layer, throwIfNotFound: false);
+        if (channel == null)
+        {
+            return null;
+        }
+
+        userFull.PersonalChannelId = channelId;
+        userFull.PersonalChannelMessage = channelTopMessageId.Value;
+        return channel;
     }
 
     /// <summary>
@@ -397,89 +415,9 @@ internal sealed class GetFullUserHandler(IPeerHelper peerHelper, IQueryProcessor
         };
     }
 
-    private async Task SetBusinessBotFieldsAsync(Schema.IPeerSettings settings, long selfUserId, long targetUserId)
+    private Task SetBusinessBotFieldsAsync(Schema.IPeerSettings settings, long selfUserId, long targetUserId)
     {
-        try
-        {
-            // ONLY show business bot banner in private chats with users (not in channels/groups/bots)
-            // GetFullUser is ONLY called for users, so this check is redundant but kept for clarity
-            var targetUser = await userAppService.GetAsync(targetUserId);
-            if (targetUser == null)
-            {
-                // Not a user - don't show banner
-                return;
-            }
-
-            // Find connected bot for the SELF user (who is opening the chat - bot owner)
-            var collection = mongoDatabase.GetCollection<BsonDocument>("connected_business_bots");
-            var filter = Builders<BsonDocument>.Filter.Eq("UserId", selfUserId);
-            var connection = await collection.Find(filter).FirstOrDefaultAsync();
-
-            if (connection != null && settings is Schema.TPeerSettings tSettings)
-            {
-                var botId = connection["BotId"].AsInt64;
-                var connectionId = connection.Contains("ConnectionId") ? connection["ConnectionId"].AsString : "";
-
-                // Check recipients - should this chat be managed?
-                var recipientsDoc = connection["Recipients"].AsBsonDocument;
-                bool excludeSelected = recipientsDoc.Contains("ExcludeSelected") && recipientsDoc["ExcludeSelected"].AsBoolean;
-
-                // Default: if bot is connected, manage all chats
-                bool shouldManage = true;
-
-                // Check explicit exclusion
-                if (recipientsDoc.Contains("ExcludeUsers") && !recipientsDoc["ExcludeUsers"].IsBsonNull)
-                {
-                    var excludeArray = recipientsDoc["ExcludeUsers"].AsBsonArray;
-                    if (excludeArray.Any(u => u.AsInt64 == targetUserId))
-                    {
-                        shouldManage = false;
-                    }
-                }
-
-                // If explicit users list exists and not empty - only they see banner
-                if (shouldManage &&
-                    recipientsDoc.Contains("Users") &&
-                    !recipientsDoc["Users"].IsBsonNull)
-                {
-                    var usersArray = recipientsDoc["Users"].AsBsonArray;
-                    if (usersArray.Count > 0 && !usersArray.Any(u => u.AsInt64 == targetUserId))
-                    {
-                        shouldManage = false;
-                    }
-                }
-
-                if (shouldManage)
-                {
-                    // Get bot user for username - show CONNECTED BOT username, not botfather
-                    var botUser = await queryProcessor.ProcessAsync(new GetUserByIdQuery(botId));
-                    var manageUrl = botUser?.UserName != null
-                        ? $"https://t.me/{botUser.UserName}?start=bizbot_{connectionId}"
-                        : $"tg://resolve?domain=botfather&start=manage_{botId}";
-
-                    // CRITICAL: Both business_bot_id and business_bot_manage_url must be set (flag 13)
-                    tSettings.BusinessBotId = botId;
-                    tSettings.BusinessBotManageUrl = manageUrl;
-
-                    // Check if bot is paused in this specific chat
-                    var pausedCollection = mongoDatabase.GetCollection<BsonDocument>("paused_business_bot_chats");
-                    var pausedFilter = Builders<BsonDocument>.Filter.And(
-                        Builders<BsonDocument>.Filter.Eq("UserId", selfUserId),
-                        Builders<BsonDocument>.Filter.Eq("PeerId", targetUserId)
-                    );
-                    var pausedDoc = await pausedCollection.Find(pausedFilter).FirstOrDefaultAsync();
-                    tSettings.BusinessBotPaused = pausedDoc != null && pausedDoc.Contains("Paused") && pausedDoc["Paused"].AsBoolean;
-
-                    // Check bot rights - can it reply?
-                    var rightsDoc = connection.Contains("Rights") ? connection["Rights"].AsBsonDocument : null;
-                    tSettings.BusinessBotCanReply = rightsDoc != null && rightsDoc.Contains("Reply") && rightsDoc["Reply"].AsBoolean;
-                }
-            }
-        }
-        catch
-        {
-            // Ignore errors
-        }
+        return businessBotNotifier.FillPeerSettingsAsync(settings, selfUserId, targetUserId);
     }
 
     private async Task SetSavedMusicAsync(long targetUserId, IUserFull userFull, long selfUserId)

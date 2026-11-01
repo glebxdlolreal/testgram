@@ -1,6 +1,4 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Account;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
@@ -14,57 +12,27 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Account;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class ToggleConnectedBotPausedHandler : RpcResultObjectHandler<RequestToggleConnectedBotPaused, IBool>
+internal sealed class ToggleConnectedBotPausedHandler(
+    IAccessHashHelper2 accessHashHelper,
+    IPeerHelper peerHelper,
+    IBusinessConnectionStore connectionStore)
+    : RpcResultObjectHandler<RequestToggleConnectedBotPaused, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IPeerHelper _peerHelper;
-
-    public ToggleConnectedBotPausedHandler(IMongoDatabase database, IPeerHelper peerHelper)
-    {
-        _database = database;
-        _peerHelper = peerHelper;
-    }
-
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, RequestToggleConnectedBotPaused obj)
     {
-        var userId = input.UserId;
-        var peer = _peerHelper.GetPeer(obj.Peer, userId);
-
-        if (peer.PeerId == 0)
+        await accessHashHelper.CheckAccessHashAsync(input, obj.Peer);
+        var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
+        if (peer.PeerType != PeerType.User || peer.PeerId == input.UserId)
         {
             RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
         }
 
-        var collection = _database.GetCollection<BsonDocument>("paused_business_bot_chats");
-
-        if (obj.Paused)
+        if (await connectionStore.GetByUserAsync(input.UserId) == null)
         {
-            // Add to paused list
-            var doc = new BsonDocument
-            {
-                { "UserId", userId },
-                { "PeerId", peer.PeerId },
-                { "PausedAt", DateTime.UtcNow }
-            };
-
-            var filter = Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("UserId", userId),
-                Builders<BsonDocument>.Filter.Eq("PeerId", peer.PeerId)
-            );
-
-            await collection.ReplaceOneAsync(filter, doc, new ReplaceOptions { IsUpsert = true });
-        }
-        else
-        {
-            // Remove from paused list
-            var filter = Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("UserId", userId),
-                Builders<BsonDocument>.Filter.Eq("PeerId", peer.PeerId)
-            );
-
-            await collection.DeleteOneAsync(filter);
+            RpcErrors.RpcErrors400.BotNotConnectedYet.ThrowRpcError();
         }
 
+        await connectionStore.SetPausedAsync(input.UserId, peer.PeerId, obj.Paused);
         return new TBoolTrue();
     }
 }

@@ -132,6 +132,7 @@ public class MongoDbIndexesCreator(
 
         await CreateIndexAsync<DialogFilterReadModel>(p => p.OwnerUserId);
         await CreateIndexAsync<DialogFilterSettingsReadModel>(p => p.OwnerUserId);
+        await CreateIndexAsync<QuickReplyListReadModel>(p => p.OwnerUserId);
         await CreateIndexAsync<PollReadModel>(p => p.ToPeerId);
         await CreateIndexAsync<PollReadModel>(p => p.PollId);
         // Scanned by the poll auto-close background service.
@@ -200,6 +201,10 @@ public class MongoDbIndexesCreator(
 
         await CreateRawIndexAsync("paused_business_bot_chats", "idx_userid_peerid", ["UserId", "PeerId"], unique: true);
         await CreateRawIndexAsync("paused_business_bot_chats", "idx_userid", ["UserId"]);
+
+        // Business chat links are addressed by slug.
+        await CreateRawIndexAsync("businesschatlinks", "idx_slug", ["Slug"], unique: true);
+        await CreateRawIndexAsync("businesschatlinks", "idx_userid", ["UserId"]);
     }
 
     /// <summary>

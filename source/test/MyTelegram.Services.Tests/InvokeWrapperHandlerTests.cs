@@ -212,15 +212,15 @@ public class InvokeWrapperHandlerTests
             { "ConnectionId", connectionId },
             { "BotId", botId },
             { "UserId", businessUserId },
-            { "Rights", new BsonDocument { { "Reply", true } } }
+            { "Rights", new BsonDocument { { "EditName", true } } }
         });
 
         var handler = new RecordingHandler();
-        // A real wrappable method covered by the connection's Reply right: the allowlist in
+        // A real wrappable method covered by the connection's EditName right: the allowlist in
         // BusinessConnectionRightsMap rejects any constructor that is not explicitly permitted, so a
         // synthetic FakeQuery would fail authorization before reaching the identity-rebinding path
-        // this test is about.
-        var query = new MyTelegram.Schema.Messages.RequestSendMessage();
+        // this test is about. It names no chat, so no recipient check runs either.
+        var query = new MyTelegram.Schema.Account.RequestUpdateProfile { FirstName = "x" };
         var handlerHelper = new FakeHandlerHelper(query.ConstructorId, handler);
         var request = new RequestInvokeWithBusinessConnection { ConnectionId = connectionId, Query = query };
 
@@ -230,7 +230,7 @@ public class InvokeWrapperHandlerTests
 
         IObject? result = null;
         Should.NotThrow(() => result = Invoke(
-            "InvokeWithBusinessConnectionHandler", [store.Database, handlerHelper], input, request));
+            "InvokeWithBusinessConnectionHandler", BusinessArgs(store.Database, handlerHelper), input, request));
 
         handler.CallCount.ShouldBe(1);
         handler.LastInput.ShouldNotBeNull();
@@ -271,7 +271,7 @@ public class InvokeWrapperHandlerTests
         var input = new FakeRequestInput { UserId = botId };
 
         var exception = Should.Throw<RpcException>(() => Invoke(
-            "InvokeWithBusinessConnectionHandler", [store.Database, handlerHelper], input, request));
+            "InvokeWithBusinessConnectionHandler", BusinessArgs(store.Database, handlerHelper), input, request));
 
         exception.Message.ShouldBe("BUSINESS_CONNECTION_NOT_ALLOWED");
         handler.CallCount.ShouldBe(0);
@@ -302,12 +302,61 @@ public class InvokeWrapperHandlerTests
         var input = new FakeRequestInput { UserId = botId };
 
         Should.Throw<RpcException>(() => Invoke(
-            "InvokeWithBusinessConnectionHandler", [store.Database, handlerHelper], input, request));
+            "InvokeWithBusinessConnectionHandler", BusinessArgs(store.Database, handlerHelper), input, request));
 
         handler.CallCount.ShouldBe(0);
     }
 
     // ---- helpers --------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Constructor arguments of InvokeWithBusinessConnectionHandler: the connection comes from the given
+    /// database, and the bot is a business-enabled bot.
+    /// </summary>
+    private static object[] BusinessArgs(IMongoDatabase database, IHandlerHelper handlerHelper)
+    {
+        var userReadModel = FakeProxy<MyTelegram.ReadModel.Interfaces.IUserReadModel>.Create(name => name switch
+        {
+            "get_Bot" => true,
+            "get_BotBusiness" => true,
+            _ => null
+        });
+        var userAppService = FakeProxy<MyTelegram.Messenger.Services.Interfaces.IUserAppService>.Create(name =>
+            name == "GetAsync" ? Task.FromResult<MyTelegram.ReadModel.Interfaces.IUserReadModel?>(userReadModel) : null);
+        return
+        [
+            handlerHelper,
+            new MyTelegram.Messenger.Services.Business.BusinessConnectionStore(database, null!),
+            new PeerHelper(),
+            userAppService,
+            null!,
+            database
+        ];
+    }
+
+    /// <summary>A reflection proxy answering every member by name; unnamed value types get their default.</summary>
+    public class FakeProxy<T> : DispatchProxy where T : class
+    {
+        private Func<string, object?> _answer = _ => null;
+
+        public static T Create(Func<string, object?> answer)
+        {
+            var proxy = DispatchProxy.Create<T, FakeProxy<T>>();
+            ((FakeProxy<T>)(object)proxy)._answer = answer;
+            return proxy;
+        }
+
+        protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+        {
+            var value = _answer(targetMethod!.Name);
+            if (value != null || targetMethod.ReturnType == typeof(void))
+            {
+                return value;
+            }
+
+            return targetMethod.ReturnType.IsValueType ? Activator.CreateInstance(targetMethod.ReturnType) : null;
+        }
+    }
 
     // Reads the internal MyTelegram.Messenger.Services.NoUpdatesContext.IsSuppressed static flag.
     private static readonly Func<bool> ReadIsSuppressed = BuildIsSuppressedReader();

@@ -35,7 +35,8 @@ public class
         }
 
         predicate = predicate
-                .WhereIf(query.MessageActionType == null, p => p.MessageActionType != MessageActionType.CreateQuickReplyMessage)
+                // Quick reply messages are stored with their owner but belong to no chat.
+                .WhereIf(true, p => !p.IsQuickReplyMessage)
                 .WhereIf(query.MessageActionType.HasValue, p => p.MessageActionType == query.MessageActionType)
                 //.WhereIf(query.Q?.Length > 2, p => p.Message.Contains(query.Q!))
                 .WhereIf(q.Length >= MinTextSearchLength, p => p.Message.Contains(q))

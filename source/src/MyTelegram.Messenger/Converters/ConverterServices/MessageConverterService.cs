@@ -159,7 +159,9 @@ public class MessageConverterService(
 
                     if (m.QuickReplyShortcutId.HasValue)
                     {
+                        // tdlib rejects a quick reply message that carries from_id.
                         m.Date = 0;
+                        m.FromId = null;
                     }
 
                     if (m.Out)
@@ -391,7 +393,9 @@ public class MessageConverterService(
 
                     if (m.QuickReplyShortcutId.HasValue)
                     {
+                        // tdlib rejects a quick reply message that carries from_id.
                         m.Date = 0;
+                        m.FromId = null;
                     }
 
                     if (m.Out)

@@ -14,7 +14,7 @@ public class GetMessageItemListToBeDeletedQuery2Handler(IQueryOnlyReadModelStore
         if (!query.Revoke)
         {
             return await store.FindAsync(
-                p => p.OwnerPeerId == query.OwnerPeerId && p.ToPeerId == query.ToPeerId && p.MessageId < maxId,
+                p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.ToPeerId == query.ToPeerId && p.MessageId < maxId,
                 p => new MessageItemToBeDeleted(p.OwnerPeerId, p.MessageId, p.ToPeerType, p.ToPeerId),
                 limit: query.Limit,
                 cancellationToken: cancellationToken);
@@ -22,7 +22,7 @@ public class GetMessageItemListToBeDeletedQuery2Handler(IQueryOnlyReadModelStore
 
         var batchIds =
                 (await store.FindAsync(
-                    p => p.OwnerPeerId == query.OwnerPeerId && p.ToPeerId == query.ToPeerId && p.MessageId < maxId,
+                    p => p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.ToPeerId == query.ToPeerId && p.MessageId < maxId,
                     p => p.BatchId,
                     limit: query.Limit,
                     cancellationToken: cancellationToken));

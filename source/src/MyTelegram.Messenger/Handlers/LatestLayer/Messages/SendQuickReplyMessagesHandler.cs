@@ -1,113 +1,66 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Messages;
-using MyTelegram.Messenger.Services;
-using MyTelegram.Messenger.Services.Interfaces;
-using MyTelegram.Core;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 
-internal sealed class SendQuickReplyMessagesHandler : RpcResultObjectHandler<RequestSendQuickReplyMessages, IUpdates>
+/// <summary>
+/// Send <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">quick reply messages »</a>.
+/// Only private chats with users are supported. The answer is <c>updates</c> with an <c>updateMessageID</c>
+/// and an <c>updateNewMessage</c> per sent message, which tdlib checks against the random ids it sent.
+/// Possible errors
+/// Code Type Description
+/// 400 PEER_ID_INVALID The provided peer id is invalid.
+/// 400 RANDOM_ID_INVALID A provided random ID is invalid.
+/// 400 SHORTCUT_INVALID The specified shortcut is invalid.
+/// <para><c>See <a href="https://corefork.telegram.org/method/messages.sendQuickReplyMessages"/> </c></para>
+/// </summary>
+internal sealed class SendQuickReplyMessagesHandler(
+    IPeerHelper peerHelper,
+    IAccessHashHelper2 accessHashHelper,
+    IUserAppService userAppService,
+    IQuickReplyService quickReplyService,
+    IMessageAppService messageAppService)
+    : RpcResultObjectHandler<RequestSendQuickReplyMessages, IUpdates>
 {
-    private readonly IMongoDatabase _database;
-    private readonly IMessageAppService _messageAppService;
-    private readonly IPeerHelper _peerHelper;
-
-    public SendQuickReplyMessagesHandler(
-        IMongoDatabase database,
-        IMessageAppService messageAppService,
-        IPeerHelper peerHelper)
-    {
-        _database = database;
-        _messageAppService = messageAppService;
-        _peerHelper = peerHelper;
-    }
-
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestSendQuickReplyMessages obj)
     {
         var userId = input.UserId;
-        var shortcutId = obj.ShortcutId;
+        await accessHashHelper.CheckAccessHashAsync(input, obj.Peer);
+        var peer = peerHelper.GetPeer(obj.Peer, userId);
+        if (peer.PeerType is not (PeerType.User or PeerType.Self))
+        {
+            RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
+        }
 
-        var collection = _database.GetCollection<BsonDocument>("quickreplys");
-        var filter = Builders<BsonDocument>.Filter.And(
-            Builders<BsonDocument>.Filter.Eq("UserId", userId),
-            Builders<BsonDocument>.Filter.Eq("ShortcutId", shortcutId)
-        );
-        
-        var doc = await collection.Find(filter).FirstOrDefaultAsync();
-        if (doc == null)
+        await userAppService.CheckAccountPremiumStatusAsync(userId);
+
+        var shortcuts = await quickReplyService.GetShortcutsAsync(userId);
+        if (shortcuts.All(p => p.ShortcutId != obj.ShortcutId))
         {
             RpcErrors.RpcErrors400.ShortcutInvalid.ThrowRpcError();
         }
 
-        var storedMessageIds = new List<int>();
-        if (doc != null && doc.Contains("MessageIds"))
+        var ids = obj.Id?.ToList() ?? [];
+        var randomIds = obj.RandomId?.ToList() ?? [];
+        if (ids.Count == 0 || ids.Count != randomIds.Count || randomIds.Contains(0) ||
+            randomIds.Distinct().Count() != randomIds.Count)
         {
-            var msgIds = doc["MessageIds"].AsBsonArray;
-            foreach (var msgId in msgIds)
-            {
-                storedMessageIds.Add(msgId.AsInt32);
-            }
+            RpcErrors.RpcErrors400.RandomIdInvalid.ThrowRpcError();
         }
 
-        var messageIdsToSend = obj.Id != null && obj.Id.Count > 0 
-            ? storedMessageIds.Where(m => obj.Id.Contains(m)).ToList()
-            : storedMessageIds;
-
-        if (messageIdsToSend.Count == 0)
+        var stored = (await quickReplyService.GetMessagesAsync(userId, [obj.ShortcutId], ids))
+            .ToDictionary(p => p.MessageId);
+        if (ids.Any(id => !stored.ContainsKey(id)))
         {
-            return new TUpdates
-            {
-                Updates = new TVector<IUpdate>(),
-                Users = new TVector<IUser>(),
-                Chats = new TVector<IChat>(),
-                Date = CurrentDate
-            };
+            RpcErrors.RpcErrors400.MessageIdInvalid.ThrowRpcError();
         }
 
-        var messagesCollection = _database.GetCollection<BsonDocument>("messages");
-        var msgFilter = Builders<BsonDocument>.Filter.And(
-            Builders<BsonDocument>.Filter.Eq("OwnerPeerId", userId),
-            Builders<BsonDocument>.Filter.In("MessageId", messageIdsToSend)
-        );
-        
-        var messages = await messagesCollection.Find(msgFilter).ToListAsync();
+        // Sent in the order given, which is the order the random ids belong to.
+        var messages = ids.Select(id => stored[id]).ToList();
+        var inputs = quickReplyService.BuildSendInputs(input.ToRequestInfo(), userId, peer, messages, randomIds);
+        await messageAppService.SendMessageAsync(inputs);
 
-        var toPeer = _peerHelper.GetPeer(obj.Peer, userId);
-        var sendMessageInputs = new List<SendMessageInput>();
-        var randomIdIndex = 0;
-
-        foreach (var msgDoc in messages)
-        {
-            var messageText = msgDoc.GetValue("Message", "").AsString;
-            var randomId = randomIdIndex < obj.RandomId.Count 
-                ? obj.RandomId[randomIdIndex++] 
-                : Random.Shared.NextInt64();
-
-            var sendMessageInput = new SendMessageInput(
-                input.ToRequestInfo(),
-                userId,
-                toPeer,
-                messageText,
-                randomId,
-                isSendQuickReplyMessage: true
-            );
-            
-            sendMessageInputs.Add(sendMessageInput);
-        }
-
-        if (sendMessageInputs.Count > 0)
-        {
-            await _messageAppService.SendMessageAsync(sendMessageInputs);
-        }
-
-        return new TUpdates
-        {
-            Updates = new TVector<IUpdate>(),
-            Users = new TVector<IUser>(),
-            Chats = new TVector<IChat>(),
-            Date = CurrentDate
-        };
+        // Answered by the send pipeline once the messages exist.
+        return null!;
     }
 }

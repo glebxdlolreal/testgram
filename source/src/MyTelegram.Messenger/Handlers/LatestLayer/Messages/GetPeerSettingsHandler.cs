@@ -18,6 +18,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
 internal sealed class GetPeerSettingsHandler(
+    MyTelegram.Messenger.Services.Business.IBusinessBotNotifier businessBotNotifier,
     IPeerSettingsAppService peerSettingsAppService,
     IPeerHelper peerHelper,
     IObjectMapper objectMapper,
@@ -250,98 +251,10 @@ internal sealed class GetPeerSettingsHandler(
         return peerSettings;
     }
 
-    private async Task SetBusinessBotFieldsAsync(Schema.IPeerSettings settings, long selfUserId, long targetPeerId, PeerType peerType)
+    private Task SetBusinessBotFieldsAsync(Schema.IPeerSettings settings, long selfUserId, long targetPeerId, PeerType peerType)
     {
-        try
-        {
-            // ONLY show business bot banner in private chats with users (not in channels/groups/bots)
-            if (peerType != PeerType.User)
-            {
-                // Not a user chat - it's a channel, group, or bot - don't show banner
-                return;
-            }
-
-            // Item 8: never show "bot manages this chat" banner when the peer itself is a
-            // bot or a system user (support/notification). Telegram never shows it for these.
-            if (PeerKindHelper.IsSystemUserId(targetPeerId))
-            {
-                return;
-            }
-            var targetUser = await queryProcessor.ProcessAsync(new GetUserByIdQuery(targetPeerId));
-            if (targetUser == null || targetUser.Bot)
-            {
-                return;
-            }
-
-            // Find connected bot for the SELF user (who is opening the chat - bot owner)
-            var collection = database.GetCollection<BsonDocument>("connected_business_bots");
-            var filter = Builders<BsonDocument>.Filter.Eq("UserId", selfUserId);
-            var connection = await collection.Find(filter).FirstOrDefaultAsync();
-
-            if (connection != null && settings is Schema.TPeerSettings tSettings)
-            {
-                var botId = connection["BotId"].AsInt64;
-                var connectionId = connection.Contains("ConnectionId") ? connection["ConnectionId"].AsString : "";
-
-                // Check recipients - should this chat be managed?
-                var recipientsDoc = connection["Recipients"].AsBsonDocument;
-                bool excludeSelected = recipientsDoc.Contains("ExcludeSelected") && recipientsDoc["ExcludeSelected"].AsBoolean;
-
-                // Default: if bot is connected, manage all chats
-                bool shouldManage = true;
-
-                // Check explicit exclusion
-                if (recipientsDoc.Contains("ExcludeUsers") && !recipientsDoc["ExcludeUsers"].IsBsonNull)
-                {
-                    var excludeArray = recipientsDoc["ExcludeUsers"].AsBsonArray;
-                    if (excludeArray.Any(u => u.AsInt64 == targetPeerId))
-                    {
-                        shouldManage = false;
-                    }
-                }
-
-                // If explicit users list exists and not empty - only they see banner
-                if (shouldManage &&
-                    recipientsDoc.Contains("Users") &&
-                    !recipientsDoc["Users"].IsBsonNull)
-                {
-                    var usersArray = recipientsDoc["Users"].AsBsonArray;
-                    if (usersArray.Count > 0 && !usersArray.Any(u => u.AsInt64 == targetPeerId))
-                    {
-                        shouldManage = false;
-                    }
-                }
-
-                if (shouldManage)
-                {
-                    // Get bot user for username - show CONNECTED BOT username, not botfather
-                    var botUser = await queryProcessor.ProcessAsync(new GetUserByIdQuery(botId));
-                    var manageUrl = botUser?.UserName != null
-                        ? $"https://t.me/{botUser.UserName}?start=bizbot_{connectionId}"
-                        : $"tg://resolve?domain=botfather&start=manage_{botId}";
-
-                    // CRITICAL: Both business_bot_id and business_bot_manage_url must be set (flag 13)
-                    tSettings.BusinessBotId = botId;
-                    tSettings.BusinessBotManageUrl = manageUrl;
-
-                    // Check if bot is paused in this specific chat
-                    var pausedCollection = database.GetCollection<BsonDocument>("paused_business_bot_chats");
-                    var pausedFilter = Builders<BsonDocument>.Filter.And(
-                        Builders<BsonDocument>.Filter.Eq("UserId", selfUserId),
-                        Builders<BsonDocument>.Filter.Eq("PeerId", targetPeerId)
-                    );
-                    var pausedDoc = await pausedCollection.Find(pausedFilter).FirstOrDefaultAsync();
-                    tSettings.BusinessBotPaused = pausedDoc != null && pausedDoc.Contains("Paused") && pausedDoc["Paused"].AsBoolean;
-
-                    // Check bot rights - can it reply?
-                    var rightsDoc = connection.Contains("Rights") ? connection["Rights"].AsBsonDocument : null;
-                    tSettings.BusinessBotCanReply = rightsDoc != null && rightsDoc.Contains("Reply") && rightsDoc["Reply"].AsBoolean;
-                }
-            }
-        }
-        catch
-        {
-            // Ignore errors
-        }
+        return peerType == PeerType.User
+            ? businessBotNotifier.FillPeerSettingsAsync(settings, selfUserId, targetPeerId)
+            : Task.CompletedTask;
     }
 }

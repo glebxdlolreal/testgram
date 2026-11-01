@@ -1,53 +1,28 @@
-using MongoDB.Bson;
-using MongoDB.Driver;
-using MyTelegram.Schema;
+using MyTelegram.Messenger.Services.Business;
 using MyTelegram.Schema.Messages;
 
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 
-internal sealed class CheckQuickReplyShortcutHandler : RpcResultObjectHandler<RequestCheckQuickReplyShortcut, IBool>
+/// <summary>
+/// Before offering the user the choice to add a message to a <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">quick reply shortcut</a>,
+/// to make sure that none of the limits specified <a href="https://corefork.telegram.org/api/business#quick-reply-shortcuts">here »</a> were reached.
+/// Possible errors
+/// Code Type Description
+/// 400 SHORTCUT_INVALID The specified shortcut is invalid.
+/// <para><c>See <a href="https://corefork.telegram.org/method/messages.checkQuickReplyShortcut"/> </c></para>
+/// </summary>
+internal sealed class CheckQuickReplyShortcutHandler(IQuickReplyService quickReplyService)
+    : RpcResultObjectHandler<RequestCheckQuickReplyShortcut, IBool>
 {
-    private readonly IMongoDatabase _database;
-    private const int MaxShortcuts = 100;
-    private const int MaxMessagesPerShortcut = 100;
-
-    public CheckQuickReplyShortcutHandler(IMongoDatabase database)
-    {
-        _database = database;
-    }
-
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, RequestCheckQuickReplyShortcut obj)
     {
-        var userId = input.UserId;
-        var shortcutName = obj.Shortcut;
-
-        var collection = _database.GetCollection<BsonDocument>("quickreplys");
-        
-        var filter = Builders<BsonDocument>.Filter.Eq("UserId", userId);
-        var count = await collection.CountDocumentsAsync(filter);
-        
-        if (count >= MaxShortcuts)
+        if (!QuickReplyService.IsValidShortcutName(obj.Shortcut))
         {
-            RpcErrors.RpcErrors400.QuickRepliesTooMuch.ThrowRpcError();
+            RpcErrors.RpcErrors400.ShortcutInvalid.ThrowRpcError();
         }
 
-        if (!string.IsNullOrEmpty(shortcutName))
-        {
-            var nameFilter = Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("UserId", userId),
-                Builders<BsonDocument>.Filter.Eq("Title", shortcutName)
-            );
-            var existing = await collection.Find(nameFilter).FirstOrDefaultAsync();
-            if (existing != null)
-            {
-                var msgCount = existing.GetValue("Count", 0).AsInt32;
-                if (msgCount >= MaxMessagesPerShortcut)
-                {
-                    RpcErrors.RpcErrors400.ReplyMessagesTooMuch.ThrowRpcError();
-                }
-            }
-        }
-
-        return new TBoolTrue();
+        return await quickReplyService.CanAddMessagesAsync(input.UserId, obj.Shortcut)
+            ? new TBoolTrue()
+            : new TBoolFalse();
     }
 }

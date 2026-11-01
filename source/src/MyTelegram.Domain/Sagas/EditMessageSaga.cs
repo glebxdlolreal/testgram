@@ -87,7 +87,10 @@ ISagaIsStartedBy<MessageAggregate, MessageId, OutboxMessageEditedEventV2>,
     }
     private async Task HandleEditOutboxCompletedAsync(long outboxOwnerPeerId)
     {
-        var pts = await _idGenerator.NextIdAsync(IdType.Pts, outboxOwnerPeerId);
+        // A quick reply message is outside the update sequence: its edit takes no pts.
+        var pts = _state.NewMessageItem.QuickReplyItem != null
+            ? 0
+            : await _idGenerator.NextIdAsync(IdType.Pts, outboxOwnerPeerId);
         var oldMessageItem = _state.OldMessageItem;
         var newMessageItem = _state.NewMessageItem with { Pts = pts };
         Emit(new OutboxMessageEditCompletedSagaEvent(_state.RequestInfo, oldMessageItem, newMessageItem));

@@ -53,6 +53,9 @@ public interface IMessageReadModel : IReadModel, IReactionItem
     long? PostChannelId { get; }
     int? PostMessageId { get; }
     bool IsQuickReplyMessage { get; }
+
+    /// <summary><c>via_business_bot_id</c>: the connected business bot that sent this for its owner.</summary>
+    long? ViaBusinessBotId { get; }
     int? ShortcutId { get; }
     QuickReplyItem? QuickReplyItem { get; }
     Guid BatchId { get; }

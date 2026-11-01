@@ -14,7 +14,7 @@ public class GetMessageIdListQueryHandler(IQueryOnlyReadModelStore<MessageReadMo
 
         var result= await store
             .FindAsync(p =>
-                    p.OwnerPeerId == query.OwnerPeerId && p.ToPeerId == query.ToPeerId && p.MessageId < maxId,
+                    p.OwnerPeerId == query.OwnerPeerId && !p.IsQuickReplyMessage && p.ToPeerId == query.ToPeerId && p.MessageId < maxId,
                 p => p.MessageId, limit: query.Limit, cancellationToken: cancellationToken);
         return result.ToList();
     }

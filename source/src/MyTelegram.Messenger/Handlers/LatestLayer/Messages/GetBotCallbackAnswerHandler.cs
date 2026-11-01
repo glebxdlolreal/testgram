@@ -18,6 +18,8 @@ internal sealed class GetBotCallbackAnswerHandler(
     IMessageAppService messageAppService,
     IQueryProcessor queryProcessor,
     IBotUpdatesSender botUpdatesSender,
+    MyTelegram.Messenger.Services.Business.IBusinessConnectionStore businessConnectionStore,
+    IMessageConverterService messageConverterService,
     ILogger<GetBotCallbackAnswerHandler> logger) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetBotCallbackAnswer, MyTelegram.Schema.Messages.IBotCallbackAnswer>
 {
     private const string PendingCollection = "pending_callback_queries";
@@ -58,6 +60,14 @@ internal sealed class GetBotCallbackAnswerHandler(
             }
         }
 
+        // A button on a message a connected business bot sent for its owner goes to that bot.
+        // See https://corefork.telegram.org/api/bots/connected-business-bots
+        var businessAnswer = await TryForwardToBusinessBotAsync(input, obj, peer);
+        if (businessAnswer != null)
+        {
+            return businessAnswer;
+        }
+
         var botId = await ResolveBotIdAsync(peer, input.UserId, obj.MsgId);
         if (botId == null)
         {
@@ -65,6 +75,81 @@ internal sealed class GetBotCallbackAnswerHandler(
         }
 
         return await ForwardCallbackToBotAsync(input, obj, peer, botId!.Value);
+    }
+
+    private async Task<MyTelegram.Schema.Messages.IBotCallbackAnswer?> TryForwardToBusinessBotAsync(
+        IRequestInput input,
+        MyTelegram.Schema.Messages.RequestGetBotCallbackAnswer obj,
+        Peer peer)
+    {
+        if (peer.PeerType != PeerType.User)
+        {
+            return null;
+        }
+
+        var pressed = await queryProcessor.ProcessAsync(
+            new GetMessageByIdQuery(MessageId.Create(input.UserId, obj.MsgId).Value));
+        if (pressed?.ViaBusinessBotId is not { } botId)
+        {
+            return null;
+        }
+
+        // The owner of the business account is the sender of the message.
+        var ownerUserId = pressed.SenderUserId == input.UserId ? input.UserId : pressed.SenderUserId;
+        var connection = await businessConnectionStore.GetByUserAsync(ownerUserId);
+        if (connection == null || connection.BotId != botId)
+        {
+            return null;
+        }
+
+        var ownerMessageId = pressed.SenderUserId == input.UserId ? pressed.MessageId : pressed.SenderMessageId;
+        var ownerCopy = await queryProcessor.ProcessAsync(
+            new GetMessageByIdQuery(MessageId.Create(ownerUserId, ownerMessageId).Value));
+        if (ownerCopy == null)
+        {
+            return null;
+        }
+
+        var queryId = Random.Shared.NextInt64();
+        var update = new TUpdateBusinessBotCallbackQuery
+        {
+            QueryId = queryId,
+            UserId = input.UserId,
+            ConnectionId = connection.ConnectionId,
+            Message = messageConverterService.ToMessage(ownerUserId, ownerCopy),
+            ChatInstance = HashCode.Combine(peer.PeerId, input.UserId),
+            Data = obj.Data
+        };
+        var extraFields = new BsonDocument
+        {
+            ["user_id"] = input.UserId,
+            ["peer_id"] = peer.PeerId,
+            ["msg_id"] = obj.MsgId,
+            ["alert"] = false,
+            ["message"] = string.Empty,
+            ["url"] = string.Empty,
+            ["cache_time"] = 0
+        };
+
+        var result = await botUpdatesSender.SendQueryAndWaitAsync(PendingCollection, queryId, botId, update,
+            extraFields);
+        if (!result.Success || result.Document == null)
+        {
+            throw new RpcException(new RpcError(400,
+                result.Error ?? RpcErrors.RpcErrors400.BotResponseTimeout.Message));
+        }
+
+        var doc = result.Document;
+        var message = GetString(doc, "message");
+        var url = GetString(doc, "url");
+        return new MyTelegram.Schema.Messages.TBotCallbackAnswer
+        {
+            Alert = doc.TryGetValue("alert", out var alertValue) && alertValue.IsBoolean && alertValue.AsBoolean,
+            Message = string.IsNullOrEmpty(message) ? null : message,
+            Url = string.IsNullOrEmpty(url) ? null : url,
+            HasUrl = !string.IsNullOrEmpty(url),
+            CacheTime = GetInt32(doc, "cache_time")
+        };
     }
 
     /// <summary>

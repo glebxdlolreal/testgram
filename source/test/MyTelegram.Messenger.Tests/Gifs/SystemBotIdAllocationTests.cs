@@ -61,7 +61,7 @@ public class SystemBotIdAllocationTests
     private static async Task<long> GetNextUserIdAsync(IMongoDatabase database)
     {
         var service = (BotFatherBotService)Activator.CreateInstance(typeof(BotFatherBotService),
-            null, database, null, null, null, null, null)!;
+            null, database, null, null, null, null, null, null, null, null)!;
 
         var method = typeof(BotFatherBotService).GetMethod("GetNextUserIdAsync",
             BindingFlags.Instance | BindingFlags.NonPublic)!;

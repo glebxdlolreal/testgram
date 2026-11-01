@@ -23,7 +23,9 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Updates;
 /// <remarks>
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetDifferenceHandler(IMessageAppService messageAppService, IPtsHelper ptsHelper, IQueryProcessor queryProcessor, IAckCacheService ackCacheService, IDifferenceConverterService differenceConverterService, ISecretChatMessageStore secretChatMessageStore) : RpcResultObjectHandler<RequestGetDifference, IDifference>
+internal sealed class GetDifferenceHandler(
+    MyTelegram.Messenger.Services.Bots.IBotQtsCounter botQtsCounter,
+    IMessageAppService messageAppService, IPtsHelper ptsHelper, IQueryProcessor queryProcessor, IAckCacheService ackCacheService, IDifferenceConverterService differenceConverterService, ISecretChatMessageStore secretChatMessageStore) : RpcResultObjectHandler<RequestGetDifference, IDifference>
 {
     protected override async Task<IDifference> HandleCoreAsync(IRequestInput input, RequestGetDifference obj)
     {
@@ -90,6 +92,9 @@ internal sealed class GetDifferenceHandler(IMessageAppService messageAppService,
         users.AddRange(channelUpdatesReadModels.SelectMany(p => p.Users ?? []).ToList());
         chats.AddRange(channelUpdatesReadModels.SelectMany(p => p.Chats ?? []).ToList());
         chats.AddRange(channelUpdatesReadModels.Select(p => p.OwnerPeerId));
+        // Replayed bot updates (business messages and the like) name their users and chats too.
+        users.AddRange(userUpdates.SelectMany(p => p.Users ?? []));
+        chats.AddRange(userUpdates.SelectMany(p => p.Chats ?? []));
         var dto = await messageAppService.GetChannelDifferenceAsync(new GetDifferenceInput(input.UserId, input.UserId, obj.Pts, limit, messageIds, users, chats));
         var allUpdateList = updatesReadModels.Where(p => p.UpdatesType == UpdatesType.Updates).SelectMany(p => p.Updates ?? []).ToList();
         allUpdateList.AddRange(channelUpdatesReadModels.Where(p => p.UpdatesType == UpdatesType.Updates).SelectMany(p => p.Updates ?? []));
@@ -143,6 +148,12 @@ internal sealed class GetDifferenceHandler(IMessageAppService messageAppService,
         var secretChatQts = encryptedMessagesTruncated
             ? encryptedMessages[^1].Qts
             : safeQts;
+
+        // A bot's qts updates (callback queries, business messages) count from the shared bot counter.
+        if (!encryptedMessagesTruncated)
+        {
+            secretChatQts = Math.Max(secretChatQts, await botQtsCounter.GetAsync(input.UserId));
+        }
 
         var r = differenceConverterService.ToDifference(input, dto, ptsReadModel, cachedPts, limit, allUpdateList, [], encryptedMessages, secretChatQts, encryptedMessagesTruncated, updatesTruncated: channelTruncated || userTruncated, layer: input.Layer);
         //logger.LogInformation("{UserId},Layer={Layer},res:{@Res}", input.UserId, input.Layer, r);

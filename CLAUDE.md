@@ -13,7 +13,7 @@ Reference sections (search the exact heading):
 - Media: `Files and server-side video processing`, `File references`, `GIFs`, `Notification sounds (ringtones)`, `Wallpapers`.
 - Speech/text: `Voice message transcription`, `Message translation`.
 - Stickers/emoji: `Stickers`, `Animated dice`, `Animated emojis`, `Emoji categories and animated emoji`, `Custom emoji in messages`.
-- Chats: `Message drafts`, `Dialog folders`, `Top peer rating`.
+- Chats: `Message drafts`, `Dialog folders`, `Top peer rating`, `Telegram Business`.
 - Accounts: `Account deletion`, `Third-party bot verification`, `Telegram Passport`, `Fragment / multiple usernames`.
 - Operations: `Build & Deploy`, `Temporary auth keys (PFS)`, `Debugging`, `WebRTC / Calls`.
 
