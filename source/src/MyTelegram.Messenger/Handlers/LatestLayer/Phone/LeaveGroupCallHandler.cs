@@ -53,7 +53,11 @@ internal sealed class LeaveGroupCallHandler(
             }
 
             groupCall = updated;
-            await mediaServer.LeaveAsync(groupCall.CallId, input.UserId);
+            await mediaServer.LeaveAsync(groupCall.CallId, GroupCallMediaAllocation.CallKey(input.UserId));
+            if (removed.PresentationParamsJson != null)
+            {
+                await mediaServer.LeaveAsync(groupCall.CallId, GroupCallMediaAllocation.PresentationKey(input.UserId));
+            }
             removed.Left = true;
             removed.Muted = false;
             removed.RaiseHand = false;

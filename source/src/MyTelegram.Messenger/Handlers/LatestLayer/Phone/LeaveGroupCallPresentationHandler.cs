@@ -17,7 +17,8 @@ internal sealed class LeaveGroupCallPresentationHandler(
     IMongoDatabase mongoDatabase,
     IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
-    IObjectMessageSender objectMessageSender)
+    IObjectMessageSender objectMessageSender,
+    IGroupCallMediaServer mediaServer)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestLeaveGroupCallPresentation, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -41,7 +42,9 @@ internal sealed class LeaveGroupCallPresentationHandler(
 
         participant.PresentationPaused = true;
         participant.PresentationParamsJson = null;
+        participant.PresentationEndpoint = null;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
+        await mediaServer.LeaveAsync(groupCall.CallId, GroupCallMediaAllocation.PresentationKey(input.UserId));
 
         var updates = GroupCallStateHelper.Updates(
             GroupCallStateHelper.CreateParticipantsUpdate(groupCall, input.UserId, peerHelper, [participant]));

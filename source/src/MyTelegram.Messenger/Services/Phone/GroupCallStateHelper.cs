@@ -328,10 +328,69 @@ internal static class GroupCallStateHelper
             VideoJoined = !participant.Left,
             Volume = participant.Volume,
             VolumeByAdmin = !participant.Left && !participant.VolumeBySelf,
+            Video = participant.Left || participant.VideoStopped
+                ? null
+                : ToParticipantVideo(participant.VideoEndpoint, participant.ParamsJson, participant.VideoPaused),
+            Presentation = participant.Left
+                ? null
+                : ToParticipantVideo(participant.PresentationEndpoint, participant.PresentationParamsJson, participant.PresentationPaused),
             RaiseHandRating = participant.RaiseHand ? participant.Date : null,
             // Only join and leave change the participant list, so only they are versioned.
             Versioned = versioned
         };
+    }
+
+    /// <summary>
+    /// A participant's camera or screen-share video as other clients need it: the SFU endpoint and the
+    /// SSRC groups (SIM, FID) the client advertised in its join params. tgcalls renders the first SSRC of
+    /// the SIM group (or of the only group).
+    /// </summary>
+    public static TGroupCallParticipantVideo? ToParticipantVideo(string? endpoint, string? paramsJson, bool paused)
+    {
+        if (string.IsNullOrEmpty(endpoint) || string.IsNullOrWhiteSpace(paramsJson))
+        {
+            return null;
+        }
+
+        var groups = new List<IGroupCallParticipantVideoSourceGroup>();
+        try
+        {
+            using var document = JsonDocument.Parse(paramsJson);
+            if (document.RootElement.TryGetProperty("ssrc-groups", out var ssrcGroups) &&
+                ssrcGroups.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var group in ssrcGroups.EnumerateArray())
+                {
+                    if (!group.TryGetProperty("semantics", out var semantics) ||
+                        !group.TryGetProperty("sources", out var sources) ||
+                        sources.ValueKind != JsonValueKind.Array)
+                    {
+                        continue;
+                    }
+
+                    groups.Add(new TGroupCallParticipantVideoSourceGroup
+                    {
+                        Semantics = semantics.GetString() ?? string.Empty,
+                        Sources = new TVector<int>(sources.EnumerateArray()
+                            .Where(source => source.ValueKind == JsonValueKind.Number)
+                            .Select(source => (int)source.GetInt64()))
+                    });
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        return groups.Count == 0
+            ? null
+            : new TGroupCallParticipantVideo
+            {
+                Endpoint = endpoint,
+                SourceGroups = new TVector<IGroupCallParticipantVideoSourceGroup>(groups),
+                Paused = paused
+            };
     }
 
     public static TUpdateGroupCall CreateCallUpdate(
@@ -591,18 +650,23 @@ internal static class GroupCallStateHelper
 
     /// <summary>
     /// The connection parameters for a call carried by the SFU, in the shape Telegram's own SFU answers
-    /// (captured 2026-11-01): its Jingle <c>transport</c> plus the <c>audio</c> payload types and header
-    /// extensions. tgcalls reads only <c>transport</c> (and <c>video</c>, which is not offered yet).
+    /// (captured 2026-11-01): its Jingle <c>transport</c>, the <c>audio</c> payload types and header
+    /// extensions, and the <c>video</c> section with the participant's endpoint and server_sources.
+    /// tgcalls reads <c>transport</c> and <c>video</c>.
     /// </summary>
     public static TUpdateGroupCallConnection CreateSfuConnectionUpdate(
-        System.Text.Json.Nodes.JsonObject transport,
+        GroupCallMediaJoinResult joined,
         bool presentation = false)
     {
         var connection = new System.Text.Json.Nodes.JsonObject
         {
-            ["transport"] = transport.DeepClone(),
+            ["transport"] = joined.Transport.DeepClone(),
             ["audio"] = System.Text.Json.Nodes.JsonNode.Parse(SfuAudioDescription)
         };
+        if (joined.Video != null)
+        {
+            connection["video"] = joined.Video.DeepClone();
+        }
 
         return new TUpdateGroupCallConnection
         {

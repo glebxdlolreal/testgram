@@ -19,7 +19,9 @@ internal sealed class JoinGroupCallPresentationHandler(
     IMongoDatabase mongoDatabase,
     IAccessHashHelper2 accessHashHelper2,
     IPeerHelper peerHelper,
-    IObjectMessageSender objectMessageSender)
+    IObjectMessageSender objectMessageSender,
+    IGroupCallMediaServer mediaServer,
+    ILogger<JoinGroupCallPresentationHandler> logger)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestJoinGroupCallPresentation, MyTelegram.Schema.IUpdates>
 {
     private readonly IMongoCollection<GroupCallDocument> _groupCallCollection =
@@ -42,8 +44,17 @@ internal sealed class JoinGroupCallPresentationHandler(
             return null!;
         }
 
+        // A screen share is its own SFU connection, next to the participant's call connection.
+        GroupCallMediaJoinResult? media = null;
+        if (!groupCall.RtmpStream && mediaServer.IsConfigured)
+        {
+            media = await GroupCallMediaAllocation.AllocateAsync(
+                mediaServer, logger, groupCall.CallId, GroupCallMediaAllocation.PresentationKey(input.UserId), obj.Params.Data);
+        }
+
         participant.PresentationPaused = false;
         participant.PresentationParamsJson = obj.Params.Data;
+        participant.PresentationEndpoint = media?.Endpoint;
         await _groupCallCollection.ReplaceOneAsync(filter, groupCall);
 
         var participantsUpdate = GroupCallStateHelper.CreateParticipantsUpdate(groupCall, input.UserId, peerHelper, [participant]);
@@ -55,7 +66,9 @@ internal sealed class JoinGroupCallPresentationHandler(
             input.UserId);
 
         // Screen sharing needs the media server's transport too; without one there is nothing to connect to.
-        var connectionUpdate = GroupCallStateHelper.CreateConnectionUpdate(groupCall, presentation: true);
+        var connectionUpdate = media != null
+            ? GroupCallStateHelper.CreateSfuConnectionUpdate(media, presentation: true)
+            : GroupCallStateHelper.CreateConnectionUpdate(groupCall, presentation: true);
         return connectionUpdate == null
             ? GroupCallStateHelper.Updates(participantsUpdate)
             : GroupCallStateHelper.Updates(participantsUpdate, connectionUpdate);

@@ -84,10 +84,52 @@ func ParseJoinParams(raw string) (*JoinParams, error) {
 // Ssrc32 is the audio SSRC as the unsigned value on the wire (tgcalls sends it as a signed int32).
 func (p *JoinParams) Ssrc32() uint32 { return uint32(int32(p.Ssrc)) }
 
+// videoCodec is one entry of the video section Telegram's SFU answers with (captured 2026-11-01).
+type videoCodec struct {
+	pt       int
+	name     string
+	rtxPT    int
+	fmtpLine string
+}
+
+var videoCodecs = []videoCodec{
+	{pt: 100, name: "VP8", rtxPT: 101, fmtpLine: "x-google-start-bitrate=800"},
+	{pt: 102, name: "VP9", rtxPT: 103},
+	{pt: 104, name: "H264", rtxPT: 105},
+	{pt: 106, name: "AV1", rtxPT: 107},
+}
+
+var videoFeedback = []string{"goog-remb", "transport-cc", "ccm fir", "nack", "nack pli"}
+
+// VideoSsrcs is the sender's base video stream: the first SSRC of its SIM group (the lowest
+// layer, which is what receivers render as the participant's main SSRC) and that SSRC's FID
+// (RTX) partner. Upper simulcast layers are not forwarded.
+func (p *JoinParams) VideoSsrcs() (main uint32, rtx uint32, ok bool) {
+	for _, g := range p.SsrcGroups {
+		if g.Semantics == "SIM" && len(g.Sources) > 0 {
+			main = uint32(int32(g.Sources[0]))
+			break
+		}
+	}
+	for _, g := range p.SsrcGroups {
+		if g.Semantics != "FID" || len(g.Sources) < 2 {
+			continue
+		}
+		if main == 0 {
+			main = uint32(int32(g.Sources[0]))
+		}
+		if uint32(int32(g.Sources[0])) == main {
+			rtx = uint32(int32(g.Sources[1]))
+			break
+		}
+	}
+	return main, rtx, main != 0
+}
+
 // RemoteAnswer turns the client's join params into the SDP answer the SFU's
 // offer needs. setup:passive makes the SFU the DTLS client, which is what the
 // client expects: tgcalls' GroupNetworkManager always runs DTLS as the server.
-func (p *JoinParams) RemoteAnswer(mid string) string {
+func (p *JoinParams) RemoteAnswer(audioMid, videoMid string) string {
 	fp := p.Fingerprints[0]
 	hash := fp.Hash
 	if hash == "" {
@@ -96,30 +138,90 @@ func (p *JoinParams) RemoteAnswer(mid string) string {
 	ssrc := p.Ssrc32()
 	var b strings.Builder
 	b.WriteString("v=0\r\no=- 1 2 IN IP4 0.0.0.0\r\ns=-\r\nt=0 0\r\n")
-	fmt.Fprintf(&b, "a=group:BUNDLE %s\r\n", mid)
+	fmt.Fprintf(&b, "a=group:BUNDLE %s %s\r\n", audioMid, videoMid)
+	transport := func() {
+		b.WriteString("c=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\n")
+		fmt.Fprintf(&b, "a=ice-ufrag:%s\r\na=ice-pwd:%s\r\n", p.Ufrag, p.Pwd)
+		fmt.Fprintf(&b, "a=fingerprint:%s %s\r\n", hash, fp.Fingerprint)
+		b.WriteString("a=setup:passive\r\n")
+	}
+
 	fmt.Fprintf(&b, "m=audio 9 UDP/TLS/RTP/SAVPF %d\r\n", opusPayloadType)
-	b.WriteString("c=IN IP4 0.0.0.0\r\na=rtcp:9 IN IP4 0.0.0.0\r\n")
-	fmt.Fprintf(&b, "a=ice-ufrag:%s\r\na=ice-pwd:%s\r\n", p.Ufrag, p.Pwd)
-	fmt.Fprintf(&b, "a=fingerprint:%s %s\r\n", hash, fp.Fingerprint)
-	b.WriteString("a=setup:passive\r\n")
-	fmt.Fprintf(&b, "a=mid:%s\r\n", mid)
+	transport()
+	fmt.Fprintf(&b, "a=mid:%s\r\n", audioMid)
 	fmt.Fprintf(&b, "a=extmap:1 %s\r\na=extmap:2 %s\r\na=extmap:3 %s\r\n", extAudioLevel, extAbsSendTime, extTransportCC)
 	b.WriteString("a=sendrecv\r\na=rtcp-mux\r\n")
 	fmt.Fprintf(&b, "a=rtpmap:%d opus/48000/2\r\na=fmtp:%d minptime=10;useinbandfec=1\r\n", opusPayloadType, opusPayloadType)
 	fmt.Fprintf(&b, "a=rtcp-fb:%d transport-cc\r\n", opusPayloadType)
 	fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", ssrc, ssrc)
+
+	pts := []string{}
+	for _, c := range videoCodecs {
+		pts = append(pts, strconv.Itoa(c.pt), strconv.Itoa(c.rtxPT))
+	}
+	fmt.Fprintf(&b, "m=video 9 UDP/TLS/RTP/SAVPF %s\r\n", strings.Join(pts, " "))
+	transport()
+	fmt.Fprintf(&b, "a=mid:%s\r\n", videoMid)
+	fmt.Fprintf(&b, "a=extmap:2 %s\r\na=extmap:3 %s\r\n", extAbsSendTime, extTransportCC)
+	b.WriteString("a=sendrecv\r\na=rtcp-mux\r\n")
+	for _, c := range videoCodecs {
+		fmt.Fprintf(&b, "a=rtpmap:%d %s/90000\r\n", c.pt, c.name)
+		if c.fmtpLine != "" {
+			fmt.Fprintf(&b, "a=fmtp:%d %s\r\n", c.pt, c.fmtpLine)
+		}
+		for _, fb := range videoFeedback {
+			fmt.Fprintf(&b, "a=rtcp-fb:%d %s\r\n", c.pt, fb)
+		}
+		fmt.Fprintf(&b, "a=rtpmap:%d rtx/90000\r\na=fmtp:%d apt=%d\r\n", c.rtxPT, c.rtxPT, c.pt)
+	}
+	if main, rtx, ok := p.VideoSsrcs(); ok {
+		if rtx != 0 {
+			fmt.Fprintf(&b, "a=ssrc-group:FID %d %d\r\n", main, rtx)
+		}
+		fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", main, ssrc)
+		if rtx != 0 {
+			fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", rtx, ssrc)
+		}
+	}
 	return b.String()
+}
+
+// VideoDescription is the "video" object of the join answer, as Telegram's SFU sends it: the
+// participant's endpoint id (what other clients key its video on), the payload types and header
+// extensions, and server_sources (the SSRC tgcalls treats as the server's bandwidth probe).
+func VideoDescription(endpoint string, probingSsrc int32) map[string]any {
+	feedback := []map[string]string{{"type": "goog-remb"}, {"type": "transport-cc"}, {"type": "ccm", "subtype": "fir"}, {"type": "nack"}, {"type": "nack", "subtype": "pli"}}
+	payloadTypes := []map[string]any{}
+	for _, c := range videoCodecs {
+		var params any = []any{}
+		if c.fmtpLine != "" {
+			params = map[string]string{"fmtp": c.fmtpLine}
+		}
+		payloadTypes = append(payloadTypes,
+			map[string]any{"id": c.pt, "name": c.name, "clockrate": 90000, "channels": 1, "parameters": params, "rtcp-fbs": feedback},
+			map[string]any{"id": c.rtxPT, "clockrate": 90000, "name": "rtx", "parameters": map[string]string{"apt": strconv.Itoa(c.pt)}})
+	}
+	return map[string]any{
+		"endpoint":      endpoint,
+		"payload-types": payloadTypes,
+		"rtp-hdrexts": []map[string]any{
+			{"id": 2, "uri": extAbsSendTime},
+			{"id": 3, "uri": extTransportCC},
+			{"id": 13, "uri": "urn:3gpp:video-orientation"},
+		},
+		"server_sources": []int32{probingSsrc},
+	}
 }
 
 // TransportFromOffer extracts what the client needs to reach the SFU from its
 // own SDP offer, in Telegram's Jingle JSON shape.
-func TransportFromOffer(offer string) (*Transport, string, error) {
+func TransportFromOffer(offer string) (*Transport, []string, error) {
 	var d sdp.SessionDescription
 	if err := d.UnmarshalString(offer); err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	if len(d.MediaDescriptions) == 0 {
-		return nil, "", errors.New("offer has no media section")
+		return nil, nil, errors.New("offer has no media section")
 	}
 	m := d.MediaDescriptions[0]
 	attr := func(key string) string {
@@ -168,9 +270,14 @@ func TransportFromOffer(offer string) (*Transport, string, error) {
 			Network:    "0",
 		})
 	}
-	mid := attr("mid")
-	if t.Ufrag == "" || t.Pwd == "" || len(t.Fingerprints) == 0 || len(t.Candidates) == 0 {
-		return nil, "", errors.New("offer lacks ICE credentials, fingerprint or candidates")
+	mids := []string{}
+	for _, md := range d.MediaDescriptions {
+		if v, ok := md.Attribute("mid"); ok {
+			mids = append(mids, v)
+		}
 	}
-	return t, mid, nil
+	if t.Ufrag == "" || t.Pwd == "" || len(t.Fingerprints) == 0 || len(t.Candidates) == 0 {
+		return nil, nil, errors.New("offer lacks ICE credentials, fingerprint or candidates")
+	}
+	return t, mids, nil
 }

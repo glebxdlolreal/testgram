@@ -18,7 +18,7 @@ func newTestSFU(t *testing.T) *SFU {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	s, err := NewSFU(Config{PublicIPs: []string{"127.0.0.1"}, UDP: conn, IncludeLoopback: true})
+	s, err := NewSFU(Config{PublicIPs: []string{"127.0.0.1"}, UDP: conn, IncludeLoopback: true, KeyframeInterval: 300 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,12 +31,12 @@ func join(t *testing.T, s *SFU, callID int64, key string, c *tgClient) *Transpor
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr, err := s.Join(callID, key, params)
+	joined, err := s.Join(callID, key, params)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.connect(tr)
-	return tr
+	c.connect(joined.Transport)
+	return joined.Transport
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {
@@ -55,11 +55,19 @@ func TestTransportHasTelegramsShape(t *testing.T) {
 	s := newTestSFU(t)
 	c := newTGClient(t)
 	params, _ := ParseJoinParams(c.params)
-	tr, err := s.Join(1, "1", params)
+	joined, err := s.Join(1, "1", params)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.End(1)
+	tr := joined.Transport
+
+	if len(joined.Endpoint) != 24 || joined.Video["endpoint"] != joined.Endpoint {
+		t.Fatalf("endpoint %q not in Telegram's form or not in the video section", joined.Endpoint)
+	}
+	if src := joined.Video["server_sources"].([]int32); len(src) != 1 || src[0] == 0 {
+		t.Fatalf("server_sources = %v", src)
+	}
 
 	if tr.Xmlns != "urn:xmpp:jingle:transports:ice-udp:1" || !tr.RtcpMux {
 		t.Fatalf("not a Jingle ice-udp transport: %+v", tr)
@@ -171,9 +179,11 @@ func TestAPI_JoinSourcesLeave(t *testing.T) {
 		t.Fatal(err)
 	}
 	var joined struct {
-		Transport *Transport `json:"transport"`
+		Transport *Transport     `json:"transport"`
+		Video     map[string]any `json:"video"`
+		Endpoint  string         `json:"endpoint"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&joined); err != nil || resp.StatusCode != 200 || joined.Transport == nil {
+	if err := json.NewDecoder(resp.Body).Decode(&joined); err != nil || resp.StatusCode != 200 || joined.Transport == nil || joined.Video["endpoint"] != joined.Endpoint {
 		t.Fatalf("join: status %d err %v", resp.StatusCode, err)
 	}
 	c.connect(joined.Transport)
@@ -233,5 +243,67 @@ func TestParseJoinParams_RejectsIncompleteParams(t *testing.T) {
 	}
 	if p.Ssrc32() != 2363595475 {
 		t.Fatalf("a negative (int32) ssrc must map to its unsigned value, got %d", p.Ssrc32())
+	}
+}
+
+func TestVideo_BaseLayerIsForwarded_UpperLayersAreNot_AndTheWatchedCameraIsAskedForKeyframes(t *testing.T) {
+	s := newTestSFU(t)
+	camera, viewer := newTGClientWith(t, true), newTGClientWith(t, true)
+	join(t, s, 21, "camera", camera)
+	join(t, s, 21, "viewer", viewer)
+	defer s.End(21)
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go camera.film(stop, 0)
+	go camera.film(stop, 2)
+
+	waitFor(t, "the viewer to receive the camera's base layer", func() bool { return viewer.count(camera.videoSsrc[0]) >= 20 })
+	if viewer.count(camera.videoSsrc[2]) != 0 {
+		t.Fatal("an upper simulcast layer was forwarded; receivers render only the base SSRC")
+	}
+
+	before := camera.keyframes.Load()
+	waitFor(t, "periodic keyframe requests to reach the camera", func() bool { return camera.keyframes.Load() >= before+2 })
+
+	sources := map[int32]bool{}
+	for _, src := range s.Sources(21) {
+		sources[src] = true
+	}
+	if !sources[int32(camera.videoSsrc[0])] || !sources[int32(camera.ssrc)] {
+		t.Fatalf("sources %v lack the camera's audio or base video ssrc", s.Sources(21))
+	}
+}
+
+func TestVideo_ANewcomerTriggersAKeyframeFromEveryCamera(t *testing.T) {
+	s := newTestSFU(t)
+	camera := newTGClientWith(t, true)
+	join(t, s, 23, "camera", camera)
+	defer s.End(23)
+	waitFor(t, "the camera to connect", func() bool {
+		st := s.Stats(23)
+		return len(st) == 1 && st[0].Connected
+	})
+
+	before := camera.keyframes.Load()
+	join(t, s, 23, "newcomer", newTGClient(t))
+	waitFor(t, "a keyframe request for the newcomer", func() bool { return camera.keyframes.Load() > before })
+}
+
+func TestVideoSsrcs_TakeTheBaseLayerAndItsRtx(t *testing.T) {
+	p, err := ParseJoinParams(`{"ufrag":"a","pwd":"b","fingerprints":[{"fingerprint":"AA"}],"ssrc":1,"ssrc-groups":[{"semantics":"SIM","sources":[10,12,14]},{"semantics":"FID","sources":[12,13]},{"semantics":"FID","sources":[10,11]}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if main, rtx, ok := p.VideoSsrcs(); !ok || main != 10 || rtx != 11 {
+		t.Fatalf("got %d/%d/%v, want 10/11", main, rtx, ok)
+	}
+	screen, _ := ParseJoinParams(`{"ufrag":"a","pwd":"b","fingerprints":[{"fingerprint":"AA"}],"ssrc":1,"ssrc-groups":[{"semantics":"FID","sources":[-5,-4]}]}`)
+	if main, rtx, ok := screen.VideoSsrcs(); !ok || int32(main) != -5 || int32(rtx) != -4 {
+		t.Fatalf("a non-simulcast stream (screen share) should use its FID pair, got %d/%d", int32(main), int32(rtx))
+	}
+	audioOnly, _ := ParseJoinParams(`{"ufrag":"a","pwd":"b","fingerprints":[{"fingerprint":"AA"}],"ssrc":1,"ssrc-groups":[]}`)
+	if _, _, ok := audioOnly.VideoSsrcs(); ok {
+		t.Fatal("audio-only params reported video")
 	}
 }

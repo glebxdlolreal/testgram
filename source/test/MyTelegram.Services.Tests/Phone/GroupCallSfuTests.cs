@@ -18,6 +18,10 @@ public class GroupCallSfuTests
     private const long JoinerId = 2;
     private const long CallId = 900;
     private const long AccessHash = 4321;
+    private const string CameraParams =
+        """{"ufrag":"cl","pwd":"clientpwd","fingerprints":[{"hash":"sha-256","fingerprint":"01:02","setup":"passive"}],"ssrc":222222,"ssrc-groups":[{"semantics":"SIM","sources":[1000,1002,-2]},{"semantics":"FID","sources":[1000,1001]},{"semantics":"FID","sources":[1002,1003]},{"semantics":"FID","sources":[-2,-1]}]}""";
+    private const string ScreenParams =
+        """{"ufrag":"sc","pwd":"screenpwd","fingerprints":[{"hash":"sha-256","fingerprint":"03:04","setup":"passive"}],"ssrc":333333,"ssrc-groups":[{"semantics":"FID","sources":[5000,5001]}]}""";
     private const string JoinParams =
         """{"ufrag":"cl","pwd":"clientpwd","fingerprints":[{"hash":"sha-256","fingerprint":"01:02","setup":"passive"}],"ssrc":222222,"ssrc-groups":[]}""";
 
@@ -28,7 +32,7 @@ public class GroupCallSfuTests
 
         var updates = await harness.JoinAsync(JoinerId, JoinParams);
 
-        harness.Sfu.Joins.ShouldHaveSingleItem().ShouldBe((CallId, JoinerId, JoinParams));
+        harness.Sfu.Joins.ShouldHaveSingleItem().ShouldBe((CallId, JoinerId.ToString(), JoinParams));
         var connection = updates.ShouldBeOfType<TUpdates>().Updates.OfType<TUpdateGroupCallConnection>().ShouldHaveSingleItem();
         connection.Presentation.ShouldBeFalse();
         using var json = JsonDocument.Parse(connection.Params.Data);
@@ -39,6 +43,64 @@ public class GroupCallSfuTests
         audio.GetProperty("payload-types")[0].GetProperty("id").GetInt32().ShouldBe(111);
         audio.GetProperty("rtp-hdrexts").EnumerateArray().Select(e => e.GetProperty("id").GetInt32()).ShouldBe([1, 2, 3]);
         json.RootElement.TryGetProperty("stream", out _).ShouldBeFalse();
+        var video = json.RootElement.GetProperty("video");
+        video.GetProperty("endpoint").GetString().ShouldBe("endpoint-2");
+        video.GetProperty("server_sources")[0].GetInt32().ShouldBe(-1931371821);
+        harness.Load().Participants.Single().VideoEndpoint.ShouldBe("endpoint-2");
+    }
+
+    [Fact]
+    public async Task ACameraParticipant_IsShownWithItsEndpointAndSsrcGroups_UntilTheCameraStops()
+    {
+        var harness = new Harness();
+        await harness.JoinAsync(JoinerId, CameraParams, videoStopped: false);
+
+        var participants = await harness.InvokeAsync("GetGroupParticipantsHandler", CreatorId,
+            new RequestGetGroupParticipants { Call = Harness.InputCall(), Ids = new TVector<IInputPeer>(), Sources = new TVector<int>(), Offset = string.Empty, Limit = 10 });
+        var video = participants.ShouldBeOfType<TGroupParticipants>().Participants.OfType<TGroupCallParticipant>()
+            .Single().Video.ShouldBeOfType<TGroupCallParticipantVideo>();
+        video.Endpoint.ShouldBe("endpoint-2");
+        video.Paused.ShouldBeFalse();
+        var groups = video.SourceGroups.OfType<TGroupCallParticipantVideoSourceGroup>().ToList();
+        groups.Select(g => g.Semantics).ShouldBe(["SIM", "FID", "FID", "FID"]);
+        groups[0].Sources.ShouldBe([1000, 1002, -2]);
+
+        await harness.InvokeAsync("EditGroupCallParticipantHandler", JoinerId,
+            new RequestEditGroupCallParticipant { Call = Harness.InputCall(), Participant = new TInputPeerSelf(), VideoStopped = true });
+        var afterStop = await harness.InvokeAsync("GetGroupParticipantsHandler", CreatorId,
+            new RequestGetGroupParticipants { Call = Harness.InputCall(), Ids = new TVector<IInputPeer>(), Sources = new TVector<int>(), Offset = string.Empty, Limit = 10 });
+        afterStop.ShouldBeOfType<TGroupParticipants>().Participants.OfType<TGroupCallParticipant>().Single().Video.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task AnAudioOnlyParticipant_HasNoVideo()
+    {
+        var harness = new Harness();
+        await harness.JoinAsync(JoinerId, JoinParams, videoStopped: false);
+
+        harness.Load().Participants.Single().VideoEndpoint.ShouldNotBeNull();
+        (await harness.ParticipantAsync()).Video.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task ScreenSharing_IsItsOwnSfuConnection_ShownAsThePresentation_AndReleasedOnStop()
+    {
+        var harness = new Harness();
+        await harness.JoinAsync(JoinerId, JoinParams);
+
+        var joined = await harness.InvokeAsync("JoinGroupCallPresentationHandler", JoinerId,
+            new RequestJoinGroupCallPresentation { Call = Harness.InputCall(), Params = new TDataJSON { Data = ScreenParams } });
+
+        harness.Sfu.Joins.Last().Key.ShouldBe($"{JoinerId}:presentation");
+        joined.ShouldBeOfType<TUpdates>().Updates.OfType<TUpdateGroupCallConnection>().ShouldHaveSingleItem().Presentation.ShouldBeTrue();
+        var presentation = (await harness.ParticipantAsync()).Presentation.ShouldBeOfType<TGroupCallParticipantVideo>();
+        presentation.Endpoint.ShouldBe($"endpoint-{JoinerId}:presentation");
+
+        await harness.InvokeAsync("LeaveGroupCallPresentationHandler", JoinerId,
+            new RequestLeaveGroupCallPresentation { Call = Harness.InputCall() });
+
+        harness.Sfu.Leaves.ShouldContain((CallId, $"{JoinerId}:presentation"));
+        (await harness.ParticipantAsync()).Presentation.ShouldBeNull();
     }
 
     [Fact]
@@ -74,7 +136,7 @@ public class GroupCallSfuTests
         await harness.InvokeAsync("LeaveGroupCallHandler", JoinerId,
             new RequestLeaveGroupCall { Call = Harness.InputCall(), Source = 222222 });
 
-        harness.Sfu.Leaves.ShouldHaveSingleItem().ShouldBe((CallId, JoinerId));
+        harness.Sfu.Leaves.ShouldHaveSingleItem().ShouldBe((CallId, JoinerId.ToString()));
     }
 
     [Fact]
@@ -132,13 +194,26 @@ public class GroupCallSfuTests
         public GroupCallDocument Load() => BsonSerializer.Deserialize<GroupCallDocument>(
             _store.Documents(PhoneTestFixtures.GroupCallsCollectionName).Single());
 
-        public Task<IObject> JoinAsync(long userId, string paramsJson) => InvokeAsync("JoinGroupCallHandler", userId,
+        public async Task<TGroupCallParticipant> ParticipantAsync()
+        {
+            var result = await InvokeAsync("GetGroupParticipantsHandler", CreatorId, new RequestGetGroupParticipants
+            {
+                Call = InputCall(),
+                Ids = new TVector<IInputPeer>(),
+                Sources = new TVector<int>(),
+                Offset = string.Empty,
+                Limit = 10
+            });
+            return result.ShouldBeOfType<TGroupParticipants>().Participants.OfType<TGroupCallParticipant>().Single();
+        }
+
+        public Task<IObject> JoinAsync(long userId, string paramsJson, bool videoStopped = true) => InvokeAsync("JoinGroupCallHandler", userId,
             new RequestJoinGroupCall
             {
                 Call = InputCall(),
                 JoinAs = new TInputPeerSelf(),
                 Muted = true,
-                VideoStopped = true,
+                VideoStopped = videoStopped,
                 Params = new TDataJSON { Data = paramsJson }
             });
 

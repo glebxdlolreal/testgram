@@ -11,18 +11,24 @@ public interface IGroupCallMediaServer
     bool IsConfigured { get; }
 
     /// <summary>
-    /// Allocates the participant's connection from the client's join <paramref name="paramsJson"/> and returns
-    /// the Jingle <c>transport</c> object the client must connect to.
+    /// Allocates a connection from the client's join <paramref name="paramsJson"/>. <paramref name="key"/> names
+    /// it within the call: the user id for the call itself, <c>{userId}:presentation</c> for a screen share.
     /// </summary>
-    Task<JsonObject> JoinAsync(long callId, long userId, string paramsJson, CancellationToken cancellationToken = default);
+    Task<GroupCallMediaJoinResult> JoinAsync(long callId, string key, string paramsJson, CancellationToken cancellationToken = default);
 
-    Task LeaveAsync(long callId, long userId, CancellationToken cancellationToken = default);
+    Task LeaveAsync(long callId, string key, CancellationToken cancellationToken = default);
 
     Task EndAsync(long callId, CancellationToken cancellationToken = default);
 
     /// <summary>The SSRCs the SFU is forwarding in the call, or null when it cannot be asked.</summary>
     Task<IReadOnlySet<int>?> GetSourcesAsync(long callId, CancellationToken cancellationToken = default);
 }
+
+/// <summary>
+/// The SFU's answer to a join: the Jingle <c>transport</c> to connect to, the <c>video</c> section of the
+/// connection params, and the video endpoint id other clients key this participant's video on.
+/// </summary>
+public sealed record GroupCallMediaJoinResult(JsonObject Transport, JsonObject? Video, string? Endpoint);
 
 /// <summary>The client's join parameters cannot form a connection (the SFU answered 400).</summary>
 public sealed class GroupCallJoinParamsInvalidException(string message) : Exception(message);
@@ -38,11 +44,11 @@ public sealed class GroupCallMediaServer(
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(BaseUrl);
 
-    public async Task<JsonObject> JoinAsync(long callId, long userId, string paramsJson, CancellationToken cancellationToken = default)
+    public async Task<GroupCallMediaJoinResult> JoinAsync(long callId, string key, string paramsJson, CancellationToken cancellationToken = default)
     {
         using var timeout = Deadline(cancellationToken);
         using var response = await Http.PostAsJsonAsync(
-            $"{BaseUrl}/v1/calls/{callId}/participants/{userId}",
+            $"{BaseUrl}/v1/calls/{callId}/participants/{Uri.EscapeDataString(key)}",
             new { @params = paramsJson },
             timeout.Token);
         var body = await response.Content.ReadAsStringAsync(timeout.Token);
@@ -52,13 +58,21 @@ public sealed class GroupCallMediaServer(
         }
 
         response.EnsureSuccessStatusCode();
-        var transport = JsonNode.Parse(body)?["transport"] as JsonObject;
-        return transport ?? throw new InvalidOperationException($"SFU join answer has no transport: {body}");
+        var answer = JsonNode.Parse(body) as JsonObject;
+        if (answer?["transport"] is not JsonObject transport)
+        {
+            throw new InvalidOperationException($"SFU join answer has no transport: {body}");
+        }
+
+        return new GroupCallMediaJoinResult(
+            (JsonObject)transport.DeepClone(),
+            answer["video"]?.DeepClone() as JsonObject,
+            answer["endpoint"]?.GetValue<string>());
     }
 
-    public async Task LeaveAsync(long callId, long userId, CancellationToken cancellationToken = default)
+    public async Task LeaveAsync(long callId, string key, CancellationToken cancellationToken = default)
     {
-        await SendDeleteAsync($"{BaseUrl}/v1/calls/{callId}/participants/{userId}", cancellationToken);
+        await SendDeleteAsync($"{BaseUrl}/v1/calls/{callId}/participants/{Uri.EscapeDataString(key)}", cancellationToken);
     }
 
     public async Task EndAsync(long callId, CancellationToken cancellationToken = default)

@@ -62,6 +62,10 @@ public class GroupCallParticipantDoc
     public bool Left { get; set; }
     public string? ParamsJson { get; set; }
     public string? PresentationParamsJson { get; set; }
+    /// <summary>The SFU endpoint other clients key this participant's camera video on.</summary>
+    public string? VideoEndpoint { get; set; }
+    /// <summary>The SFU endpoint of the participant's screen share.</summary>
+    public string? PresentationEndpoint { get; set; }
     public byte[]? PublicKey { get; set; }
 }
 

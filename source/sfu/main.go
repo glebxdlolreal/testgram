@@ -35,7 +35,7 @@ func main() {
 
 // NewAPIHandler is the messenger-facing API (internal network only):
 //
-//	POST   /v1/calls/{call}/participants/{key}  {"params": "<join params JSON>"} -> {"transport": {...}}
+//	POST   /v1/calls/{call}/participants/{key}  {"params": "<join params JSON>"} -> {"transport", "video", "endpoint"}
 //	DELETE /v1/calls/{call}/participants/{key}
 //	DELETE /v1/calls/{call}
 //	GET    /v1/calls/{call}/sources -> {"sources": [...]}
@@ -60,12 +60,12 @@ func NewAPIHandler(s *SFU) http.Handler {
 			httpError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		transport, err := s.Join(callID, r.PathValue("key"), params)
+		joined, err := s.Join(callID, r.PathValue("key"), params)
 		if err != nil {
 			httpError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
-		writeJSON(w, map[string]any{"transport": transport})
+		writeJSON(w, joined)
 	})
 	mux.HandleFunc("DELETE /v1/calls/{call}/participants/{key}", func(w http.ResponseWriter, r *http.Request) {
 		if callID, ok := callIDOf(w, r); ok {

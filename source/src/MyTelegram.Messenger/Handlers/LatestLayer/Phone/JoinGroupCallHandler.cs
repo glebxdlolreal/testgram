@@ -79,10 +79,11 @@ internal sealed class JoinGroupCallHandler(
 
         // The media server has to accept the connection before the join is recorded, so a client whose
         // params cannot connect is refused instead of showing up as a participant nobody can hear.
-        System.Text.Json.Nodes.JsonObject? sfuTransport = null;
+        GroupCallMediaJoinResult? media = null;
         if (!groupCall.RtmpStream && mediaServer.IsConfigured)
         {
-            sfuTransport = await AllocateMediaAsync(groupCall.CallId, input.UserId, obj.Params?.Data);
+            media = await GroupCallMediaAllocation.AllocateAsync(
+                mediaServer, logger, groupCall.CallId, GroupCallMediaAllocation.CallKey(input.UserId), obj.Params?.Data);
         }
 
         var participant = new GroupCallParticipantDoc
@@ -96,6 +97,7 @@ internal sealed class JoinGroupCallHandler(
             VideoStopped = obj.VideoStopped,
             Date = currentDate,
             ParamsJson = obj.Params?.Data,
+            VideoEndpoint = media?.Endpoint,
             PublicKey = obj.PublicKey?.ToArray()
         };
 
@@ -136,8 +138,8 @@ internal sealed class JoinGroupCallHandler(
                 input.UserId);
         }
 
-        var connectionUpdate = sfuTransport != null
-            ? GroupCallStateHelper.CreateSfuConnectionUpdate(sfuTransport)
+        var connectionUpdate = media != null
+            ? GroupCallStateHelper.CreateSfuConnectionUpdate(media)
             : GroupCallStateHelper.CreateConnectionUpdate(groupCall);
         if (connectionUpdate != null)
         {
@@ -163,33 +165,6 @@ internal sealed class JoinGroupCallHandler(
             ]);
 
         return response;
-    }
-
-    private async Task<System.Text.Json.Nodes.JsonObject> AllocateMediaAsync(long callId, long userId, string? paramsJson)
-    {
-        if (string.IsNullOrWhiteSpace(paramsJson))
-        {
-            RpcErrors.RpcErrors400.DataJsonInvalid.ThrowRpcError();
-        }
-
-        try
-        {
-            return await mediaServer.JoinAsync(callId, userId, paramsJson!);
-        }
-        catch (GroupCallJoinParamsInvalidException ex)
-        {
-            logger.LogInformation("Group call {CallId}: user {UserId} sent join params the SFU cannot use: {Reason}",
-                callId, userId, ex.Message);
-            RpcErrors.RpcErrors400.DataJsonInvalid.ThrowRpcError();
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or InvalidOperationException)
-        {
-            logger.LogError(ex, "Group call {CallId}: the SFU did not allocate a connection for user {UserId}", callId, userId);
-        }
-
-        // Telegram answers an internal failure with a bare 500 INTERNAL; the client retries the join.
-        new RpcError(500, "INTERNAL").ThrowRpcError();
-        return null!;
     }
 
     private async Task<bool> EnsureCanJoinCallAsync(

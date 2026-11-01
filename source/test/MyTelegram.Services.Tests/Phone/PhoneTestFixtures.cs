@@ -792,22 +792,28 @@ public sealed class FakeGroupCallMediaServer : IGroupCallMediaServer
 
     public HashSet<int> Sources { get; } = new();
 
-    public List<(long CallId, long UserId, string Params)> Joins { get; } = new();
+    public List<(long CallId, string Key, string Params)> Joins { get; } = new();
 
-    public List<(long CallId, long UserId)> Leaves { get; } = new();
+    public List<(long CallId, string Key)> Leaves { get; } = new();
 
     public List<long> Ends { get; } = new();
 
-    public Task<System.Text.Json.Nodes.JsonObject> JoinAsync(long callId, long userId, string paramsJson,
+    public Task<GroupCallMediaJoinResult> JoinAsync(long callId, string key, string paramsJson,
         CancellationToken cancellationToken = default)
     {
         if (JoinFailure != null)
         {
-            return Task.FromException<System.Text.Json.Nodes.JsonObject>(JoinFailure);
+            return Task.FromException<GroupCallMediaJoinResult>(JoinFailure);
         }
 
-        Joins.Add((callId, userId, paramsJson));
-        return Task.FromResult(new System.Text.Json.Nodes.JsonObject
+        Joins.Add((callId, key, paramsJson));
+        var endpoint = $"endpoint-{key}";
+        var video = new System.Text.Json.Nodes.JsonObject
+        {
+            ["endpoint"] = endpoint,
+            ["server_sources"] = new System.Text.Json.Nodes.JsonArray(-1931371821)
+        };
+        return Task.FromResult(new GroupCallMediaJoinResult(new System.Text.Json.Nodes.JsonObject
         {
             ["xmlns"] = "urn:xmpp:jingle:transports:ice-udp:1",
             ["ufrag"] = "sfuufrag",
@@ -826,12 +832,12 @@ public sealed class FakeGroupCallMediaServer : IGroupCallMediaServer
                 ["protocol"] = "udp",
                 ["type"] = "host"
             })
-        });
+        }, video, endpoint));
     }
 
-    public Task LeaveAsync(long callId, long userId, CancellationToken cancellationToken = default)
+    public Task LeaveAsync(long callId, string key, CancellationToken cancellationToken = default)
     {
-        Leaves.Add((callId, userId));
+        Leaves.Add((callId, key));
         return Task.CompletedTask;
     }
 
