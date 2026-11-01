@@ -679,7 +679,7 @@ public sealed class FakeAccessHashHelper2 : IAccessHashHelper2
             AccessHashType.GroupCall => RpcErrors.RpcErrors400.GroupcallInvalid,
             AccessHashType.Call => RpcErrors.RpcErrors400.CallPeerInvalid,
             AccessHashType.User => RpcErrors.RpcErrors400.UserIdInvalid,
-            AccessHashType.Channel => RpcErrors.RpcErrors400.ChannelIdInvalid,
+            AccessHashType.Channel => RpcErrors.RpcErrors400.ChannelInvalid,
             _ => RpcErrors.RpcErrors400.PeerIdInvalid
         };
     }

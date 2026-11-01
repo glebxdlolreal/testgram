@@ -15,7 +15,6 @@ internal sealed class RequestCallHandler(
     IMongoDatabase mongoDatabase,
     IUserConverterService userConverterService,
     IObjectMessageSender objectMessageSender,
-    IMessageAppService messageAppService,
     IUserAccessHashKeyCache userAccessHashKeyCache,
     IAccessHashHelper2 accessHashHelper2,
     IBlockCacheAppService blockCacheAppService,
@@ -99,21 +98,9 @@ internal sealed class RequestCallHandler(
             return null!;
         }
 
-        // Either participant is busy if they are already engaged in a live call in EITHER role. Checking
-        // only the callee-as-callee (a) let one caller open unlimited concurrent outgoing calls and
-        // (b) let a second call be placed to someone who is themselves mid-dial. "requested" counts as
-        // live now that CallSessionExpiryBackgroundService sweeps abandoned sessions.
-        var participants = new[] { input.UserId, calleeId };
-        var busyFilter = Builders<CallSessionDocument>.Filter.And(
-            Builders<CallSessionDocument>.Filter.In(s => s.State, CallSessionStates.Live),
-            Builders<CallSessionDocument>.Filter.Or(
-                Builders<CallSessionDocument>.Filter.In(s => s.CallerId, participants),
-                Builders<CallSessionDocument>.Filter.In(s => s.CalleeId, participants)));
-        if (await _callCollection.Find(busyFilter).AnyAsync())
-        {
-            RpcErrors.RpcErrors400.CallOccupyFailed.ThrowRpcError();
-            return null!;
-        }
+        // No busy check: Telegram's servers let a call through to someone who is already ringing or talking
+        // (and let a caller dial while their own call is unanswered); the callee's client declines it with
+        // phoneCallDiscardReasonBusy itself. Observed on the production servers, 2026-11-01.
 
         var callId = Random.Shared.NextInt64();
         callId = Math.Abs(callId);
@@ -187,8 +174,6 @@ internal sealed class RequestCallHandler(
             incomingCallUpdates,
             pushData: CreateIncomingCallPushData(input.UserId, calleeId, callId, calleeAccessHash, incomingCallUpdates, users));
 
-        await SendIncomingCallServiceMessageAsync(input, callId, calleeId, obj.Video);
-
         return new MyTelegram.Schema.Phone.TPhoneCall
         {
             PhoneCall = phoneCallWaiting,
@@ -220,27 +205,6 @@ internal sealed class RequestCallHandler(
         {
             RpcErrors.RpcErrors400.CallProtocolLayerInvalid.ThrowRpcError();
         }
-    }
-
-    private async Task SendIncomingCallServiceMessageAsync(IRequestInput input, long callId, long calleeId, bool video)
-    {
-        var action = new TMessageActionPhoneCall
-        {
-            CallId = callId,
-            Video = video
-        };
-
-        var sendInput = new SendMessageInput(
-            input.ToRequestInfo() with { ReqMsgId = 0 },
-            input.UserId,
-            new Peer(PeerType.User, calleeId),
-            string.Empty,
-            Random.Shared.NextInt64(),
-            sendMessageType: SendMessageType.MessageService,
-            messageType: MessageType.PhoneCall,
-            messageAction: action
-        );
-        await messageAppService.SendMessageAsync([sendInput]);
     }
 
     private static PushData CreateIncomingCallPushData(

@@ -135,8 +135,8 @@ services:
       --min-port 49152
       --max-port 49172
       --fingerprint
-      --lt-cred-mech
-      --user testgram:testgram2024
+      --use-auth-secret
+      --static-auth-secret ${App__WebRtcConnections__0__AuthSecret:?set App__WebRtcConnections__0__AuthSecret in .env (TURN REST secret)}
       --log-file stdout
 
   ### RTMP server for group calls and live stories
@@ -511,6 +511,7 @@ services:
       App__WebRtcConnections__0__Stun: ${App__WebRtcConnections__0__Stun}
       App__WebRtcConnections__0__UserName: ${App__WebRtcConnections__0__UserName}
       App__WebRtcConnections__0__Password: ${App__WebRtcConnections__0__Password}
+      App__WebRtcConnections__0__AuthSecret: ${App__WebRtcConnections__0__AuthSecret}
       App__RtmpStreamUrl: ${App__RtmpStreamUrl}
       App__RtmpHlsUrl: ${App__RtmpHlsUrl}
       App__PasskeyRpId: ${App__PasskeyRpId}
@@ -639,6 +640,7 @@ services:
       App__WebRtcConnections__0__Stun: ${App__WebRtcConnections__0__Stun}
       App__WebRtcConnections__0__UserName: ${App__WebRtcConnections__0__UserName}
       App__WebRtcConnections__0__Password: ${App__WebRtcConnections__0__Password}
+      App__WebRtcConnections__0__AuthSecret: ${App__WebRtcConnections__0__AuthSecret}
       App__RtmpStreamUrl: ${App__RtmpStreamUrl}
       App__RtmpHlsUrl: ${App__RtmpHlsUrl}
       App__PasskeyRpId: ${App__PasskeyRpId}

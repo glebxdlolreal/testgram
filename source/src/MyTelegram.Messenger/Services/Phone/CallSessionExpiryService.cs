@@ -1,3 +1,4 @@
+using MyTelegram.Messenger.Services.Interfaces;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MongoDB.Driver;
@@ -24,6 +25,7 @@ namespace MyTelegram.Messenger.Services.Phone;
 public sealed class CallSessionExpiryService(
     IMongoDatabase mongoDatabase,
     IObjectMessageSender objectMessageSender,
+    IMessageAppService messageAppService,
     IOptionsMonitor<MyTelegramMessengerServerOptions> options,
     ILogger<CallSessionExpiryService> logger)
 {
@@ -101,7 +103,7 @@ public sealed class CallSessionExpiryService(
         var wasConnected = session.State == CallSessionStates.Confirmed;
 
         // A call that never connected has no duration; a connected one ran until now.
-        var duration = wasConnected ? Math.Max(0, now - session.StateSince) : 0;
+        int? duration = wasConnected ? Math.Max(0, now - session.StateSince) : null;
         var needRating = wasConnected && duration > 0;
         var needDebug = wasConnected;
 
@@ -142,6 +144,17 @@ public sealed class CallSessionExpiryService(
             NeedDebug = needDebug,
             Video = session.Video
         };
+
+        // The call still leaves its one message in both histories, from the caller, as on Telegram: a
+        // missed call shows up as "Missed call" for the callee.
+        await PhoneCallServiceMessage.SendAsync(
+            messageAppService,
+            session,
+            discardedCall.Reason,
+            duration,
+            session.Video,
+            requestInfo: null,
+            layer: 0);
 
         // No device initiated this, so both participants - all of their sessions - must be told.
         foreach (var userId in new[] { session.CallerId, session.CalleeId })

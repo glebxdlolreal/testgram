@@ -12,7 +12,6 @@ internal sealed class AcceptCallHandler(
     IMongoDatabase mongoDatabase,
     IUserConverterService userConverterService,
     IObjectMessageSender objectMessageSender,
-    IMessageAppService messageAppService,
     IAccessHashHelper2 accessHashHelper2)
     : RpcResultObjectHandler<MyTelegram.Schema.Phone.RequestAcceptCall, MyTelegram.Schema.Phone.IPhoneCall>
 {
@@ -48,7 +47,7 @@ internal sealed class AcceptCallHandler(
 
         if (!PhoneCallDhValidator.IsValidDhValue(obj.GB))
         {
-            RpcErrors.RpcErrors400.CallProtocolFlagsInvalid.ThrowRpcError();
+            CallExtraRpcErrors.DhGBInvalid.ThrowRpcError();
             return null!;
         }
 
@@ -81,7 +80,19 @@ internal sealed class AcceptCallHandler(
             .Set(s => s.State, CallSessionStates.Accepted)
             .Set(s => s.StateChangedDate, currentDate);
 
-        await _callCollection.UpdateOneAsync(filter, update);
+        // Compare-and-set on State: two devices of the callee accepting at once, or a discard landing in
+        // between, must not both win.
+        var claimFilter = Builders<CallSessionDocument>.Filter.And(
+            Builders<CallSessionDocument>.Filter.Eq(s => s.CallId, session.CallId),
+            Builders<CallSessionDocument>.Filter.Eq(s => s.State, session.State));
+        if ((await _callCollection.UpdateOneAsync(claimFilter, update)).ModifiedCount == 0)
+        {
+            var current = await _callCollection.Find(s => s.CallId == session.CallId).FirstOrDefaultAsync();
+            (current?.State == CallSessionStates.Discarded
+                ? RpcErrors.RpcErrors400.CallAlreadyDeclined
+                : RpcErrors.RpcErrors400.CallAlreadyAccepted).ThrowRpcError();
+            return null!;
+        }
 
         var phoneCallAcceptedForCaller = CreatePhoneCallAccepted(
             session,
@@ -132,8 +143,6 @@ internal sealed class AcceptCallHandler(
             },
             excludeAuthKeyId: input.AuthKeyId);
 
-        await SendCallAcceptedServiceMessageAsync(input, session.CallId, session.CallerId, session.Video);
-
         return new MyTelegram.Schema.Phone.TPhoneCall
         {
             PhoneCall = phoneCallWaitingForCallee,
@@ -156,7 +165,7 @@ internal sealed class AcceptCallHandler(
             ParticipantId = session.CalleeId,
             GB = gb,
             Protocol = PhoneCallProtocolHelper.Negotiate(session.CallerLibraryVersions, protocol),
-            Date = currentDate,
+            Date = session.Date,
             Video = session.Video
         };
     }
@@ -174,7 +183,8 @@ internal sealed class AcceptCallHandler(
             AdminId = session.CallerId,
             ParticipantId = session.CalleeId,
             Protocol = PhoneCallProtocolHelper.Negotiate(session.CallerLibraryVersions, protocol),
-            Date = currentDate,
+            Date = session.Date,
+            ReceiveDate = session.ReceivedDate ?? currentDate,
             Video = session.Video
         };
     }
@@ -192,24 +202,4 @@ internal sealed class AcceptCallHandler(
         }
     }
 
-    private async Task SendCallAcceptedServiceMessageAsync(IRequestInput input, long callId, long callerId, bool video)
-    {
-        var action = new TMessageActionPhoneCall
-        {
-            CallId = callId,
-            Video = video
-        };
-
-        var sendInput = new SendMessageInput(
-            input.ToRequestInfo() with { ReqMsgId = 0 },
-            input.UserId,
-            new Peer(PeerType.User, callerId),
-            string.Empty,
-            Random.Shared.NextInt64(),
-            sendMessageType: SendMessageType.MessageService,
-            messageType: MessageType.PhoneCall,
-            messageAction: action
-        );
-        await messageAppService.SendMessageAsync([sendInput]);
-    }
 }

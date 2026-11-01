@@ -25,7 +25,7 @@ public class PhoneCallProtocolHelperTests
     }
 
     [Fact]
-    public void Negotiate_ShouldReturnSingleOrdinalGreatestSharedVersion()
+    public void Negotiate_ShouldReturnTheCallersFirstSharedVersionAmongEquals()
     {
         var calleeProtocol = new TPhoneCallProtocol
         {
@@ -38,7 +38,7 @@ public class PhoneCallProtocolHelperTests
 
         var result = PhoneCallProtocolHelper.Negotiate(["v1", "v2"], calleeProtocol);
 
-        result.LibraryVersions.ShouldBe(new[] { "v2" });
+        result.LibraryVersions.ShouldBe(new[] { "v1" });
     }
 
     // ---- Real client version lists ---------------------------------------------------------------
@@ -89,10 +89,11 @@ public class PhoneCallProtocolHelperTests
         calleeVersions.ShouldContain(selected, scenario);
 
         // Regression: selecting the callee's first entry would yield "10.0.0" whenever the callee is
-        // Android, which silently downgrades every video call to audio.
+        // Android, which silently downgrades every video call to audio. Telegram's servers give two
+        // Android clients 8.0.0, which passes the gate.
         AndroidKeepsVideoEnabled(selected).ShouldBeTrue(
             $"{scenario}: negotiated '{selected}' fails Android's \"2.7.7\".compareTo(v) <= 0 video gate");
-        selected.ShouldBe("9.0.0", scenario);
+        selected.ShouldBe("8.0.0", scenario);
     }
 
     [Fact]

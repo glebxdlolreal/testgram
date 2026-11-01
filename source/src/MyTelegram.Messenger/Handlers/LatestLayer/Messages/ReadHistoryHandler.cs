@@ -29,6 +29,12 @@ internal sealed class ReadHistoryHandler(ICommandBus commandBus, IPeerHelper pee
         }
 
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
+        // Channels and supergroups are read with channels.readHistory; Telegram refuses a channel peer here.
+        if (peer.PeerType == PeerType.Channel)
+        {
+            RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
+        }
+
         var messageReadModel = await queryProcessor.ProcessAsync(new GetMessageByIdQuery(MessageId.Create(input.UserId, obj.MaxId).Value));
         if (messageReadModel == null)
         {

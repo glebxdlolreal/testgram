@@ -93,7 +93,7 @@ public class CallSessionExpiryServiceTests
         session.State.ShouldBe("discarded");
         session.DiscardReason.ShouldBe("disconnect");
         // A call that actually connected is rateable/debuggable - same policy as phone.discardCall.
-        session.Duration.ShouldBeGreaterThan(0);
+        session.Duration.ShouldNotBeNull().ShouldBeGreaterThan(0);
         session.NeedDebug.ShouldBeTrue();
         session.NeedRating.ShouldBeTrue();
     }
@@ -107,7 +107,7 @@ public class CallSessionExpiryServiceTests
         await harness.Service.SweepAsync();
 
         var session = await harness.LoadSessionAsync();
-        session.Duration.ShouldBe(0);
+        session.Duration.ShouldBeNull("a call that never connected has no duration");
         session.NeedRating.ShouldBeFalse();
         session.NeedDebug.ShouldBeFalse();
     }
@@ -191,12 +191,14 @@ public class CallSessionExpiryServiceTests
             Service = new CallSessionExpiryService(
                 store.Database,
                 Sender,
+                MessageApp,
                 new FixedOptionsMonitor<MyTelegramMessengerServerOptions>(options),
                 NullLogger<CallSessionExpiryService>.Instance);
         }
 
         public IMongoCollection<CallSessionDocument> Sessions { get; }
         public CapturingObjectMessageSender Sender { get; }
+        public FakeMessageAppService MessageApp { get; } = new();
         public CallSessionExpiryService Service { get; }
         public int GraceSeconds { get; }
 

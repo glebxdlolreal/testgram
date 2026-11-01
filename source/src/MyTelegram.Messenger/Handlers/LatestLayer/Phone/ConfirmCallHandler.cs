@@ -67,64 +67,27 @@ internal sealed class ConfirmCallHandler(
 
         if (!PhoneCallDhValidator.IsGaHashValid(obj.GA, session.GAHash))
         {
-            RpcErrors.RpcErrors400.CallProtocolFlagsInvalid.ThrowRpcError();
+            RpcErrors.RpcErrors400.DhGAInvalid.ThrowRpcError();
             return null!;
         }
 
         if (!PhoneCallDhValidator.IsValidDhValue(obj.GA))
         {
-            RpcErrors.RpcErrors400.CallProtocolFlagsInvalid.ThrowRpcError();
+            RpcErrors.RpcErrors400.DhGAInvalid.ThrowRpcError();
             return null!;
         }
 
         var currentDate = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
-        // R5.6: P2P (STUN) is only offered when BOTH peers' privacyKeyPhoneP2P settings
-        // allow peer-to-peer connections. If either side disallows it, we fall back to
-        // TURN reflectors only and leave p2p_allowed unset.
+        // R5.6: peer-to-peer is allowed only when BOTH peers' privacyKeyPhoneP2P settings allow it. Telegram
+        // still lists each server with its stun flag either way; p2p_allowed is what tells the clients.
         var p2pAllowed = await IsP2pAllowedForBothPeersAsync(session.CallerId, session.CalleeId);
 
-        var connections = new TVector<MyTelegram.Schema.IPhoneConnection>();
+        // Each participant gets their own TURN credentials for this call, as on Telegram.
         var webRtcConnections = optionsAccessor.Value.WebRtcConnections;
-
-        if (webRtcConnections != null && webRtcConnections.Count > 0)
-        {
-            long connectionId = 1;
-            foreach (var webRtcConfig in webRtcConnections)
-            {
-                // R5.6: only include P2P STUN options when both peers allow P2P.
-                if (webRtcConfig.Stun && p2pAllowed)
-                {
-                    connections.Add(new MyTelegram.Schema.TPhoneConnectionWebrtc
-                    {
-                        Id = connectionId++,
-                        Ip = webRtcConfig.Ip,
-                        Ipv6 = webRtcConfig.Ipv6 ?? "",
-                        Port = webRtcConfig.Port,
-                        Turn = false,
-                        Stun = true,
-                        Username = "",
-                        Password = ""
-                    });
-                }
-
-                // R5.5: always include TURN reflector connection options.
-                if (webRtcConfig.Turn)
-                {
-                    connections.Add(new MyTelegram.Schema.TPhoneConnectionWebrtc
-                    {
-                        Id = connectionId++,
-                        Ip = webRtcConfig.Ip,
-                        Ipv6 = webRtcConfig.Ipv6 ?? "",
-                        Port = webRtcConfig.Port,
-                        Turn = true,
-                        Stun = false,
-                        Username = webRtcConfig.UserName,
-                        Password = webRtcConfig.Password
-                    });
-                }
-            }
-        }
+        var now = DateTimeOffset.UtcNow;
+        var connections = PhoneCallConnections.Build(webRtcConnections, session.CallerId, session.CallId, now);
+        var calleeConnections = PhoneCallConnections.Build(webRtcConnections, session.CalleeId, session.CallId, now);
 
         if (connections.Count == 0)
         {
@@ -152,7 +115,15 @@ internal sealed class ConfirmCallHandler(
             .Set(s => s.State, CallSessionStates.Confirmed)
             .Set(s => s.StateChangedDate, currentDate);
 
-        await _callCollection.UpdateOneAsync(filter, update);
+        // Compare-and-set on State: a discard (or the expiry sweeper) landing since the read wins.
+        var claimFilter = Builders<CallSessionDocument>.Filter.And(
+            Builders<CallSessionDocument>.Filter.Eq(s => s.CallId, session.CallId),
+            Builders<CallSessionDocument>.Filter.Eq(s => s.State, CallSessionStates.Accepted));
+        if ((await _callCollection.UpdateOneAsync(claimFilter, update)).ModifiedCount == 0)
+        {
+            RpcErrors.RpcErrors400.CallAlreadyDeclined.ThrowRpcError();
+            return null!;
+        }
 
         var protocol = PhoneCallProtocolHelper.Negotiate(session.CallerLibraryVersions, session.CalleeLibraryVersions);
         var conferenceSupported = session.CallerConferenceSupported && session.CalleeConferenceSupported;
@@ -173,7 +144,7 @@ internal sealed class ConfirmCallHandler(
             obj.KeyFingerprint,
             protocol,
             currentDate,
-            connections,
+            calleeConnections,
             conferenceSupported,
             p2pAllowed);
 

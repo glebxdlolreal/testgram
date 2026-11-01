@@ -202,7 +202,7 @@ public class CallLifecycleHandlerTests
     [InlineData("received")]
     [InlineData("accepted")]
     [InlineData("confirmed")]
-    public async Task RequestCall_WhenCalleeIsBusy_ThrowsCallOccupyFailed(string busyState)
+    public async Task RequestCall_WhenCalleeIsBusy_StillRingsThem_LikeTelegram(string busyState)
     {
         var harness = new CallHarness();
 
@@ -224,47 +224,128 @@ public class CallLifecycleHandlerTests
         }
 
         (await FirstSessionAsync(harness.Sessions)).State.ShouldBe(busyState);
+        harness.Sender.Clear();
 
-        // R2.6 / R6.2: a new incoming call to the same (busy) callee is rejected.
+        // Telegram's servers do not refuse a call to someone who is already in one: the second call rings,
+        // and the callee's own client declines it with phoneCallDiscardReasonBusy.
         var otherCaller = PhoneTestFixtures.RequestInput(OtherCallerId).Build();
-        var ex = await Should.ThrowAsync<RpcException>(() =>
-            harness.RequestCallAsync(otherCaller, CalleeId, randomId: 999_001));
-        ex.Message.ShouldBe("CALL_OCCUPY_FAILED");
+        await harness.RequestCallAsync(otherCaller, CalleeId, randomId: 999_001);
+
+        (await harness.Sessions.CountDocumentsAsync(Builders<CallSessionDocument>.Filter.Empty)).ShouldBe(2);
+        harness.Sender.PushesToUser(CalleeId).ShouldContain(push => push.Carries<TUpdatePhoneCall>());
     }
 
     [Fact]
-    public async Task RequestCall_WhenCalleeIsAlreadyBeingDialled_ThrowsCallOccupyFailed()
+    public async Task RequestCall_WhileTheCallersOwnCallIsUnanswered_IsAllowed()
     {
         var harness = new CallHarness();
 
-        // A callee whose phone is already ringing from someone else is busy: leaving 'requested' out of
-        // the busy set let two callers ring the same person at once, and abandoned sessions used to pile
-        // up forever. CallSessionExpiryService is what keeps this from wedging the callee permanently.
-        await harness.RequestCallAsync();
-        (await FirstSessionAsync(harness.Sessions)).State.ShouldBe("requested");
-
-        var otherCaller = PhoneTestFixtures.RequestInput(OtherCallerId).Build();
-        var ex = await Should.ThrowAsync<RpcException>(() =>
-            harness.RequestCallAsync(otherCaller, CalleeId, randomId: 999_002));
-        ex.Message.ShouldBe("CALL_OCCUPY_FAILED");
-
-        // No second session was persisted.
-        var count = await harness.Sessions.CountDocumentsAsync(Builders<CallSessionDocument>.Filter.Empty);
-        count.ShouldBe(1);
-    }
-
-    [Fact]
-    public async Task RequestCall_WhenCallerIsAlreadyInACall_ThrowsCallOccupyFailed()
-    {
-        var harness = new CallHarness();
-
-        // Busy applies in either role: a caller with a live outgoing call cannot open a second one.
+        // Telegram let a caller place a second call while their first one was still ringing.
         await harness.RequestCallAsync();
         await harness.ReceivedCallAsync();
 
-        var ex = await Should.ThrowAsync<RpcException>(() =>
-            harness.RequestCallAsync(harness.CallerInput, calleeId: OtherCallerId, randomId: 999_003));
-        ex.Message.ShouldBe("CALL_OCCUPY_FAILED");
+        await harness.RequestCallAsync(harness.CallerInput, calleeId: OtherCallerId, randomId: 999_003);
+
+        (await harness.Sessions.CountDocumentsAsync(Builders<CallSessionDocument>.Filter.Empty)).ShouldBe(2);
+    }
+
+    // ---- the call's one history message, as on Telegram's servers ---------------------------------
+
+    [Fact]
+    public async Task StartingAndAnsweringACall_WritesNoMessage()
+    {
+        var harness = new CallHarness();
+
+        await harness.RequestCallAsync();
+        await harness.ReceivedCallAsync();
+        await harness.AcceptCallAsync();
+        await harness.ConfirmCallAsync();
+
+        harness.MessageApp.SentMessages.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task CalleeHangingUp_LeavesOneMessageFromTheCaller_WithReasonAndDuration()
+    {
+        var harness = new CallHarness();
+        await harness.RequestCallAsync();
+        await harness.ReceivedCallAsync();
+        await harness.AcceptCallAsync();
+        await harness.ConfirmCallAsync();
+
+        await harness.DiscardCallAsync(harness.CalleeInput, harness.CalleePeer(), new TPhoneCallDiscardReasonHangup(), 3);
+
+        var message = harness.MessageApp.SentMessages.ShouldHaveSingleItem();
+        message.RequestInfo.UserId.ShouldBe(CallerId);
+        message.ToPeer.ShouldBe(new Peer(PeerType.User, CalleeId));
+        var action = message.MessageAction.ShouldBeOfType<TMessageActionPhoneCall>();
+        action.Reason.ShouldBeOfType<TPhoneCallDiscardReasonHangup>();
+        action.Duration.ShouldBe(3);
+    }
+
+    [Fact]
+    public async Task Decline_TellsTheCallerBusy_AnswersTheDeclinerWithoutAReason_AndWritesABusyMessage()
+    {
+        var harness = new CallHarness();
+        await harness.RequestCallAsync();
+        await harness.ReceivedCallAsync();
+        harness.Sender.Clear();
+
+        var result = await harness.DiscardCallAsync(
+            harness.CalleeInput, harness.CalleePeer(), new TPhoneCallDiscardReasonBusy(), 0);
+
+        var own = result.ShouldBeOfType<TUpdates>().Updates.OfType<TUpdatePhoneCall>().ShouldHaveSingleItem()
+            .PhoneCall.ShouldBeOfType<TPhoneCallDiscarded>();
+        own.Reason.ShouldBeNull();
+        own.Duration.ShouldBeNull();
+        own.NeedDebug.ShouldBeFalse();
+
+        var callers = harness.Sender.PushesToUser(CallerId)
+            .SelectMany(push => push.Updates.OfType<TUpdatePhoneCall>())
+            .Select(update => update.PhoneCall)
+            .OfType<TPhoneCallDiscarded>()
+            .ShouldHaveSingleItem();
+        callers.Reason.ShouldBeOfType<TPhoneCallDiscardReasonBusy>();
+        callers.Duration.ShouldBeNull();
+
+        var action = harness.MessageApp.SentMessages.ShouldHaveSingleItem()
+            .MessageAction.ShouldBeOfType<TMessageActionPhoneCall>();
+        action.Reason.ShouldBeOfType<TPhoneCallDiscardReasonBusy>();
+        action.Duration.ShouldBeNull();
+
+        // Asking again gives the decliner the same reason-less answer.
+        var again = await harness.DiscardCallAsync(
+            harness.CalleeInput, harness.CalleePeer(), new TPhoneCallDiscardReasonHangup(), 0);
+        again.ShouldBeOfType<TUpdates>().Updates.OfType<TUpdatePhoneCall>().Single()
+            .PhoneCall.ShouldBeOfType<TPhoneCallDiscarded>().Reason.ShouldBeNull();
+        harness.MessageApp.SentMessages.Count.ShouldBe(1);
+    }
+
+    // ---- malformed Diffie-Hellman values ----------------------------------------------------------
+
+    [Fact]
+    public async Task Accept_WithAMalformedGb_IsDhGbInvalid()
+    {
+        var harness = new CallHarness();
+        await harness.RequestCallAsync();
+        await harness.ReceivedCallAsync();
+
+        var ex = await Should.ThrowAsync<RpcException>(() => harness.AcceptCallAsync([1]));
+
+        ex.Message.ShouldBe("DH_G_B_INVALID");
+    }
+
+    [Fact]
+    public async Task Confirm_WithAGaThatDoesNotMatchItsHash_IsDhGaInvalid()
+    {
+        var harness = new CallHarness();
+        await harness.RequestCallAsync();
+        await harness.ReceivedCallAsync();
+        await harness.AcceptCallAsync();
+
+        var ex = await Should.ThrowAsync<RpcException>(() => harness.ConfirmCallAsync(harness.GbBytes));
+
+        ex.Message.ShouldBe("DH_G_A_INVALID");
     }
 
     // ---- duplicate random_id rejection (R2.7) ----------------------------------------------------
@@ -338,6 +419,7 @@ public class CallLifecycleHandlerTests
             Sender = new CapturingObjectMessageSender();
 
             var messageAppService = new FakeMessageAppService();
+            MessageApp = messageAppService;
             var accessHashKeyCache = new FakeUserAccessHashKeyCache();
             var accessHashHelper = new FakeAccessHashHelper2();
             _accessHashHelper = accessHashHelper;
@@ -408,6 +490,7 @@ public class CallLifecycleHandlerTests
         public IMongoDatabase Database { get; }
         public IMongoCollection<CallSessionDocument> Sessions { get; }
         public CapturingObjectMessageSender Sender { get; }
+        public FakeMessageAppService MessageApp { get; }
         public IRequestInput CallerInput { get; }
         public IRequestInput CalleeInput { get; }
         public byte[] GaBytes { get; }
@@ -474,6 +557,26 @@ public class CallLifecycleHandlerTests
             => InvokeAsync(_confirmHandler, CallerInput,
                 new RequestConfirmCall { Peer = CallerPeer(), GA = GaBytes, KeyFingerprint = 987654321L, Protocol = Protocol() });
 
+        public Task<IObject> DiscardCallAsync(IRequestInput input, IInputPhoneCall peer,
+            IPhoneCallDiscardReason reason, int duration)
+            => InvokeAsync(_discardHandler, input,
+                new RequestDiscardCall
+                {
+                    Peer = peer,
+                    Duration = duration,
+                    Reason = reason,
+                    Video = false,
+                    ConnectionId = 0
+                });
+
+        public Task<IObject> AcceptCallAsync(byte[] gb)
+            => InvokeAsync(_acceptHandler, CalleeInput,
+                new RequestAcceptCall { Peer = CalleePeer(), GB = gb, Protocol = Protocol() });
+
+        public Task<IObject> ConfirmCallAsync(byte[] ga)
+            => InvokeAsync(_confirmHandler, CallerInput,
+                new RequestConfirmCall { Peer = CallerPeer(), GA = ga, KeyFingerprint = 987654321L, Protocol = Protocol() });
+
         public Task<IObject> DiscardCallAsync(IRequestInput input, IInputPhoneCall peer)
             => InvokeAsync(_discardHandler, input,
                 new RequestDiscardCall
@@ -506,7 +609,7 @@ public class CallLifecycleHandlerTests
         {
             var assembly = typeof(CallSessionDocument).Assembly;
             var type = assembly.GetType($"MyTelegram.Messenger.Handlers.LatestLayer.Phone.{handlerTypeName}", throwOnError: true)!;
-            return Activator.CreateInstance(type, PhoneTestFixtures.WithNullLoggers(type, args))!;
+            return PhoneTestFixtures.CreateGroupCallHandler(type, args);
         }
 
         /// <summary>Big-endian unsigned DH value guaranteed to sit inside the valid safety range.</summary>

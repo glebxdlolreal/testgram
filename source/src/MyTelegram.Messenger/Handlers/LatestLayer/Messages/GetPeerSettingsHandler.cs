@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 using MongoDB.Bson;
 using MongoDB.Driver;
 using Microsoft.Extensions.Logging;
@@ -27,11 +28,13 @@ internal sealed class GetPeerSettingsHandler(
     IChannelAppService channelAppService,
     ILayeredService<IPeerSettingsConverter> layeredService,
     IMongoDatabase database,
+    IAccessHashHelper2 accessHashHelper2,
     ILogger<GetPeerSettingsHandler> logger) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestGetPeerSettings, MyTelegram.Schema.Messages.IPeerSettings>
 {
     protected override async Task<MyTelegram.Schema.Messages.IPeerSettings> HandleCoreAsync(IRequestInput input, RequestGetPeerSettings obj)
     {
         var userId = input.UserId;
+        await accessHashHelper2.CheckAccessHashAsync(input, obj.Peer);
         var peer = peerHelper.GetPeer(obj.Peer, userId);
         if (peer.PeerType == PeerType.Channel)
         {

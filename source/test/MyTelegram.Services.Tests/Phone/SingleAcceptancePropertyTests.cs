@@ -178,7 +178,7 @@ public class SingleAcceptancePropertyTests
     {
         var assembly = typeof(CallSessionDocument).Assembly;
         var type = assembly.GetType("MyTelegram.Messenger.Handlers.LatestLayer.Phone.AcceptCallHandler", throwOnError: true)!;
-        var handler = Activator.CreateInstance(type, database, userConverter, sender, messageApp, accessHash)!;
+        var handler = PhoneTestFixtures.CreateGroupCallHandler(type, database, userConverter, sender, messageApp, accessHash);
         var method = type.GetMethod("HandleAsync", new[] { typeof(IRequestInput), typeof(IObject) })!;
 
         object taskObj;

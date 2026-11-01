@@ -30,6 +30,11 @@ public class DefaultDataProcessor<TData>(
                 {
                     data = GetData(obj);
 
+                    if (BotMethodPolicy.IsForbiddenForBot(req.UserId, data))
+                    {
+                        RpcErrors.RpcErrors400.BotMethodInvalid.ThrowRpcError();
+                    }
+
                     bool needToCheckRequest = handler is IDistinctObjectHandler ||
                                               ObjectIdConsts.CommandServerHandlers.ContainsKey(req.ObjectId);
 

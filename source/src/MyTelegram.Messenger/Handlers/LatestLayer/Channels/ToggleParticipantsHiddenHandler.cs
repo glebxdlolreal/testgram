@@ -16,13 +16,21 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Channels;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class ToggleParticipantsHiddenHandler(ICommandBus commandBus, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase) : RpcResultObjectHandler<RequestToggleParticipantsHidden, IUpdates>
+internal sealed class ToggleParticipantsHiddenHandler(ICommandBus commandBus, IChannelAdminRightsChecker channelAdminRightsChecker, IMongoDatabase mongoDatabase, IChannelAppService channelAppService, IAppConfigHelper appConfigHelper) : RpcResultObjectHandler<RequestToggleParticipantsHidden, IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestToggleParticipantsHidden obj)
     {
         if (obj.Channel is TInputChannel inputChannel)
         {
             await channelAdminRightsChecker.CheckAdminRightAsync(inputChannel.ChannelId, input.UserId, p => p.ChangeInfo, RpcErrors.RpcErrors403.ChatAdminRequired);
+
+            // Hiding needs at least hidden_members_group_size_min members, the same limit the client
+            // configuration advertises; Telegram refuses smaller ones with PARTICIPANTS_TOO_FEW.
+            var channel = await channelAppService.GetAsync(inputChannel.ChannelId);
+            if (obj.Enabled && (channel.ParticipantsCount ?? 0) < appConfigHelper.GetInt32Value("hidden_members_group_size_min", 100))
+            {
+                RpcErrors.RpcErrors400.ParticipantsTooFew.ThrowRpcError();
+            }
 
             var command = new ToggleParticipantsHiddenCommand(ChannelId.Create(inputChannel.ChannelId), input.ToRequestInfo(), obj.Enabled);
             await commandBus.PublishAsync(command);

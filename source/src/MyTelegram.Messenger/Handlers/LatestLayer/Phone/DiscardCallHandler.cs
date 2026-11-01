@@ -53,10 +53,12 @@ internal sealed class DiscardCallHandler(
         // without mutating recorded state and without re-pushing updates / service messages.
         if (session.State == CallSessionStates.Discarded)
         {
+            // The user who ended a call that never connected was told no reason; tell them the same again.
+            var hideReason = !session.NeedDebug && session.DiscardedByUserId == input.UserId;
             var existingDiscardedCall = new Schema.TPhoneCallDiscarded
             {
                 Id = session.CallId,
-                Reason = BuildStoredReason(session.DiscardReason, session.DiscardReasonSlug),
+                Reason = hideReason ? null : BuildStoredReason(session.DiscardReason, session.DiscardReasonSlug),
                 Duration = session.Duration,
                 NeedRating = session.NeedRating,
                 NeedDebug = session.NeedDebug,
@@ -77,39 +79,84 @@ internal sealed class DiscardCallHandler(
 
         // Requirement 7.4/7.5: rating/debug policy - a call is rateable/debuggable only if it
         // reached the connected (confirmed) state; rating additionally requires a non-zero duration.
-        var needRating = session.State == CallSessionStates.Confirmed && obj.Duration > 0;
-        var needDebug = session.State == CallSessionStates.Confirmed;
+        var connected = session.State == CallSessionStates.Confirmed;
+        var needRating = connected && obj.Duration > 0;
+        var needDebug = connected;
+        // A call that never connected has no duration (Telegram reports none for a decline or a cancel).
+        int? duration = connected ? obj.Duration : null;
+        var video = session.Video || obj.Video;
 
         var update = Builders<CallSessionDocument>.Update
             .Set(s => s.State, CallSessionStates.Discarded)
             .Set(s => s.StateChangedDate, currentDate)
-            .Set(s => s.Duration, obj.Duration)
+            .Set(s => s.Duration, duration)
             .Set(s => s.DiscardReason, reason)
             .Set(s => s.DiscardReasonSlug, reasonSlug)
             .Set(s => s.NeedRating, needRating)
             .Set(s => s.NeedDebug, needDebug)
-            .Set(s => s.Video, session.Video || obj.Video);
+            .Set(s => s.DiscardedByUserId, input.UserId)
+            .Set(s => s.Video, video);
 
-        await _callCollection.UpdateOneAsync(filter, update);
+        // Compare-and-set on State, as the expiry sweeper does: the other side or the sweeper discarding
+        // at the same moment must not produce a second phoneCallDiscarded or a second call message.
+        var claimFilter = Builders<CallSessionDocument>.Filter.And(
+            Builders<CallSessionDocument>.Filter.Eq(s => s.CallId, session.CallId),
+            Builders<CallSessionDocument>.Filter.Eq(s => s.State, session.State));
+        if ((await _callCollection.UpdateOneAsync(claimFilter, update)).ModifiedCount == 0)
+        {
+            var current = await _callCollection.Find(s => s.CallId == session.CallId).FirstOrDefaultAsync();
+            return new TUpdates
+            {
+                Updates = new TVector<IUpdate>
+                {
+                    new TUpdatePhoneCall
+                    {
+                        PhoneCall = new Schema.TPhoneCallDiscarded
+                        {
+                            Id = session.CallId,
+                            Reason = BuildStoredReason(current?.DiscardReason, current?.DiscardReasonSlug),
+                            Duration = current?.Duration,
+                            NeedRating = current?.NeedRating ?? false,
+                            NeedDebug = current?.NeedDebug ?? false,
+                            Video = current?.Video ?? session.Video
+                        }
+                    }
+                },
+                Users = usersVector,
+                Chats = new TVector<IChat>(),
+                Date = currentDate
+            };
+        }
 
-        var discardedCall = new Schema.TPhoneCallDiscarded
+        // The other side learns why the call ended. The side that ended a call which never connected
+        // (declined, cancelled) gets its own copy without a reason, as on Telegram.
+        var discardedForOtherSide = new Schema.TPhoneCallDiscarded
         {
             Id = session.CallId,
             Reason = obj.Reason,
-            Duration = obj.Duration,
+            Duration = duration,
             NeedRating = needRating,
             NeedDebug = needDebug,
-            Video = session.Video || obj.Video
+            Video = video
+        };
+        var discardedForSelf = new Schema.TPhoneCallDiscarded
+        {
+            Id = session.CallId,
+            Reason = connected ? obj.Reason : null,
+            Duration = duration,
+            NeedRating = needRating,
+            NeedDebug = needDebug,
+            Video = video
         };
 
-        var updatePhoneCall = new TUpdatePhoneCall { PhoneCall = discardedCall };
+        var updatePhoneCall = new TUpdatePhoneCall { PhoneCall = discardedForSelf };
 
         var otherUserId = input.UserId == session.CallerId ? session.CalleeId : session.CallerId;
         var otherPeer = new Peer(PeerType.User, otherUserId);
         await objectMessageSender.PushMessageToPeerAsync(otherPeer,
             new TUpdates
             {
-                Updates = new TVector<IUpdate> { updatePhoneCall },
+                Updates = new TVector<IUpdate> { new TUpdatePhoneCall { PhoneCall = discardedForOtherSide } },
                 Users = usersVector,
                 Chats = new TVector<IChat>(),
                 Date = currentDate
@@ -122,21 +169,21 @@ internal sealed class DiscardCallHandler(
         await objectMessageSender.PushMessageToPeerAsync(selfPeer,
             new TUpdates
             {
-                Updates = new TVector<IUpdate> { new TUpdatePhoneCall { PhoneCall = discardedCall } },
+                Updates = new TVector<IUpdate> { new TUpdatePhoneCall { PhoneCall = discardedForSelf } },
                 Users = usersVector,
                 Chats = new TVector<IChat>(),
                 Date = currentDate
             },
             excludeAuthKeyId: input.AuthKeyId);
 
-        await SendCallDiscardedServiceMessageAsync(
-            input,
-            session.CallId,
-            session.CallerId,
-            session.CalleeId,
-            obj.Duration,
+        await PhoneCallServiceMessage.SendAsync(
+            messageAppService,
+            session,
             obj.Reason,
-            session.Video || obj.Video);
+            duration,
+            video,
+            input.ToRequestInfo(),
+            input.Layer);
 
         // A finished call is what topPeerCategoryPhoneCalls ranks, and it counts for both parties: the
         // other side becomes a likely call destination for each of them. Recorded here rather than at
@@ -180,38 +227,5 @@ internal sealed class DiscardCallHandler(
             "migrate" => new TPhoneCallDiscardReasonMigrateConferenceCall { Slug = slug ?? string.Empty },
             _ => null
         };
-    }
-
-    private async Task SendCallDiscardedServiceMessageAsync(
-        IRequestInput input,
-        long callId,
-        long callerId,
-        long calleeId,
-        int? duration,
-        IPhoneCallDiscardReason? reason,
-        bool video)
-    {
-        var isCaller = input.UserId == callerId;
-        var targetUserId = isCaller ? calleeId : callerId;
-
-        var action = new TMessageActionPhoneCall
-        {
-            CallId = callId,
-            Reason = reason,
-            Duration = duration,
-            Video = video
-        };
-
-        var sendInput = new SendMessageInput(
-            input.ToRequestInfo() with { ReqMsgId = 0 },
-            input.UserId,
-            new Peer(PeerType.User, targetUserId),
-            string.Empty,
-            Random.Shared.NextInt64(),
-            sendMessageType: SendMessageType.MessageService,
-            messageType: MessageType.PhoneCall,
-            messageAction: action
-        );
-        await messageAppService.SendMessageAsync([sendInput]);
     }
 }

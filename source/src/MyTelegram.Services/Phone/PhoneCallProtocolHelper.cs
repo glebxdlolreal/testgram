@@ -51,25 +51,21 @@ public static class PhoneCallProtocolHelper
     }
 
     /// <summary>
-    /// Attempts to select the negotiated tgcalls version supported by both peers: the greatest version in
-    /// the intersection under <see cref="StringComparer.Ordinal"/>.
+    /// Selects the tgcalls version both peers will run, the way Telegram's servers do: <c>8.0.0</c> first,
+    /// then the <c>10.0.0</c>-<c>13.0.0</c> family, then anything else; within a group the caller's own order
+    /// decides.
     /// </summary>
     /// <remarks>
-    /// Both official clients treat <c>library_versions[0]</c> of the server's reply as <em>the</em> version
-    /// to instantiate — tdesktop <c>Call::createAndStartController</c> reads
-    /// <c>vlibrary_versions().value(0, "2.4.4")</c> and fails the call outright when
-    /// <c>tgcalls::Meta::Create</c> does not know it; Android passes
-    /// <c>privateCall.protocol.library_versions.get(0)</c> straight to <c>Instance.makeInstance</c>.
+    /// Derived from 26 calls between two real accounts on Telegram's production servers (2026-11-01), every
+    /// one of which this rule reproduces. Highest-number, ordinal and callee-preference rules all disagree
+    /// with production: two Android clients (which advertise <c>2.7.7</c>-<c>19.0.0</c>) are given
+    /// <c>8.0.0</c>, <c>[12, 13]</c> yields 12 while <c>[13, 12]</c> yields 13, and <c>[9, 13]</c> yields 13.
     /// <para>
-    /// Ordinal ordering is not arbitrary: it is the same scale the clients themselves rank versions on.
-    /// Android gates video availability on
-    /// <c>"2.7.7".compareTo(library_versions.get(0)) &lt;= 0</c> (a lexicographic <c>String.compareTo</c>),
-    /// destroying the video capturer and reporting <c>isVideoAvailable = false</c> when it fails. Since
-    /// <c>tgcalls::Meta::Versions()</c> enumerates a <c>std::map</c>, Android advertises
-    /// <c>["10.0.0", "11.0.0", "12.0.0", "13.0.0", "2.4.4", "2.7.7", "5.0.0", ...]</c>; picking the callee's
-    /// first entry would select <c>"10.0.0"</c> and silently downgrade every video call to audio. Ordinal
-    /// max selects <c>"9.0.0"</c>, which clears Android's gate and is also tdesktop's own top preference
-    /// (it advertises <c>Meta::Versions()</c> reversed).
+    /// Both official clients instantiate <c>library_versions[0]</c> of the server's reply (tdesktop
+    /// <c>Call::createAndStartController</c>, Android <c>Instance.makeInstance</c>), and Android keeps the
+    /// camera only when <c>"2.7.7".compareTo(version) &lt;= 0</c>, a lexicographic comparison that every
+    /// two-digit major version fails. Preferring <c>8.0.0</c> is what keeps video working between Android
+    /// clients.
     /// </para>
     /// </remarks>
     public static bool TryGetCommonLibraryVersion(
@@ -77,14 +73,28 @@ public static class PhoneCallProtocolHelper
         IEnumerable<string>? calleeLibraryVersions,
         out string? commonVersion)
     {
-        var callerVersions = new HashSet<string>(
-            NormalizeVersions(callerLibraryVersions),
+        var calleeVersions = new HashSet<string>(
+            NormalizeVersions(calleeLibraryVersions),
             StringComparer.Ordinal);
-        commonVersion = NormalizeVersions(calleeLibraryVersions)
-            .Where(callerVersions.Contains)
-            .OrderByDescending(version => version, StringComparer.Ordinal)
+        commonVersion = NormalizeVersions(callerLibraryVersions)
+            .Select((version, index) => (version, index))
+            .Where(entry => calleeVersions.Contains(entry.version))
+            .OrderByDescending(entry => GetVersionPriority(entry.version))
+            .ThenBy(entry => entry.index)
+            .Select(entry => entry.version)
             .FirstOrDefault();
         return commonVersion != null;
+    }
+
+    /// <summary>The preference group Telegram's servers put a tgcalls version in (higher wins).</summary>
+    private static int GetVersionPriority(string version)
+    {
+        return version switch
+        {
+            "8.0.0" => 2,
+            "10.0.0" or "11.0.0" or "12.0.0" or "13.0.0" => 1,
+            _ => 0
+        };
     }
 
     /// <summary>

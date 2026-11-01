@@ -97,17 +97,53 @@ public class PhoneCallProtocolNegotiationTests
     // ---- Common-version selection (R3.4) ---------------------------------------------------------
 
     [Fact]
-    public void TryGetCommonLibraryVersion_SharedVersions_SelectsOrdinalGreatest()
+    public void TryGetCommonLibraryVersion_EquallyRankedVersions_FollowTheCallersOrder()
     {
-        // The greatest common version under ordinal comparison is selected, regardless of the order
-        // either peer advertised its list in.
         var found = PhoneCallProtocolHelper.TryGetCommonLibraryVersion(
             callerLibraryVersions: ["v1", "v2", "v3"],
             calleeLibraryVersions: ["v3", "v2"],
             out var selected);
 
         found.ShouldBeTrue();
-        selected.ShouldBe("v3");
+        selected.ShouldBe("v2");
+    }
+
+    /// <summary>
+    /// Every version choice Telegram's production servers made in calls between two real accounts
+    /// (2026-11-01): caller list, callee list, the single version put in phoneCallAccepted / phoneCall.
+    /// </summary>
+    public static TheoryData<string[], string[], string> ProductionChoices() => new()
+    {
+        { ["13.0.0", "12.0.0", "11.0.0", "10.0.0", "9.0.0", "8.0.0", "7.0.0", "5.0.0", "2.7.7", "2.4.4"], ["11.0.0", "9.0.0", "4.0.1", "2.7.7"], "11.0.0" },
+        { ["13.0.0", "12.0.0", "11.0.0", "10.0.0", "9.0.0", "8.0.0", "7.0.0", "5.0.0", "2.7.7", "2.4.4"], ["9.0.0", "11.0.0"], "11.0.0" },
+        { ["9.0.0", "13.0.0", "11.0.0", "2.7.7"], ["11.0.0", "13.0.0", "9.0.0"], "13.0.0" },
+        { ["10.0.0", "11.0.0", "12.0.0", "13.0.0", "18.0.0", "19.0.0", "2.7.7", "5.0.0", "7.0.0", "8.0.0", "9.0.0"], ["10.0.0", "11.0.0", "12.0.0", "13.0.0", "18.0.0", "19.0.0", "2.7.7", "5.0.0", "7.0.0", "8.0.0", "9.0.0"], "8.0.0" },
+        { ["19.0.0", "18.0.0", "2.7.7"], ["18.0.0", "19.0.0", "2.7.7"], "19.0.0" },
+        { ["8.0.0", "13.0.0"], ["8.0.0", "13.0.0"], "8.0.0" },
+        { ["13.0.0", "8.0.0"], ["13.0.0", "8.0.0"], "8.0.0" },
+        { ["8.0.0", "9.0.0"], ["8.0.0", "9.0.0"], "8.0.0" },
+        { ["9.0.0", "13.0.0"], ["9.0.0", "13.0.0"], "13.0.0" },
+        { ["8.0.0", "19.0.0"], ["8.0.0", "19.0.0"], "8.0.0" },
+        { ["12.0.0", "13.0.0"], ["12.0.0", "13.0.0"], "12.0.0" },
+        { ["13.0.0", "12.0.0"], ["13.0.0", "12.0.0"], "13.0.0" },
+        { ["10.0.0", "11.0.0"], ["10.0.0", "11.0.0"], "10.0.0" },
+        { ["12.0.0", "10.0.0"], ["12.0.0", "10.0.0"], "12.0.0" },
+        { ["13.0.0", "10.0.0"], ["13.0.0", "10.0.0"], "13.0.0" },
+        { ["7.0.0", "8.0.0"], ["7.0.0", "8.0.0"], "8.0.0" },
+        { ["2.7.7", "5.0.0"], ["2.7.7", "5.0.0"], "2.7.7" },
+        { ["5.0.0", "2.7.7"], ["5.0.0", "2.7.7"], "5.0.0" },
+        { ["19.0.0", "12.0.0"], ["19.0.0", "12.0.0"], "12.0.0" },
+        { ["19.0.0", "13.0.0"], ["19.0.0", "13.0.0"], "13.0.0" },
+        { ["19.0.0", "9.0.0"], ["19.0.0", "9.0.0"], "19.0.0" },
+        { ["9.0.0", "7.0.0"], ["9.0.0", "7.0.0"], "9.0.0" },
+        { ["7.0.0", "5.0.0"], ["7.0.0", "5.0.0"], "7.0.0" }
+    };
+
+    [Theory]
+    [MemberData(nameof(ProductionChoices))]
+    public void Negotiate_ChoosesWhatTelegramsServersChose(string[] caller, string[] callee, string expected)
+    {
+        PhoneCallProtocolHelper.Negotiate(caller, callee).LibraryVersions.ShouldBe([expected]);
     }
 
     [Fact]
@@ -122,7 +158,7 @@ public class PhoneCallProtocolNegotiationTests
         var negotiated = PhoneCallProtocolHelper.Negotiate(["v1", "v2", "v5"], ["v5", "v2"]);
 
         // The negotiated protocol carried on the final phoneCall pins exactly one common version.
-        negotiated.LibraryVersions.ToList().ShouldBe(new[] { "v5" });
+        negotiated.LibraryVersions.ToList().ShouldBe(new[] { "v2" });
     }
 
     // ---- Empty intersection (R3.5 -> CALL_PROTOCOL_COMPAT_LAYER_INVALID) --------------------------
@@ -169,10 +205,9 @@ public class PhoneCallProtocolNegotiationTests
             .Sample((caller, callee) =>
             {
                 var callerSet = caller.ToHashSet(StringComparer.Ordinal);
-                // The negotiated version is the ordinal-greatest member of the intersection.
-                var expectedIntersection = callee.Where(callerSet.Contains)
-                    .OrderByDescending(v => v, StringComparer.Ordinal)
-                    .ToList();
+                var calleeSet = callee.ToHashSet(StringComparer.Ordinal);
+                // These generated versions all rank equally, so the caller's first shared one is chosen.
+                var expectedIntersection = caller.Distinct().Where(calleeSet.Contains).ToList();
 
                 var hasCommon = PhoneCallProtocolHelper.HasCommonLibraryVersion(caller, callee);
                 var tryCommon = PhoneCallProtocolHelper.TryGetCommonLibraryVersion(caller, callee, out var selected);
@@ -194,7 +229,7 @@ public class PhoneCallProtocolNegotiationTests
 
                 // R3.4: the negotiated version is a single value present in both peers' lists.
                 selected.ShouldNotBeNull();
-                selected.ShouldBe(expectedIntersection[0]); // ordinal-greatest common version
+                selected.ShouldBe(expectedIntersection[0]); // the caller's first common version
                 callerSet.ShouldContain(selected!);
                 callee.ShouldContain(selected!);
 

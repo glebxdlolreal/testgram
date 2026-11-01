@@ -1,3 +1,4 @@
+using MyTelegram.Services.Services;
 namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <summary>
 /// Returns the conversation history with one interlocutor / within a chat
@@ -18,7 +19,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class GetHistoryHandler(IMessageAppService messageAppService, IQueryProcessor queryProcessor, IPeerHelper peerHelper, IChannelAppService channelAppService, IGetHistoryConverterService getHistoryConverterService) : RpcResultObjectHandler<RequestGetHistory, IMessages>
+internal sealed class GetHistoryHandler(IMessageAppService messageAppService, IQueryProcessor queryProcessor, IPeerHelper peerHelper, IChannelAppService channelAppService, IGetHistoryConverterService getHistoryConverterService, IAccessHashHelper2 accessHashHelper2) : RpcResultObjectHandler<RequestGetHistory, IMessages>
 {
     /// <summary>Upper bound on one history page, matching the paging limit used by the search handlers.</summary>
     private const int MaxHistoryLimit = 100;
@@ -26,6 +27,8 @@ internal sealed class GetHistoryHandler(IMessageAppService messageAppService, IQ
     protected override async Task<IMessages> HandleCoreAsync(IRequestInput input, RequestGetHistory obj)
     {
         var userId = input.UserId;
+        // A wrong hash is CHANNEL_INVALID for a channel and PEER_ID_INVALID for a user, as on Telegram.
+        await accessHashHelper2.CheckAccessHashAsync(input, obj.Peer);
         var peer = peerHelper.GetPeer(obj.Peer, userId);
         var ownerPeerId = peer.PeerType == PeerType.Channel ? peer.PeerId : userId;
         if (peer.PeerType == PeerType.Channel)

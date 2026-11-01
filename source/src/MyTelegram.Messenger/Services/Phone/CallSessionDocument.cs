@@ -27,7 +27,10 @@ public class CallSessionDocument
     public int? StateChangedDate { get; set; }
 
     public int? ReceivedDate { get; set; }
-    public int Duration { get; set; }
+    /// <summary>Seconds the call was connected; null for a call that never connected.</summary>
+    public int? Duration { get; set; }
+    /// <summary>The participant whose phone.discardCall ended the call; 0 when the server expired it.</summary>
+    public long DiscardedByUserId { get; set; }
     public string? DiscardReason { get; set; }
     public string? DiscardReasonSlug { get; set; }
     public bool NeedRating { get; set; }

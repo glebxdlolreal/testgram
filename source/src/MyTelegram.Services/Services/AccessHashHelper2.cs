@@ -39,8 +39,9 @@ public sealed class AccessHashHelper2(
                 return RpcErrors.RpcErrors400.StickersetInvalid;
             case AccessHashType.User:
                 return RpcErrors.RpcErrors400.UserIdInvalid;
+            // What Telegram answers to a wrong hash in inputChannel / inputPeerChannel (checked 2026-11-01).
             case AccessHashType.Channel:
-                return RpcErrors.RpcErrors400.ChannelIdInvalid;
+                return RpcErrors.RpcErrors400.ChannelInvalid;
             case AccessHashType.Document:
                 return RpcErrors.RpcErrors400.DocumentInvalid;
             case AccessHashType.Photo:
@@ -80,8 +81,10 @@ public sealed class AccessHashHelper2(
                 break;
             case TInputPeerSelf:
                 break;
+            // A wrong hash in inputUser is USER_ID_INVALID, but in inputPeerUser Telegram answers
+            // PEER_ID_INVALID (checked 2026-11-01).
             case TInputPeerUser inputPeerUser:
-                return CheckAccessHashAsync(currentUserId, accessHashKeyId, inputPeerUser.UserId, inputPeerUser.AccessHash, AccessHashType.User);
+                return CheckInputPeerUserAsync(currentUserId, accessHashKeyId, inputPeerUser);
 
             case TInputPeerUserFromMessage:
                 break;
@@ -95,6 +98,15 @@ public sealed class AccessHashHelper2(
         }
 
         return Task.CompletedTask;
+    }
+
+    private async Task CheckInputPeerUserAsync(long currentUserId, long accessHashKeyId, TInputPeerUser inputPeerUser)
+    {
+        if (!await IsAccessHashValidAsync(currentUserId, accessHashKeyId, inputPeerUser.UserId,
+                inputPeerUser.AccessHash, AccessHashType.User))
+        {
+            RpcErrors.RpcErrors400.PeerIdInvalid.ThrowRpcError();
+        }
     }
 
     public Task CheckAccessHashAsync(IRequestWithAccessHashKeyId request, IInputPeer? inputPeer)
