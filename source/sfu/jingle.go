@@ -101,29 +101,42 @@ var videoCodecs = []videoCodec{
 
 var videoFeedback = []string{"goog-remb", "transport-cc", "ccm fir", "nack", "nack pli"}
 
-// VideoSsrcs is the sender's base video stream: the first SSRC of its SIM group (the lowest
-// layer, which is what receivers render as the participant's main SSRC) and that SSRC's FID
-// (RTX) partner. Upper simulcast layers are not forwarded.
-func (p *JoinParams) VideoSsrcs() (main uint32, rtx uint32, ok bool) {
+// VideoLayers lists the sender's video encodings in SIM order (lowest first: the first SSRC
+// is what receivers render as the participant's video), each with its FID (RTX) partner. A
+// stream without a SIM group (a screen share) is its single FID pair.
+func (p *JoinParams) VideoLayers() []videoLayer {
+	rtxOf := map[uint32]uint32{}
+	var fids [][2]uint32
+	for _, g := range p.SsrcGroups {
+		if g.Semantics == "FID" && len(g.Sources) >= 2 {
+			main, rtx := uint32(int32(g.Sources[0])), uint32(int32(g.Sources[1]))
+			rtxOf[main] = rtx
+			fids = append(fids, [2]uint32{main, rtx})
+		}
+	}
 	for _, g := range p.SsrcGroups {
 		if g.Semantics == "SIM" && len(g.Sources) > 0 {
-			main = uint32(int32(g.Sources[0]))
-			break
+			layers := make([]videoLayer, 0, len(g.Sources))
+			for _, src := range g.Sources {
+				ssrc := uint32(int32(src))
+				layers = append(layers, videoLayer{ssrc: ssrc, rtx: rtxOf[ssrc]})
+			}
+			return layers
 		}
 	}
-	for _, g := range p.SsrcGroups {
-		if g.Semantics != "FID" || len(g.Sources) < 2 {
-			continue
-		}
-		if main == 0 {
-			main = uint32(int32(g.Sources[0]))
-		}
-		if uint32(int32(g.Sources[0])) == main {
-			rtx = uint32(int32(g.Sources[1]))
-			break
-		}
+	if len(fids) > 0 {
+		return []videoLayer{{ssrc: fids[0][0], rtx: fids[0][1]}}
 	}
-	return main, rtx, main != 0
+	return nil
+}
+
+// VideoSsrcs is the base layer: its SSRC and RTX partner.
+func (p *JoinParams) VideoSsrcs() (main uint32, rtx uint32, ok bool) {
+	layers := p.VideoLayers()
+	if len(layers) == 0 {
+		return 0, 0, false
+	}
+	return layers[0].ssrc, layers[0].rtx, true
 }
 
 // RemoteAnswer turns the client's join params into the SDP answer the SFU's
@@ -174,13 +187,14 @@ func (p *JoinParams) RemoteAnswer(audioMid, videoMid string) string {
 		}
 		fmt.Fprintf(&b, "a=rtpmap:%d rtx/90000\r\na=fmtp:%d apt=%d\r\n", c.rtxPT, c.rtxPT, c.pt)
 	}
-	if main, rtx, ok := p.VideoSsrcs(); ok {
-		if rtx != 0 {
-			fmt.Fprintf(&b, "a=ssrc-group:FID %d %d\r\n", main, rtx)
+	// Every layer is its own SSRC line, so pion opens a receiver for each (as Plan B tracks).
+	for _, l := range p.VideoLayers() {
+		if l.rtx != 0 {
+			fmt.Fprintf(&b, "a=ssrc-group:FID %d %d\r\n", l.ssrc, l.rtx)
 		}
-		fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", main, ssrc)
-		if rtx != 0 {
-			fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", rtx, ssrc)
+		fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", l.ssrc, ssrc)
+		if l.rtx != 0 {
+			fmt.Fprintf(&b, "a=ssrc:%d cname:%d\r\n", l.rtx, ssrc)
 		}
 	}
 	return b.String()

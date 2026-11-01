@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
@@ -34,8 +35,10 @@ type tgClient struct {
 	mu        sync.Mutex
 	received  map[uint32]int
 	levels    map[uint32]bool
+	videoLog  map[uint32][]rtp.Header
 	gotAny    atomic.Bool
 	keyframes atomic.Int64
+	layerPLIs [3]atomic.Int64
 }
 
 func newTGClient(t *testing.T) *tgClient { return newTGClientWith(t, false) }
@@ -65,7 +68,18 @@ func newTGClientWith(t *testing.T, withVideo bool) *tgClient {
 	se.SetAnsweringDTLSRole(webrtc.DTLSRoleServer)
 	se.SetIncludeLoopbackCandidate(true)
 	se.SetNetworkTypes([]webrtc.NetworkType{webrtc.NetworkTypeUDP4})
-	api := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithSettingEngine(se))
+	c := &tgClient{t: t, received: map[uint32]int{}, levels: map[uint32]bool{}, videoLog: map[uint32][]rtp.Header{}}
+	// libwebrtc answers keyframe requests for every SSRC it declared; pion only routes RTCP for
+	// its own senders, so count picture-loss requests before that routing.
+	registry := &interceptor.Registry{}
+	registry.Add(&rtcpSpyFactory{onPLI: func(ssrc uint32) {
+		for i := range c.videoSsrc {
+			if c.videoSsrc[i] == ssrc && ssrc != 0 {
+				c.layerPLIs[i].Add(1)
+			}
+		}
+	}})
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(me), webrtc.WithSettingEngine(se), webrtc.WithInterceptorRegistry(registry))
 
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	cert, err := webrtc.GenerateCertificate(key)
@@ -87,7 +101,7 @@ func newTGClientWith(t *testing.T, withVideo bool) *tgClient {
 	go drainRTCP(sender)
 	ssrc := uint32(sender.GetParameters().Encodings[0].SSRC)
 
-	c := &tgClient{t: t, pc: pc, track: track, ssrc: ssrc, received: map[uint32]int{}, levels: map[uint32]bool{}}
+	c.pc, c.track, c.ssrc = pc, track, ssrc
 	groups := []map[string]any{}
 	if withVideo {
 		c.video = &rawTrack{}
@@ -130,6 +144,9 @@ func newTGClientWith(t *testing.T, withVideo bool) *tgClient {
 				c.gotAny.Store(true)
 				c.mu.Lock()
 				c.received[pkt.SSRC]++
+				if remote.Kind() == webrtc.RTPCodecTypeVideo {
+					c.videoLog[pkt.SSRC] = append(c.videoLog[pkt.SSRC], pkt.Header)
+				}
 				if pkt.GetExtension(1) != nil {
 					c.levels[pkt.SSRC] = true
 				}
@@ -174,22 +191,39 @@ func (c *tgClient) connect(tr *Transport) {
 	}
 }
 
-// film sends VP8-like packets on the given simulcast layer.
-func (c *tgClient) film(stop <-chan struct{}, layer int) {
-	var seq uint16
-	ts := uint32(0)
+// film sends VP8 packets on the given simulcast layer. Like libwebrtc, every layer has its own
+// sequence, timestamp and picture id numbering. Every keyEvery-th frame is a keyframe (1: all).
+func (c *tgClient) film(stop <-chan struct{}, layer int) { c.filmWith(stop, layer, 1) }
+
+func (c *tgClient) filmWith(stop <-chan struct{}, layer, keyEvery int) {
+	seq := uint16(1000 * (layer + 1) * 7)
+	ts := uint32(90000 * (layer + 3) * 11)
+	pic := uint16(300 * (layer + 1))
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
-	for {
+	for frame := 0; ; frame++ {
 		select {
 		case <-stop:
 			return
 		case <-ticker.C:
 			seq++
 			ts += 3000
-			c.video.write(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 100, SequenceNumber: seq, Timestamp: ts, SSRC: c.videoSsrc[layer]}, Payload: []byte{0x10, 0x00, 0x9d, 0x01}})
+			pic = (pic + 1) & 0x7fff
+			inter := byte(1)
+			if frame%keyEvery == 0 {
+				inter = 0
+			}
+			// X=1 S=1, then I=1 with a 15-bit picture id, then the VP8 header's P bit.
+			payload := []byte{0x90, 0x80, 0x80 | byte(pic>>8), byte(pic), inter, 0x00, 0x9d, 0x01}
+			c.video.write(&rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: 100, SequenceNumber: seq, Timestamp: ts, SSRC: c.videoSsrc[layer]}, Payload: payload})
 		}
 	}
+}
+
+func (c *tgClient) videoHeaders(ssrc uint32) []rtp.Header {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]rtp.Header(nil), c.videoLog[ssrc]...)
 }
 
 func (c *tgClient) countKeyframeRequests(sender *webrtc.RTPSender) {
@@ -277,4 +311,31 @@ func randomToken(n int) string {
 		b[i] = letters[int(b[i])%len(letters)]
 	}
 	return string(b)
+}
+
+type rtcpSpyFactory struct{ onPLI func(uint32) }
+
+func (f *rtcpSpyFactory) NewInterceptor(string) (interceptor.Interceptor, error) {
+	return &rtcpSpy{onPLI: f.onPLI}, nil
+}
+
+type rtcpSpy struct {
+	interceptor.NoOp
+	onPLI func(uint32)
+}
+
+func (s *rtcpSpy) BindRTCPReader(reader interceptor.RTCPReader) interceptor.RTCPReader {
+	return interceptor.RTCPReaderFunc(func(b []byte, a interceptor.Attributes) (int, interceptor.Attributes, error) {
+		n, attr, err := reader.Read(b, a)
+		if err == nil {
+			if packets, perr := rtcp.Unmarshal(b[:n]); perr == nil {
+				for _, p := range packets {
+					if pli, ok := p.(*rtcp.PictureLossIndication); ok {
+						s.onPLI(pli.MediaSSRC)
+					}
+				}
+			}
+		}
+		return n, attr, err
+	})
 }

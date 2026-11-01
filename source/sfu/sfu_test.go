@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/pion/rtp"
 )
 
 func newTestSFU(t *testing.T) *SFU {
@@ -246,7 +248,7 @@ func TestParseJoinParams_RejectsIncompleteParams(t *testing.T) {
 	}
 }
 
-func TestVideo_BaseLayerIsForwarded_UpperLayersAreNot_AndTheWatchedCameraIsAskedForKeyframes(t *testing.T) {
+func TestSimulcast_TheViewerGetsTheTopLayer_OnTheBaseSsrc_AndThatLayerIsAskedForKeyframes(t *testing.T) {
 	s := newTestSFU(t)
 	camera, viewer := newTGClientWith(t, true), newTGClientWith(t, true)
 	join(t, s, 21, "camera", camera)
@@ -255,24 +257,138 @@ func TestVideo_BaseLayerIsForwarded_UpperLayersAreNot_AndTheWatchedCameraIsAsked
 
 	stop := make(chan struct{})
 	defer close(stop)
-	go camera.film(stop, 0)
-	go camera.film(stop, 2)
-
-	waitFor(t, "the viewer to receive the camera's base layer", func() bool { return viewer.count(camera.videoSsrc[0]) >= 20 })
-	if viewer.count(camera.videoSsrc[2]) != 0 {
-		t.Fatal("an upper simulcast layer was forwarded; receivers render only the base SSRC")
+	for layer := 0; layer < 3; layer++ {
+		go camera.film(stop, layer)
 	}
 
-	before := camera.keyframes.Load()
-	waitFor(t, "periodic keyframe requests to reach the camera", func() bool { return camera.keyframes.Load() >= before+2 })
+	waitFor(t, "the viewer to be moved to the top layer", func() bool { return layerOf(s, 21, "camera", "viewer") == 2 })
+	waitFor(t, "the viewer to receive video", func() bool { return viewer.count(camera.videoSsrc[0]) >= 20 })
+	if viewer.count(camera.videoSsrc[1]) != 0 || viewer.count(camera.videoSsrc[2]) != 0 {
+		t.Fatal("an upper simulcast layer reached the viewer on its own SSRC; tgcalls renders only the base SSRC")
+	}
+
+	// The SFU's own count: pion hands a client only the RTCP for its own sender SSRC, while
+	// libwebrtc answers a picture-loss request for any simulcast SSRC it declared.
+	before := layerKeyframes(s, 21, "camera", 2)
+	waitFor(t, "periodic keyframe requests for the watched layer", func() bool { return layerKeyframes(s, 21, "camera", 2) >= before+2 })
 
 	sources := map[int32]bool{}
 	for _, src := range s.Sources(21) {
 		sources[src] = true
 	}
-	if !sources[int32(camera.videoSsrc[0])] || !sources[int32(camera.ssrc)] {
-		t.Fatalf("sources %v lack the camera's audio or base video ssrc", s.Sources(21))
+	for i := range camera.videoSsrc {
+		if !sources[int32(camera.videoSsrc[i])] {
+			t.Fatalf("sources %v lack simulcast layer %d", s.Sources(21), i)
+		}
 	}
+}
+
+func TestSimulcast_WhenTheTopLayerStops_TheViewerFallsBack_AndTheStreamStaysContinuous(t *testing.T) {
+	s := newTestSFU(t)
+	camera, viewer := newTGClientWith(t, true), newTGClientWith(t, true)
+	join(t, s, 22, "camera", camera)
+	join(t, s, 22, "viewer", viewer)
+	defer s.End(22)
+
+	stopAll := make(chan struct{})
+	defer close(stopAll)
+	stopTop := make(chan struct{})
+	go camera.film(stopAll, 0)
+	go camera.film(stopAll, 1)
+	go camera.film(stopTop, 2)
+	waitFor(t, "the top layer", func() bool { return layerOf(s, 22, "camera", "viewer") == 2 })
+	time.Sleep(300 * time.Millisecond)
+	close(stopTop) // the camera's encoder turns its top layer off
+	waitFor(t, "the fallback to the middle layer", func() bool { return layerOf(s, 22, "camera", "viewer") == 1 })
+	time.Sleep(300 * time.Millisecond)
+
+	headers := viewer.videoHeaders(camera.videoSsrc[0])
+	if len(headers) < 30 {
+		t.Fatalf("only %d packets reached the viewer", len(headers))
+	}
+	seen := map[uint16]bool{}
+	for i := 1; i < len(headers); i++ {
+		if seen[headers[i].SequenceNumber] {
+			t.Fatalf("sequence number %d repeated across the layer change", headers[i].SequenceNumber)
+		}
+		seen[headers[i].SequenceNumber] = true
+		if gap := headers[i].SequenceNumber - headers[i-1].SequenceNumber; gap != 1 {
+			t.Fatalf("sequence jumped by %d at packet %d", gap, i)
+		}
+		// One frame is 3000; the fallback waits out up to a second of silence of the top layer.
+		if step := int32(headers[i].Timestamp - headers[i-1].Timestamp); step <= 0 || step > 2*90000 {
+			t.Fatalf("timestamp moved by %d at packet %d", step, i)
+		}
+	}
+}
+
+func TestLayerSelector_WaitsForAKeyframe_AndContinuesPictureIds(t *testing.T) {
+	sel := newLayerSelector()
+	vp8 := func(pic uint16, key bool) []byte {
+		inter := byte(1)
+		if key {
+			inter = 0
+		}
+		return []byte{0x90, 0x80, 0x80 | byte(pic>>8), byte(pic), inter}
+	}
+	now := time.Unix(100, 0)
+	h := func(seq uint16, ts uint32) *rtp.Header {
+		return &rtp.Header{PayloadType: 100, SequenceNumber: seq, Timestamp: ts, SSRC: 7}
+	}
+
+	// Layer 0 starts the stream.
+	out, _, _ := sel.route(0, 0, 1, h(10, 1000), vp8(50, true), now)
+	if out == nil || out.SSRC != 1 || out.SequenceNumber != 10 {
+		t.Fatalf("the first keyframe should pass unchanged onto the base ssrc, got %+v", out)
+	}
+	now = now.Add(33 * time.Millisecond)
+	sel.route(0, 0, 1, h(11, 3970), vp8(51, false), now)
+
+	// Target becomes layer 1; its delta frames are held back and a keyframe is asked for.
+	now = now.Add(10 * time.Millisecond)
+	out, _, ask := sel.route(1, 1, 1, h(500, 777000), vp8(9000, false), now)
+	if out != nil || !ask {
+		t.Fatalf("a delta frame of the new layer must not be forwarded, and a keyframe must be requested (out=%v ask=%v)", out, ask)
+	}
+	out, _, _ = sel.route(0, 1, 1, h(12, 6940), vp8(52, false), now)
+	if out == nil || out.SequenceNumber != 12 {
+		t.Fatal("the viewer must stay on its current layer until the new one has a keyframe")
+	}
+
+	now = now.Add(33 * time.Millisecond)
+	out, payload, _ := sel.route(1, 1, 1, h(501, 780000), vp8(9001, true), now)
+	if out == nil || out.SequenceNumber != 13 {
+		t.Fatalf("the switch must continue the sequence: got %+v", out)
+	}
+	if step := out.Timestamp - 6940; step == 0 || step > 9000 {
+		t.Fatalf("the timestamp should continue near the previous frame, moved by %d", step)
+	}
+	if pic := uint16(payload[2]&0x7f)<<8 | uint16(payload[3]); pic != 53 {
+		t.Fatalf("the picture id should continue at 53, got %d", pic)
+	}
+	if sel.layer() != 1 {
+		t.Fatal("the selector did not move to layer 1")
+	}
+}
+
+func layerKeyframes(s *SFU, call int64, camera string, layer int) uint64 {
+	for _, st := range s.Stats(call) {
+		if st.Key == camera && layer < len(st.LayerKeyframes) {
+			return st.LayerKeyframes[layer]
+		}
+	}
+	return 0
+}
+
+func layerOf(s *SFU, call int64, camera, viewer string) int {
+	for _, st := range s.Stats(call) {
+		if st.Key == camera {
+			if l, ok := st.Layers[viewer]; ok {
+				return l
+			}
+		}
+	}
+	return -1
 }
 
 func TestVideo_ANewcomerTriggersAKeyframeFromEveryCamera(t *testing.T) {
@@ -285,9 +401,24 @@ func TestVideo_ANewcomerTriggersAKeyframeFromEveryCamera(t *testing.T) {
 		return len(st) == 1 && st[0].Connected
 	})
 
-	before := camera.keyframes.Load()
+	before := camera.layerPLIs[0].Load()
 	join(t, s, 23, "newcomer", newTGClient(t))
-	waitFor(t, "a keyframe request for the newcomer", func() bool { return camera.keyframes.Load() > before })
+	waitFor(t, "a keyframe request for the newcomer", func() bool { return camera.layerPLIs[0].Load() > before })
+}
+
+func TestVideoLayers_FollowTheSimGroupOrder_WithTheirRtx(t *testing.T) {
+	p, _ := ParseJoinParams(`{"ufrag":"a","pwd":"b","fingerprints":[{"fingerprint":"AA"}],"ssrc":1,"ssrc-groups":[{"semantics":"SIM","sources":[10,12,14]},{"semantics":"FID","sources":[12,13]},{"semantics":"FID","sources":[10,11]},{"semantics":"FID","sources":[14,15]}]}`)
+	got := p.VideoLayers()
+	want := []videoLayer{{10, 11}, {12, 13}, {14, 15}}
+	if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	answer := p.RemoteAnswer("0", "1")
+	for _, line := range []string{"a=ssrc:12 cname:1", "a=ssrc:14 cname:1", "a=ssrc-group:FID 14 15"} {
+		if !strings.Contains(answer, line) {
+			t.Fatalf("the answer lacks %q, so pion would not receive that layer", line)
+		}
+	}
 }
 
 func TestVideoSsrcs_TakeTheBaseLayerAndItsRtx(t *testing.T) {
