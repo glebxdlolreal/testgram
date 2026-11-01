@@ -25,7 +25,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Updates;
 /// </remarks>
 internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppService, IQueryProcessor queryProcessor, IAckCacheService ackCacheService, //ILayeredService<IDifferenceConverter> layeredService,
  IDifferenceConverterService differenceConverterService, ILogger<GetChannelDifferenceHandler> logger, IChannelAppService channelAppService,
- MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator channelPtsAllocator) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetChannelDifference, MyTelegram.Schema.Updates.IChannelDifference>
+ MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator channelPtsAllocator, IChatInvitePeekService chatInvitePeekService) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetChannelDifference, MyTelegram.Schema.Updates.IChannelDifference>
 {
     //private readonly IRpcResultProcessor _rpcResultProcessor;
     private readonly ILogger<GetChannelDifferenceHandler> _logger = logger;
@@ -74,7 +74,10 @@ internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppS
             // untouched so other read paths keep their public-channel policy.
             if (channelMemberReadModel == null &&
                 membershipCheckChannel!.Broadcast &&
-                string.IsNullOrEmpty(membershipCheckChannel.UserName))
+                string.IsNullOrEmpty(membershipCheckChannel.UserName) &&
+                // A chatInvitePeek grants read access; refusing the peeker's difference makes the
+                // client treat the chat as inaccessible and the join button stops working.
+                !await chatInvitePeekService.HasActivePeekAsync(input.UserId, channelId))
             {
                 RpcErrors.RpcErrors400.ChannelPrivate.ThrowRpcError();
             }
