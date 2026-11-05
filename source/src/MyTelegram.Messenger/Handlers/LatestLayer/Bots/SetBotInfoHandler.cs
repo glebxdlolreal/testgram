@@ -17,7 +17,9 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Bots;
 internal sealed class SetBotInfoHandler(
     IMongoDatabase mongoDatabase,
     IQueryProcessor queryProcessor,
-    IBotOwnershipChecker botOwnershipChecker) : RpcResultObjectHandler<MyTelegram.Schema.Bots.RequestSetBotInfo, IBool>
+    IBotOwnershipChecker botOwnershipChecker,
+    IUserAppService userAppService,
+    IEventBus eventBus) : RpcResultObjectHandler<MyTelegram.Schema.Bots.RequestSetBotInfo, IBool>
 {
     protected override async Task<IBool> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Bots.RequestSetBotInfo obj)
     {
@@ -76,6 +78,48 @@ internal sealed class SetBotInfoHandler(
 
         await collection.UpdateOneAsync(filter, update, new UpdateOptions { IsUpsert = true });
 
+        if (string.IsNullOrEmpty(obj.LangCode) && (obj.Name != null || obj.About != null))
+        {
+            await ApplyToProfileAsync(targetBotId, obj.Name, obj.About);
+        }
+
         return new TBoolTrue();
+    }
+
+    /// <summary>
+    /// The default-language name and about text are the bot's profile: <c>user.first_name</c> and
+    /// <c>userFull.about</c> come from the user read model, not from <c>bot_info</c>. Bots made through
+    /// BotFather have no aggregate behind them, so they are written where BotFather writes them.
+    /// </summary>
+    private async Task ApplyToProfileAsync(long botId, string? name, string? about)
+    {
+        var state = mongoDatabase.GetCollection<BsonDocument>("botfather-bot-state");
+        if (!await state.Find(Builders<BsonDocument>.Filter.Eq("BotUserId", botId)).AnyAsync())
+        {
+            return;
+        }
+
+        var userUpdate = new List<UpdateDefinition<BsonDocument>>();
+        if (!string.IsNullOrEmpty(name))
+        {
+            userUpdate.Add(Builders<BsonDocument>.Update.Set("FirstName", name));
+            await state.UpdateOneAsync(Builders<BsonDocument>.Filter.Eq("BotUserId", botId),
+                Builders<BsonDocument>.Update.Set("Name", name));
+        }
+
+        if (about != null)
+        {
+            userUpdate.Add(Builders<BsonDocument>.Update.Set("About", about));
+        }
+
+        if (userUpdate.Count == 0)
+        {
+            return;
+        }
+
+        await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("UserId", botId), Builders<BsonDocument>.Update.Combine(userUpdate));
+        userAppService.InvalidateCache(botId);
+        await eventBus.PublishAsync(new BotUserChangedEvent(botId));
     }
 }

@@ -139,7 +139,7 @@ public class DefaultDataProcessor<TData>(
         var req = new RequestInput(
             obj.ConnectionId,
             obj.ConnectionType,
-            obj.RequestId,
+            RequestIdHelper.ForMessage(obj.RequestId, obj.ReqMsgId),
             obj.ObjectId,
             obj.ReqMsgId,
             obj.SeqNumber,

@@ -100,7 +100,7 @@ public class GiveawayProcessorBackgroundService : BackgroundService
             int untilDate;
             if (giveaway.Contains("UntilDate"))
             {
-                untilDate = giveaway["UntilDate"].AsInt32;
+                untilDate = giveaway["UntilDate"].ToInt32();
             }
             else if (giveaway.Contains("CompleteAt"))
             {
@@ -127,7 +127,7 @@ public class GiveawayProcessorBackgroundService : BackgroundService
             {
                 // Already expired, complete immediately
                 _logger.LogInformation("Giveaway {GiveawayId} already expired, completing now", giveawayId);
-                _ = Task.Run(() => CompleteGiveawayAsync(giveawayId, CancellationToken.None), cancellationToken);
+                _ = Task.Run(() => CompleteGiveawaySafelyAsync(giveawayId), cancellationToken);
             }
             else if (delay.TotalMilliseconds > uint.MaxValue)
             {
@@ -140,7 +140,7 @@ public class GiveawayProcessorBackgroundService : BackgroundService
             {
                 // Schedule timer - wrap async call in Task.Run to avoid fire-and-forget issues
                 var timer = new Timer(
-                    _ => Task.Run(() => CompleteGiveawayAsync(giveawayId, CancellationToken.None)),
+                    _ => Task.Run(() => CompleteGiveawaySafelyAsync(giveawayId)),
                     null,
                     delay,
                     Timeout.InfiniteTimeSpan
@@ -154,6 +154,22 @@ public class GiveawayProcessorBackgroundService : BackgroundService
                 _logger.LogInformation("Scheduled giveaway {GiveawayId} to complete in {Delay}",
                     giveawayId, delay);
             }
+        }
+    }
+
+    /// <summary>
+    /// Runs on a timer or a fire-and-forget task: an exception here was only ever seen as an unobserved
+    /// task exception from the finalizer, without the giveaway it belonged to.
+    /// </summary>
+    private async Task CompleteGiveawaySafelyAsync(string giveawayId)
+    {
+        try
+        {
+            await CompleteGiveawayAsync(giveawayId, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Completing giveaway {GiveawayId} failed", giveawayId);
         }
     }
 
@@ -179,13 +195,13 @@ public class GiveawayProcessorBackgroundService : BackgroundService
         }
 
         var channelId = GetInt64(giveaway["ChannelId"]);
-        var msgId = giveaway.Contains("MsgId") ? giveaway["MsgId"].AsInt32 : 0;
+        var msgId = giveaway.Contains("MsgId") ? giveaway["MsgId"].ToInt32() : 0;
         var type = giveaway["Type"].AsString;
 
         // Support both Winners and WinnersCount field names
         var winnersCount = giveaway.Contains("Winners")
-            ? giveaway["Winners"].AsInt32
-            : giveaway["WinnersCount"].AsInt32;
+            ? giveaway["Winners"].ToInt32()
+            : giveaway["WinnersCount"].ToInt32();
 
         var onlyNewSubscribers = giveaway.Contains("OnlyNewSubscribers") && giveaway["OnlyNewSubscribers"].AsBoolean;
 
@@ -240,7 +256,7 @@ public class GiveawayProcessorBackgroundService : BackgroundService
             // If only new subscribers, filter by join date
             if (onlyNewSubscribers)
             {
-                var startDate = giveaway["StartDate"].AsInt32;
+                var startDate = giveaway["StartDate"].ToInt32();
                 memberFilter = Builders<BsonDocument>.Filter.And(
                     memberFilter,
                     Builders<BsonDocument>.Filter.Gte("JoinDate", startDate)
@@ -326,7 +342,7 @@ public class GiveawayProcessorBackgroundService : BackgroundService
         using var scope = _serviceScopeFactory.CreateScope();
         var messageAppService = scope.ServiceProvider.GetRequiredService<IMessageAppService>();
 
-        var months = type == "premium" && giveaway.Contains("Months") ? giveaway["Months"].AsInt32 : 12;
+        var months = type == "premium" && giveaway.Contains("Months") ? giveaway["Months"].ToInt32() : 12;
         var starsAmount = type == "stars" && giveaway.Contains("Stars") ? GetInt64(giveaway["Stars"]) : 0;
 
         // Get giveaway creator
@@ -423,7 +439,7 @@ public class GiveawayProcessorBackgroundService : BackgroundService
 
                 bool hasActivePremium = existingSub != null &&
                     existingSub.Contains("Active") && existingSub["Active"].AsBoolean &&
-                    existingSub.Contains("ExpiresAt") && existingSub["ExpiresAt"].AsInt32 > now;
+                    existingSub.Contains("ExpiresAt") && existingSub["ExpiresAt"].ToInt64() > now;
 
                 var slug = $"giveaway-{channelId}-{msgId}-{winnerId}-{Guid.NewGuid():N}";
 
@@ -558,7 +574,7 @@ public class GiveawayProcessorBackgroundService : BackgroundService
                 Winners = new TVector<long>(winners),
                 Months = type == "premium" ? months : null,
                 Stars = type == "stars" ? starsAmount : null,
-                UntilDate = giveaway["UntilDate"].AsInt32
+                UntilDate = giveaway["UntilDate"].ToInt32()
             };
 
             var channelResultInput = new SendMessageInput(
