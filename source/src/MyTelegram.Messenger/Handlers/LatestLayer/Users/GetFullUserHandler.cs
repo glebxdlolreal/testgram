@@ -341,6 +341,35 @@ internal sealed class GetFullUserHandler(IPeerHelper peerHelper, IQueryProcessor
             botInfo.Description = description.AsString;
         }
 
+        // The "What can this bot do?" picture from @BotFather's /setdescriptionpic, stored as the
+        // messageMedia it was sent as: a photo, or an animation document.
+        if (infoDoc != null && infoDoc.TryGetValue("DescriptionMedia", out var descriptionMedia) &&
+            descriptionMedia.BsonType == BsonType.Binary)
+        {
+            var mediaBuffer = new ReadOnlyMemory<byte>(descriptionMedia.AsByteArray);
+            switch (mediaBuffer.Read<IMessageMedia>())
+            {
+                case TMessageMediaPhoto { Photo: { } photo }:
+                    botInfo.DescriptionPhoto = photo;
+                    break;
+                case TMessageMediaDocument { Document: { } document }:
+                    botInfo.DescriptionDocument = document;
+                    break;
+            }
+        }
+
+        userFull.BotGroupAdminRights = await MyTelegram.Messenger.Services.Bots.BotDefaultAdminRights.GetAsync(
+            mongoDatabase, botUserId, MyTelegram.Messenger.Services.Bots.BotDefaultAdminRights.Group);
+        userFull.BotBroadcastAdminRights = await MyTelegram.Messenger.Services.Bots.BotDefaultAdminRights.GetAsync(
+            mongoDatabase, botUserId, MyTelegram.Messenger.Services.Bots.BotDefaultAdminRights.Broadcast);
+
+        // Set with @BotFather's /setprivacypolicy; clients link it from the bot's profile.
+        if (infoDoc != null && infoDoc.TryGetValue("PrivacyPolicyUrl", out var privacyPolicyUrl) &&
+            privacyPolicyUrl.IsString)
+        {
+            botInfo.PrivacyPolicyUrl = privacyPolicyUrl.AsString;
+        }
+
         var settings = await botVerificationStore.GetVerifierSettingsAsync(botUserId);
         if (settings != null)
         {

@@ -46,6 +46,9 @@ internal sealed class GetBotCallbackAnswerHandler(
             // Handle BotFather bot callbacks
             if (peer.PeerId == BotFatherBotService.BotUserId)
             {
+                // Buttons marked requires_password (transferring a bot) are refused here, before any
+                // work starts, so the client can show the password error.
+                await botFatherBotService.CheckCallbackPasswordAsync(input, data, obj.Password);
                 _ = Task.Run(() => botFatherBotService.HandleCallbackAsync(input, input.UserId, obj.MsgId, data));
                 return new MyTelegram.Schema.Messages.TBotCallbackAnswer { CacheTime = 0 };
             }

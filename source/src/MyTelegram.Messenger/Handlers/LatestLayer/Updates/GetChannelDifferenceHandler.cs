@@ -25,7 +25,8 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Updates;
 /// </remarks>
 internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppService, IQueryProcessor queryProcessor, IAckCacheService ackCacheService, //ILayeredService<IDifferenceConverter> layeredService,
  IDifferenceConverterService differenceConverterService, ILogger<GetChannelDifferenceHandler> logger, IChannelAppService channelAppService,
- MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator channelPtsAllocator, IChatInvitePeekService chatInvitePeekService) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetChannelDifference, MyTelegram.Schema.Updates.IChannelDifference>
+ MyTelegram.Messenger.Services.Pts.IChannelPtsAllocator channelPtsAllocator, IChatInvitePeekService chatInvitePeekService,
+ MyTelegram.Messenger.Services.Bots.IBotGroupPrivacyFilter botGroupPrivacyFilter) : RpcResultObjectHandler<MyTelegram.Schema.Updates.RequestGetChannelDifference, MyTelegram.Schema.Updates.IChannelDifference>
 {
     //private readonly IRpcResultProcessor _rpcResultProcessor;
     private readonly ILogger<GetChannelDifferenceHandler> _logger = logger;
@@ -109,6 +110,13 @@ internal sealed class GetChannelDifferenceHandler(IMessageAppService messageAppS
             if (channelReadModel?.LinkedMonoforumId.HasValue == true)
                 chats.Add(channelReadModel.LinkedMonoforumId.Value);
             var dto = await messageAppService.GetChannelDifferenceAsync(new GetDifferenceInput(input.UserId, channelId, obj.Pts, limit, messageIds, users, chats));
+
+            // A bot in group privacy mode catches up on the same messages it is pushed live.
+            if (channelMemberReadModel is { IsBot: true } && channelReadModel != null)
+            {
+                dto.MessageList = await botGroupPrivacyFilter.FilterForBotAsync(input.UserId, channelReadModel,
+                    channelMemberReadModel, dto.MessageList);
+            }
             var maxPts = 0;
             if (updatesReadModels.Count > 0)
             {

@@ -24,7 +24,8 @@ public partial class MessageDomainEventHandler(
     IJoinChannelConverterService joinChannelConverterService,
     IPhotoAppService photoAppService,
     MessagePushDataBuilder pushDataBuilder,
-    IMongoDatabase mongoDatabase)
+    IMongoDatabase mongoDatabase,
+    MyTelegram.Messenger.Services.Bots.IBotGroupPrivacyFilter botGroupPrivacyFilter)
     : DomainEventHandlerBase(objectMessageSender,
             commandBus,
             idGenerator,
@@ -730,6 +731,11 @@ public partial class MessageDomainEventHandler(
             }
         }
 
+        // Bots in group privacy mode do not get messages that are not meant for them.
+        var privacyExcludedBotIds = await botGroupPrivacyFilter.GetExcludedBotIdsAsync(channelReadModel, item,
+            aggregateEvent.MentionedUserIds);
+        var excludedMemberIds = (aggregateEvent.MentionedUserIds ?? []).Concat(privacyExcludedBotIds).ToList();
+
         var adminUserIds = channelReadModel.AdminList.Select(p => p.UserId).ToList();
         adminUserIds.Insert(0, channelReadModel.CreatorId);
 
@@ -750,7 +756,8 @@ public partial class MessageDomainEventHandler(
                 channelAdminUpdates,
                 aggregateEvent.RequestInfo.AuthKeyId,
                 updatesType: updatesType,
-                skipSaveUpdates: true
+                skipSaveUpdates: true,
+                excludeUserIds: privacyExcludedBotIds.Count > 0 ? privacyExcludedBotIds : null
             );
         }
 
@@ -765,7 +772,7 @@ public partial class MessageDomainEventHandler(
                 excludeUserId:aggregateEvent.RequestInfo.UserId,
                 updatesType: updatesType,
                 skipSaveUpdates: true,
-                excludeUserIds: aggregateEvent.MentionedUserIds
+                excludeUserIds: excludedMemberIds.Count > 0 ? excludedMemberIds : null
             )
             ;
     }

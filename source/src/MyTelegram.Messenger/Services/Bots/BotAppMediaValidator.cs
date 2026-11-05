@@ -61,4 +61,26 @@ public static class BotAppMediaValidator
 
         return document.Attributes.Any(a => a is TDocumentAttributeAnimated);
     }
+
+    /// <summary>The sizes real BotFather accepts for a description GIF.</summary>
+    public static readonly (int Width, int Height)[] DescriptionAnimationSizes = [(320, 180), (640, 360), (960, 540)];
+
+    /// <summary>
+    /// True when the media is an animation of one of <see cref="DescriptionAnimationSizes"/>, the GIF a
+    /// bot's "What can this bot do?" block may show.
+    /// </summary>
+    public static bool IsValidDescriptionAnimation(IMessageMedia? media)
+    {
+        if (!IsAnimation(media) || media is not TMessageMediaDocument { Document: TDocument document })
+        {
+            return false;
+        }
+
+        return document.Attributes.Any(a => a switch
+        {
+            TDocumentAttributeVideo video => DescriptionAnimationSizes.Contains((video.W, video.H)),
+            TDocumentAttributeImageSize image => DescriptionAnimationSizes.Contains((image.W, image.H)),
+            _ => false
+        });
+    }
 }

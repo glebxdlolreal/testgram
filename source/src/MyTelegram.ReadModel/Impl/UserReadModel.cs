@@ -99,6 +99,15 @@ public class UserReadModel : IUserReadModel,
     /// </summary>
     public bool BotBusiness { get; private set; }
 
+    /// <summary>Written by @BotFather (/setjoingroups); like <see cref="BotBusiness"/> it has no event.</summary>
+    public bool BotNochats { get; private set; }
+
+    /// <summary>Written by @BotFather (/setinline); like <see cref="BotBusiness"/> it has no event.</summary>
+    public string? BotInlinePlaceholder { get; private set; }
+
+    /// <summary>Written by @BotFather (/setprivacy); like <see cref="BotBusiness"/> it has no event.</summary>
+    public bool BotPrivacyMode { get; private set; }
+
     // Auto-delete default TTL (in seconds)
     public int? DefaultHistoryTTL { get; private set; }
 

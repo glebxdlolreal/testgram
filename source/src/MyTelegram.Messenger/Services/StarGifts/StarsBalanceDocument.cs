@@ -56,6 +56,9 @@ public class StarsTransactionDocument
     public bool StargiftDropOriginalDetails { get; set; }
     public bool PhonegroupMessage { get; set; }
     public int? PaidMessages { get; set; }
+
+    /// <summary><c>starsTransaction.floodskip_number</c>: the paid broadcast messages this row bills.</summary>
+    public int? FloodskipNumber { get; set; }
     public int? MsgId { get; set; }
     public int? TransactionDate { get; set; }
     public string? TransactionUrl { get; set; }

@@ -63,7 +63,7 @@ public static class StarsBalanceHelper
         bool pending = false, bool failed = false, bool refund = false, bool reaction = false,
         bool businessTransfer = false, bool stargiftResale = false, bool postsSearch = false,
         bool stargiftPrepaidUpgrade = false, bool stargiftDropOriginalDetails = false,
-        bool phonegroupMessage = false, int? paidMessages = null, int? msgId = null,
+        bool phonegroupMessage = false, int? paidMessages = null, int? msgId = null, int? floodskipNumber = null,
         int? transactionDate = null, string? transactionUrl = null, string? description = null,
         TVector<IMessageMedia>? extendedMedia = null)
     {
@@ -100,6 +100,7 @@ public static class StarsBalanceHelper
             StargiftDropOriginalDetails = stargiftDropOriginalDetails,
             PhonegroupMessage = phonegroupMessage,
             PaidMessages = paidMessages,
+            FloodskipNumber = floodskipNumber,
             MsgId = msgId,
             TransactionDate = transactionDate,
             TransactionUrl = transactionUrl,
@@ -194,6 +195,7 @@ public static class StarsBalanceHelper
             StargiftDropOriginalDetails = BoolField("StargiftDropOriginalDetails"),
             PhonegroupMessage = BoolField("PhonegroupMessage"),
             PaidMessages = IntField("PaidMessages"),
+            FloodskipNumber = IntField("FloodskipNumber"),
             MsgId = IntField("MsgId"),
             ExtendedMedia = doc.Contains("ExtendedMedia") && doc["ExtendedMedia"].IsBsonArray
                 ? new TVector<IMessageMedia>(doc["ExtendedMedia"].AsBsonArray.Select(x =>
@@ -282,6 +284,7 @@ public static class StarsBalanceHelper
             StargiftDropOriginalDetails = doc.StargiftDropOriginalDetails,
             PhonegroupMessage = doc.PhonegroupMessage,
             PaidMessages = doc.PaidMessages,
+            FloodskipNumber = doc.FloodskipNumber,
             MsgId = doc.MsgId,
             ExtendedMedia = doc.ExtendedMedia?.Count > 0
                 ? new TVector<IMessageMedia>(doc.ExtendedMedia.Select(x =>

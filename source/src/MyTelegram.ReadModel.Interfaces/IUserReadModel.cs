@@ -67,6 +67,18 @@ public interface IUserReadModel : IReadModel
     /// <summary><c>user.bot_business</c>: the bot can be connected to business accounts.</summary>
     bool BotBusiness { get; }
 
+    /// <summary><c>user.bot_nochats</c>: the owner blocked group invitations through @BotFather.</summary>
+    bool BotNochats { get; }
+
+    /// <summary><c>user.bot_inline_placeholder</c>; clients only offer inline mode for bots that have one.</summary>
+    string? BotInlinePlaceholder { get; }
+
+    /// <summary>
+    /// Group privacy mode set with @BotFather's /setprivacy: the bot only receives group messages meant
+    /// for it. Served as <c>user.bot_chat_history</c>, which is its negation.
+    /// </summary>
+    bool BotPrivacyMode { get; }
+
     int? DefaultHistoryTTL { get; }
     string? MainProfileTab { get; }
 }

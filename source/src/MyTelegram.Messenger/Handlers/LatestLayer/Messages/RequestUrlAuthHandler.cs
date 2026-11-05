@@ -6,10 +6,11 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✖] [Anonymous ✖]
 /// </remarks>
-internal sealed class RequestUrlAuthHandler : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestRequestUrlAuth, MyTelegram.Schema.IUrlAuthResult>
+internal sealed class RequestUrlAuthHandler(MyTelegram.Messenger.Services.Bots.IUrlAuthService urlAuthService)
+    : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestRequestUrlAuth, MyTelegram.Schema.IUrlAuthResult>
 {
     protected override Task<MyTelegram.Schema.IUrlAuthResult> HandleCoreAsync(IRequestInput input, MyTelegram.Schema.Messages.RequestRequestUrlAuth obj)
     {
-        throw new NotImplementedException();
+        return urlAuthService.RequestAsync(input, obj.Peer, obj.MsgId, obj.ButtonId, obj.Url);
     }
 }

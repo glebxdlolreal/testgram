@@ -71,7 +71,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-public sealed class ForwardMessagesHandler(ICommandBus commandBus, IPeerHelper peerHelper, IChannelAppService channelAppService, IMessageAppService messageAppService, IQueryProcessor queryProcessor, IMongoDatabase mongoDatabase, IMessageEncryptionHelper messageEncryptionHelper, IBlockCacheAppService blockCacheAppService, IPrivacyAppService privacyAppService, IUserAppService userAppService, IMessageEffectAppService messageEffectAppService, ITopPeerUsageRecorder topPeerUsageRecorder) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestForwardMessages, MyTelegram.Schema.IUpdates>
+public sealed class ForwardMessagesHandler(ICommandBus commandBus, IPeerHelper peerHelper, IChannelAppService channelAppService, IMessageAppService messageAppService, IQueryProcessor queryProcessor, IMongoDatabase mongoDatabase, IMessageEncryptionHelper messageEncryptionHelper, IBlockCacheAppService blockCacheAppService, IPrivacyAppService privacyAppService, IUserAppService userAppService, IMessageEffectAppService messageEffectAppService, ITopPeerUsageRecorder topPeerUsageRecorder, MyTelegram.Messenger.Services.Bots.IBotBroadcastLimiter botBroadcastLimiter) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestForwardMessages, MyTelegram.Schema.IUpdates>
 {
     public async Task<IUpdates> HandleAsync(IRequestInput input, RequestForwardMessages obj)
     {
@@ -342,6 +342,8 @@ public sealed class ForwardMessagesHandler(ICommandBus commandBus, IPeerHelper p
             return null!;
         }
 
+        // Bots: the broadcast limit, and the paid messages over it (allow_paid_floodskip).
+        await botBroadcastLimiter.CheckAsync(input.UserId, inputs.Count, obj.AllowPaidFloodskip);
         await messageAppService.SendMessageAsync(inputs);
         await RecordForwardUsageAsync(input, toPeer);
 

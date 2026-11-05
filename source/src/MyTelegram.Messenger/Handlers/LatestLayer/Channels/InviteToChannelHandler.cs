@@ -58,6 +58,17 @@ internal sealed class InviteToChannelHandler(ICommandBus commandBus, IPeerHelper
                 }
             }
 
+            // Turned off with @BotFather's /setjoingroups; channels are still allowed.
+            if (!channelReadModel!.Broadcast)
+            {
+                var invitedBotIds = userIds.Where(peerHelper.IsBotUser).ToList();
+                if (invitedBotIds.Count > 0 &&
+                    (await userAppService.GetListAsync(invitedBotIds)).Any(p => p.BotNochats))
+                {
+                    RpcErrors.RpcErrors400.BotGroupsBlocked.ThrowRpcError();
+                }
+            }
+
             // Users whose privacy settings forbid the invite are reported back as missingInvitee
             // rather than failing the request, so the remaining users still get added.
             var privacyRestrictedUserIdList = new List<long>();

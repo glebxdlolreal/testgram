@@ -171,7 +171,7 @@ public sealed class ChannelDifferencePublicationTests
                 updates.Object, Mock.Of<IMinConstructorReducer>(), null!, null!);
             _handler = new GetChannelDifferenceHandler(messages.Object, this, Acks, converter,
                 NullLogger<GetChannelDifferenceHandler>.Instance, channels.Object, allocator.Object,
-                Mock.Of<IChatInvitePeekService>());
+                Mock.Of<IChatInvitePeekService>(), Mock.Of<MyTelegram.Messenger.Services.Bots.IBotGroupPrivacyFilter>());
         }
 
         public void AddDeletion()

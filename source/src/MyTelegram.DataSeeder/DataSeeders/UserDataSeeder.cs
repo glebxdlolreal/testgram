@@ -30,6 +30,7 @@ public class UserDataSeeder(
             await CreateChatImporterBotUserAsync();
             await CreateGifSearchBotUserAsync();
             await CreatePremiumBotUserAsync();
+            await UpdateBotFatherProfileAsync();
 
             return;
         }
@@ -232,9 +233,90 @@ public class UserDataSeeder(
         {
             await commandBus.PublishAsync(
                 new SetVerifiedCommand(UserId.Create(MyTelegramConsts.BotFatherUserId), true));
-            await UpdateUserBioAsync(MyTelegramConsts.BotFatherUserId,
-                "I can help you create and manage bots. Use /start to begin.");
         }
+
+        await UpdateBotFatherProfileAsync();
+    }
+
+    /// <summary>
+    /// Real @BotFather's about text, description and "/" menu (measured 2026-11-02), trimmed to the
+    /// commands BotFatherBotService answers. They live in the documents <c>bots.setBotCommands</c> and
+    /// <c>bots.setBotInfo</c> write, so getFullUser serves them.
+    /// </summary>
+    private async Task UpdateBotFatherProfileAsync()
+    {
+        var userId = MyTelegramConsts.BotFatherUserId;
+        var user = await queryProcessor.ProcessAsync(new GetUserByIdQuery(userId));
+        if (user == null)
+        {
+            return;
+        }
+
+        // The first wording this seeder wrote is replaced, anything else an operator set is left alone.
+        // Installs that predate the seeder have BotFather in the read model only, where a user command
+        // fails as "is new" and would end the seeding run.
+        var aggregate = new UserAggregate(UserId.Create(userId));
+        await aggregate.LoadAsync(eventStore, snapshotStore, CancellationToken.None);
+        if (!aggregate.IsNew &&
+            (string.IsNullOrEmpty(user.About) ||
+             user.About == "I can help you create and manage bots. Use /start to begin."))
+        {
+            await UpdateUserBioAsync(userId,
+                "BotFather is the one bot to rule them all. Use it to create new bot accounts and manage your existing bots.");
+        }
+
+        var commands = new BsonArray();
+        foreach (var (command, description) in new[]
+                 {
+                     ("newbot", "create a new bot"),
+                     ("mybots", "edit your bots"),
+                     ("myapps", "edit your web apps"),
+                     ("token", "get authorization token"),
+                     ("revoke", "revoke bot access token"),
+                     ("setname", "change a bot's name"),
+                     ("setdescription", "change bot description"),
+                     ("setabouttext", "change bot about info"),
+                     ("setuserpic", "change bot profile photo"),
+                     ("setinline", "change inline settings"),
+                     ("setcommands", "change bot commands list"),
+                     ("setjoingroups", "can your bot be added to groups?"),
+                     ("setdomain", "link website's domain to the bot"),
+                     ("setprivacy", "what messages does your bot see in groups?"),
+                     ("deletebot", "delete a bot"),
+                     ("newapp", "create a new web app"),
+                     ("listapps", "get a list of your web apps"),
+                     ("editapp", "edit a web app"),
+                     ("deleteapp", "delete an existing web app"),
+                     ("cancel", "cancel the current operation")
+                 })
+        {
+            commands.Add(new BsonDocument { ["Command"] = command, ["Description"] = description });
+        }
+
+        await database.GetCollection<BsonDocument>("bot_commands").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotId", userId) &
+            Builders<BsonDocument>.Filter.Eq("ScopeType", "TBotCommandScopeDefault") &
+            Builders<BsonDocument>.Filter.Eq("PeerId", BsonNull.Value) &
+            Builders<BsonDocument>.Filter.Eq("LangCode", ""),
+            Builders<BsonDocument>.Update
+                .Set("BotId", userId)
+                .Set("ScopeType", "TBotCommandScopeDefault")
+                .Set("PeerId", BsonNull.Value)
+                .Set("LangCode", "")
+                .Set("Commands", commands)
+                .Set("UpdatedAt", DateTime.UtcNow),
+            new UpdateOptions { IsUpsert = true });
+
+        await database.GetCollection<BsonDocument>("bot_info").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotId", userId) & Builders<BsonDocument>.Filter.Eq("LangCode", ""),
+            Builders<BsonDocument>.Update
+                .Set("BotId", userId)
+                .Set("LangCode", "")
+                .Set("Description", "BotFather is the one bot to rule them all. Use it to create new bot accounts " +
+                                    "and manage your existing bots.\n\nAbout Telegram bots:\nhttps://core.telegram.org/bots\n" +
+                                    "Bot API manual:\nhttps://core.telegram.org/bots/api")
+                .Set("UpdatedAt", DateTime.UtcNow),
+            new UpdateOptions { IsUpsert = true });
     }
 
     /// <summary>

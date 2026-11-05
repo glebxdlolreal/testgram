@@ -31,24 +31,7 @@ internal sealed class SetBotGroupDefaultAdminRightsHandler(
 
         var existingDoc = await collection.Find(filter).FirstOrDefaultAsync();
 
-        var newRightsDoc = new BsonDocument
-        {
-            ["ChangeInfo"] = obj.AdminRights.ChangeInfo,
-            ["PostMessages"] = obj.AdminRights.PostMessages,
-            ["EditMessages"] = obj.AdminRights.EditMessages,
-            ["DeleteMessages"] = obj.AdminRights.DeleteMessages,
-            ["BanUsers"] = obj.AdminRights.BanUsers,
-            ["InviteUsers"] = obj.AdminRights.InviteUsers,
-            ["PinMessages"] = obj.AdminRights.PinMessages,
-            ["AddAdmins"] = obj.AdminRights.AddAdmins,
-            ["Anonymous"] = obj.AdminRights.Anonymous,
-            ["ManageCall"] = obj.AdminRights.ManageCall,
-            ["Other"] = obj.AdminRights.Other,
-            ["ManageTopics"] = obj.AdminRights.ManageTopics,
-            ["PostStories"] = obj.AdminRights.PostStories,
-            ["EditStories"] = obj.AdminRights.EditStories,
-            ["DeleteStories"] = obj.AdminRights.DeleteStories
-        };
+        var newRightsDoc = MyTelegram.Messenger.Services.Bots.BotDefaultAdminRights.ToDocument(obj.AdminRights);
 
         if (existingDoc != null && existingDoc.Contains("AdminRights"))
         {

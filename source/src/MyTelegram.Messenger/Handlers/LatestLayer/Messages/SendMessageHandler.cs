@@ -88,7 +88,7 @@ namespace MyTelegram.Messenger.Handlers.LatestLayer.Messages;
 /// <remarks>
 /// Access: [User ✔] [Bot ✔] [Anonymous ✖]
 /// </remarks>
-internal sealed class SendMessageHandler(IMessageAppService messageAppService, IPeerHelper peerHelper, IChannelAppService channelAppService, IOptions<MyTelegramMessengerServerOptions> options, IQueryProcessor queryProcessor, IConnectionMultiplexer redis, IMongoDatabase mongoDatabase, IBotFatherBotService botFatherBotService, IPremiumBotService premiumBotService, IObjectMessageSender objectMessageSender, IPrivacyAppService privacyAppService, IMessageEffectAppService messageEffectAppService, ILogger<SendMessageHandler> logger) : RpcResultObjectHandler<RequestSendMessage, IUpdates>
+internal sealed class SendMessageHandler(IMessageAppService messageAppService, IPeerHelper peerHelper, IChannelAppService channelAppService, IOptions<MyTelegramMessengerServerOptions> options, IQueryProcessor queryProcessor, IConnectionMultiplexer redis, IMongoDatabase mongoDatabase, IBotFatherBotService botFatherBotService, IPremiumBotService premiumBotService, IObjectMessageSender objectMessageSender, IPrivacyAppService privacyAppService, IMessageEffectAppService messageEffectAppService, ILogger<SendMessageHandler> logger, MyTelegram.Messenger.Services.Bots.IBotBroadcastLimiter botBroadcastLimiter) : RpcResultObjectHandler<RequestSendMessage, IUpdates>
 {
     protected override async Task<IUpdates> HandleCoreAsync(IRequestInput input, RequestSendMessage obj)
     {
@@ -219,6 +219,8 @@ internal sealed class SendMessageHandler(IMessageAppService messageAppService, I
         var effect = await messageEffectAppService.ValidateEffectAsync(obj.Effect, input.UserId, toPeer.PeerType);
 
         var sendMessageInput = new SendMessageInput(input.ToRequestInfo(), input.UserId, toPeer, obj.Message, obj.RandomId, obj.Entities, obj.ReplyTo, obj.ClearDraft, media: media, replyMarkup: obj.ReplyMarkup, topMsgId: topMsgId, sendAs: sendAs, effect: effect, inputQuickReplyShortcut: obj.QuickReplyShortcut, silent: obj.Silent, scheduleDate: obj.ScheduleDate, scheduleRepeatPeriod: obj.ScheduleRepeatPeriod, invertMedia: obj.InvertMedia, paidMessageStars: paidMessageStars, ttlPeriod: ttlPeriod, savedPeerId: savedPeerId, suggestedPost: obj.SuggestedPost, noForwards: obj.Noforwards);
+        // Bots: the broadcast limit, and the paid messages over it (allow_paid_floodskip).
+        await botBroadcastLimiter.CheckAsync(input.UserId, 1, obj.AllowPaidFloodskip);
         await messageAppService.SendMessageAsync([sendMessageInput]);
 
 

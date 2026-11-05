@@ -50,15 +50,10 @@ internal sealed class CreateChatHandler(ICommandBus commandBus, IIdGenerator idG
         memberUserIds.RemoveAll(privacyRestrictedUserIdList.Contains);
         if (botUserIds.Count > 0)
         {
-            var botReadModels = await queryProcessor.ProcessAsync(new GetBotListQuery(botUserIds));
-            var needRemoveUserIdsFromList = new List<long>();
-            foreach (var botReadModel in botReadModels)
-            {
-                if (!botReadModel.AllowJoinGroups)
-                {
-                    needRemoveUserIdsFromList.Add(botReadModel.UserId);
-                }
-            }
+            // GetBotListQuery has no handler, so asking it failed every createChat that included a bot.
+            // Bots whose owner turned groups off with @BotFather's /setjoingroups are left out.
+            var botReadModels = await queryProcessor.ProcessAsync(new GetUsersByUserIdListQuery(botUserIds));
+            var needRemoveUserIdsFromList = botReadModels.Where(p => p.BotNochats).Select(p => p.UserId).ToList();
 
             botUserIds.RemoveAll(needRemoveUserIdsFromList.Contains);
             memberUserIds.RemoveAll(needRemoveUserIdsFromList.Contains);

@@ -42,6 +42,12 @@ internal sealed class UserMapper
         if (source.GlobalPrivacySettings?.NoncontactPeersPaidStars > 0)
             destination.SendPaidMessagesStars = source.GlobalPrivacySettings.NoncontactPeersPaidStars;
         destination.BotHasMainApp = source.BotHasMainApp;
+
+        // Real @BotFather cannot be added to groups either.
+        destination.BotNochats = source.Bot &&
+                                 (source.BotNochats || source.UserId == MyTelegramConsts.BotFatherUserId);
+        destination.BotInlinePlaceholder = source.Bot ? source.BotInlinePlaceholder : null;
+        destination.BotChatHistory = source.Bot && !source.BotPrivacyMode;
         destination.BotActiveUsers = source.BotActiveUsers;
 
         // The owner's view, disabled collectibles included; the converter service hides those from

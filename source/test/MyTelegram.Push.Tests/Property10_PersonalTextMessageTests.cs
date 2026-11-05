@@ -181,6 +181,9 @@ internal sealed class StubUserReadModel : IUserReadModel
     public BusinessAwayItem? BusinessAwaySettings => null;
     public BusinessIntroItem? BusinessIntroSettings => null;
     public bool BotBusiness => false;
+    public bool BotNochats => false;
+    public string? BotInlinePlaceholder => null;
+    public bool BotPrivacyMode => false;
     public int? DefaultHistoryTTL => null;
     public string? MainProfileTab => null;
 }

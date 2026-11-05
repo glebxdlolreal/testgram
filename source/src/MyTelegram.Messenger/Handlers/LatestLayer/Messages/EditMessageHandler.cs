@@ -73,7 +73,8 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
     IScheduledMessageDispatcher scheduledMessageDispatcher,
     IGeoProximityAlertService geoProximityAlertService,
     IUserAppService userAppService,
-    IMessageEncryptionHelper messageEncryptionHelper, IPremiumLimitGuard premiumLimitGuard) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestEditMessage, MyTelegram.Schema.IUpdates>
+    IMessageEncryptionHelper messageEncryptionHelper, IPremiumLimitGuard premiumLimitGuard,
+    MyTelegram.Messenger.Services.Bots.IUrlAuthService urlAuthService) : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestEditMessage, MyTelegram.Schema.IUpdates>
 {
     private static byte[]? _encryptionKey;
     private static KeyConfig? _keyConfig;
@@ -82,6 +83,9 @@ internal sealed class EditMessageHandler(IMediaHelper mediaHelper, ICommandBus c
         // The hard ceiling applies to every text; the tighter caption limit is applied further down,
         // once the stored message is known to carry media.
         MessageLengthHelper.ValidateMessage(obj.Message);
+
+        // A bot's inputKeyboardButtonUrlAuth is input-only; clients get keyboardButtonUrlAuth.
+        obj.ReplyMarkup = await urlAuthService.NormalizeAsync(input.UserId, obj.ReplyMarkup);
 
         var peer = peerHelper.GetPeer(obj.Peer, input.UserId);
         var ownerPeerId = input.UserId;

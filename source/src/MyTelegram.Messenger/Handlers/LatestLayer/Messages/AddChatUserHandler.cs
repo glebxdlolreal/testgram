@@ -39,7 +39,8 @@ internal sealed class AddChatUserHandler(
     IPrivacyAppService privacyAppService,
     IChannelAppService channelAppService,
     IQueryProcessor queryProcessor,
-    IChannelAdminRightsChecker channelAdminRightsChecker)
+    IChannelAdminRightsChecker channelAdminRightsChecker,
+    IUserAppService userAppService)
     : RpcResultObjectHandler<MyTelegram.Schema.Messages.RequestAddChatUser, MyTelegram.Schema.Messages.IInvitedUsers>
 {
     protected override async Task<MyTelegram.Schema.Messages.IInvitedUsers> HandleCoreAsync(IRequestInput input, RequestAddChatUser obj)
@@ -89,6 +90,14 @@ internal sealed class AddChatUserHandler(
         }
 
         var botUserIds = peerHelper.IsBotUser(targetUserId) ? new List<long> { targetUserId } : [];
+
+        // Turned off with @BotFather's /setjoingroups; channels are still allowed.
+        if (botUserIds.Count > 0 && !channelReadModel.Broadcast &&
+            (await userAppService.GetAsync(targetUserId))?.BotNochats == true)
+        {
+            RpcErrors.RpcErrors400.BotGroupsBlocked.ThrowRpcError();
+        }
+
         var command = new StartInviteToChannelCommand(TempId.New,
             input.ToRequestInfo(),
             channelId,

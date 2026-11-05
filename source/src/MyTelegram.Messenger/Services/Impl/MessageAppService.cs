@@ -10,6 +10,7 @@ using MyTelegram.Messenger.Services.VideoProcessing;
 namespace MyTelegram.Messenger.Services.Impl;
 
 public class MessageAppService(
+    MyTelegram.Messenger.Services.Bots.IUrlAuthService urlAuthService,
     IQueryProcessor queryProcessor,
     ICommandBus commandBus,
     IObjectMapper objectMapper,
@@ -947,7 +948,8 @@ public class MessageAppService(
             FwdHeader: input.FwdHeader,
             PollId: input.PollId,
             Post: post,
-            ReplyMarkup: input.ReplyMarkup,
+            // A bot's inputKeyboardButtonUrlAuth is input-only; clients get keyboardButtonUrlAuth.
+            ReplyMarkup: await urlAuthService.NormalizeAsync(input.SenderUserId, input.ReplyMarkup),
             TopMsgId: topMsgId,
             ForumTopic: topMsgId.HasValue && channelReadModel?.Forum == true,
             PostAuthor: postAuthor,

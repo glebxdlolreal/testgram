@@ -1,3 +1,4 @@
+using System.Text;
 using MyTelegram.Messenger.Services.Premium;
 using MongoDB.Bson;
 using MongoDB.Driver;
@@ -9,6 +10,8 @@ namespace MyTelegram.Messenger.Services.Bots;
 public interface IBotFatherBotService
 {
     Task HandleMessageAsync(IRequestInput input, long fromUserId, string message);
+
+    /// <param name="msgId">The id of the pressed message in the <em>user's</em> box, as messages.getBotCallbackAnswer carries it.</param>
     Task HandleCallbackAsync(IRequestInput input, long fromUserId, int msgId, string data);
 
     /// <summary>
@@ -16,9 +19,20 @@ public interface IBotFatherBotService
     /// </summary>
     /// <param name="media">The saved media, as produced by <c>IMediaHelper.SaveMediaAsync</c>.</param>
     Task HandleMediaAsync(IRequestInput input, long fromUserId, IMessageMedia? media);
+
+    /// <summary>
+    /// Checks the 2FA password of a requires_password button (transferring a bot) and throws the RPC
+    /// error the client shows; other buttons pass.
+    /// </summary>
+    Task CheckCallbackPasswordAsync(IRequestInput input, string data, IInputCheckPasswordSRP? password);
 }
 
-public class BotFatherBotService(
+/// <summary>
+/// The in-process @BotFather. Texts, keyboards and entities follow real BotFather (measured 2026-11-02
+/// with Telethon); only commands this server can carry out are offered. Menus reached through inline
+/// buttons are edited in place, everything typed is answered with a new message.
+/// </summary>
+public partial class BotFatherBotService(
     IMessageAppService messageAppService,
     IMongoDatabase mongoDatabase,
     IConnectionMultiplexer redis,
@@ -28,34 +42,48 @@ public class BotFatherBotService(
     IPremiumLimitResolver premiumLimitResolver,
     IReadModelCacheHelper<IUserReadModel> userReadModelCacheHelper,
     MyTelegram.Messenger.Services.Business.IBusinessConnectionStore businessConnectionStore,
-    MyTelegram.Messenger.Services.Business.IBusinessBotNotifier businessBotNotifier) : IBotFatherBotService, ISingletonDependency
+    MyTelegram.Messenger.Services.Business.IBusinessBotNotifier businessBotNotifier,
+    IDataEncryptionHelper dataEncryptionHelper,
+    IOptionsMonitor<MyTelegramMessengerServerOptions> serverOptions,
+    MyTelegram.Messenger.Services.TwoFactor.ITwoFactorService twoFactorService,
+    IBotBroadcastLimiter botBroadcastLimiter,
+    ILogger<BotFatherBotService> logger) : IBotFatherBotService, ISingletonDependency
 {
     public const long BotUserId = MyTelegramConsts.BotFatherUserId;
     private const string BotCollection = "botfather-bot-state";
+    private const string UserCollection = "eventflow-userreadmodel";
+    private const int BotsPerPage = 6;
 
-    private const string WelcomeText =
-        "I can help you create and manage Xiegram bots. You can control me by sending these commands:\n\n" +
-        "Managing bots\n" +
-        "/newbot - create a new bot\n" +
-        "/mybots - edit your bots\n\n" +
-        "Edit Bots\n" +
-        "/setname - change a bot's name\n" +
-        "/setdescription - change bot description\n" +
-        "/setabouttext - change bot about info\n" +
-        "/setuserpic - change bot profile photo\n" +
-        "/setcommands - change the list of commands\n" +
-        "/setinline - toggle inline mode\n\n" +
-        "Web Apps\n" +
-        "/myapps - edit your web apps\n" +
-        "/newapp - create a new web app\n" +
-        "/listapps - get a list of your web apps\n" +
-        "/editapp - edit a web app\n" +
-        "/deleteapp - delete an existing web app\n" +
-        "/deletebot - delete a bot\n\n" +
-        "Bot Settings\n" +
-        "/token - get authorization token\n" +
-        "/revoke - revoke bot access token\n" +
-        "/setpublickey - set the public key for Telegram Passport";
+    // Limits of the Bot API methods the same fields are set through.
+    private const int MaxNameLength = 64;
+    private const int MaxAboutLength = 120;
+    private const int MaxDescriptionLength = 512;
+    private const int MaxCommandCount = 100;
+    private const int MaxInlinePlaceholderLength = 64;
+    private const int MaxMenuButtonTextLength = 64;
+
+    private const string BotsManualUrl = "https://core.telegram.org/bots";
+    private const string BotApiUrl = "https://core.telegram.org/bots/api";
+    private const string DeleteConfirmation = "Yes, I am totally sure.";
+    private const string InvalidBotText = "Invalid bot selected.";
+    private const string LoginWidgetUrl = "https://core.telegram.org/widgets/login";
+    private const string TransferConfirmation = "Yes, I am sure, proceed.";
+
+    /// <summary>Prod refuses a transfer for a week after the 2FA password was set.</summary>
+    private static readonly TimeSpan TransferPasswordAge = TimeSpan.FromDays(7);
+
+    private const string UserpicPrompt = "OK. Send me the new profile photo for the bot.";
+
+    private const string DescriptionPicPrompt =
+        "OK. Please upload a description photo for the bot, 640x360 pixels. Or a GIF,  320x180, 640x360 or 960x540 " +
+        "pixels. People will see this photo or GIF when they open a chat with your bot, in a block titled 'What can " +
+        "this bot do?'. Use /empty to remove the current picture.";
+
+    private static readonly BotText DomainPrompt = new BotText("Link your website with your bot to use the ")
+        .Bold("Telegram Login Widget")
+        .Append($". Widget documentation:\n{LoginWidgetUrl}\n\nUse /empty to remove.");
+
+    private static readonly BotText HelpText = BuildHelpText();
 
     private const string GenerateKeyInstructions =
         "openssl genrsa 2048 > private.key\n\n" +
@@ -83,8 +111,35 @@ public class BotFatherBotService(
         "Your private key was compromised so please generate the new one using:\n\n" +
         GenerateKeyInstructions;
 
+    private const string NamePrompt = "OK. Send me the new name for your bot.";
+
+    private const string AboutPrompt =
+        "OK. Send me the new 'About' text. People will see this text on the bot's profile page and it will be " +
+        "sent together with a link to your bot when they share it with someone.";
+
+    private const string DescriptionPrompt =
+        "OK. Send me the new description for the bot. People will see this description when they open a chat " +
+        "with your bot, in a block titled 'What can this bot do?'.";
+
+    private const string CommandsPrompt =
+        "OK. Send me a list of commands for your bot. Please use this format:\n\n" +
+        "command1 - Description\ncommand2 - Another description\n\nSend /empty to keep the list empty.";
+
+    private const string MenuButtonUrlPrompt =
+        "Send me the URL that will be opened by tapping the menu button. \n\n" +
+        "Use /empty to use the default behavior for the menu button.";
+
+    private static readonly BotText PrivacyPolicyPrompt = new BotText()
+        .Append("Send me a public URL to the new Privacy Policy for the bot or use /empty to remove the current one.\n\n" +
+                "If you don't specify a Privacy Policy, the ")
+        .Link("Standard Privacy Policy for Bots and Mini Apps", "https://telegram.org/privacy-tpa")
+        .Append(" will apply.");
+
     // --- State keys ---
-    private string StateKey(long userId) => $"botfather:state:{userId}";
+    private static string StateKey(long userId) => $"botfather:state:{userId}";
+
+    /// <summary>Values that may contain ':' (URLs) and so cannot travel inside the state string.</summary>
+    private static string StateValueKey(long userId) => $"botfather:state-value:{userId}";
 
     private async Task SetStateAsync(long userId, string state, int ttl = 300)
         => await redis.GetDatabase().StringSetAsync(StateKey(userId), state, TimeSpan.FromSeconds(ttl));
@@ -93,46 +148,68 @@ public class BotFatherBotService(
         => await redis.GetDatabase().StringGetAsync(StateKey(userId));
 
     private async Task ClearStateAsync(long userId)
-        => await redis.GetDatabase().KeyDeleteAsync(StateKey(userId));
+        => await redis.GetDatabase().KeyDeleteAsync([StateKey(userId), StateValueKey(userId)]);
 
     // --- Entry points ---
 
     public async Task HandleMessageAsync(IRequestInput input, long fromUserId, string message)
     {
-        var text = message.Trim();
-        var cmd = text.Split(' ')[0].ToLower();
+        try
+        {
+            await HandleMessageCoreAsync(input, fromUserId, message);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "BotFather failed to answer {UserId}", fromUserId);
+        }
+    }
 
-        // Check FSM state first. /empty is the one command that belongs to the flow rather than to the
-        // top level menu - several prompts offer it as the way to clear the value being asked for.
+    public async Task HandleCallbackAsync(IRequestInput input, long fromUserId, int msgId, string data)
+    {
+        try
+        {
+            await HandleCallbackCoreAsync(input, fromUserId, msgId, data);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "BotFather failed to answer callback {Data} of {UserId}", data, fromUserId);
+        }
+    }
+
+    private async Task HandleMessageCoreAsync(IRequestInput input, long fromUserId, string message)
+    {
+        var text = message.Trim();
+        var cmd = text.Split(' ', '\n')[0].ToLowerInvariant();
+
+        // "/start@BotFather" is how commands look when they are picked from the menu in some clients.
+        var at = cmd.IndexOf('@');
+        if (cmd.StartsWith('/') && at > 0)
+        {
+            cmd = cmd[..at];
+        }
+
+        if (cmd == "/cancel")
+        {
+            await CancelAsync(input, fromUserId);
+            return;
+        }
+
+        // /empty and /skip belong to the flow that offered them rather than to the top level menu.
         var state = await GetStateAsync(fromUserId);
-        if (state != null && (!cmd.StartsWith("/") || cmd == "/empty"))
+        if (state != null && (!cmd.StartsWith('/') || cmd is "/empty" or "/skip"))
         {
             await HandleStateInputAsync(input, fromUserId, state, text);
             return;
         }
 
+        await ClearStateAsync(fromUserId);
         switch (cmd)
         {
             case "/start":
-                await ClearStateAsync(fromUserId);
-                // Check for deep link parameter
-                var startParam = text.Length > 7 ? text.Substring(7).Trim() : "";
-                if (startParam.StartsWith("bizChat"))
-                {
-                    // Handle business chat deep link: /start bizChat<user_chat_id>
-                    var chatIdStr = startParam.Substring(7);
-                    await SendAsync(input, fromUserId,
-                        $"Managing business chat {chatIdStr}\n\n" +
-                        "This is where you would manage the business connection for this specific chat. " +
-                        "You can configure bot behavior, view chat history, and manage permissions.");
-                }
-                else
-                {
-                    await SendAsync(input, fromUserId, WelcomeText, entities: new TVector<IMessageEntity>(BoldEntities(WelcomeText)));
-                }
+            case "/help":
+                await SendAsync(input, fromUserId, HelpText);
                 break;
             case "/newbot":
-                await ClearStateAsync(fromUserId);
                 if (await IsAtBotLimitAsync(fromUserId) is { } botLimit)
                 {
                     await SendAsync(input, fromUserId, BotLimitText(botLimit));
@@ -140,176 +217,298 @@ public class BotFatherBotService(
                 }
 
                 await SetStateAsync(fromUserId, "newbot:name");
-                await SendAsync(input, fromUserId, "Alright, a new bot. How are we going to call it? Please choose a name for your bot.");
+                await SendAsync(input, fromUserId,
+                    "Alright, a new bot. How are we going to call it? Please choose a name for your bot.");
                 break;
             case "/mybots":
-                await ClearStateAsync(fromUserId);
                 await SendMyBotsAsync(input, fromUserId);
                 break;
             case "/token":
-                await ClearStateAsync(fromUserId);
-                await SendBotPickerAsync(input, fromUserId, "Choose a bot to get Bot API access token.", "token");
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to generate a new token.", "token");
                 break;
             case "/revoke":
-                await ClearStateAsync(fromUserId);
-                await SendBotPickerAsync(input, fromUserId, "Choose a bot to generate a new token. Warning: your old token will stop working.", "revoke");
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to revoke its access token.", "revoke");
                 break;
             case "/deletebot":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to delete.", "deletebot");
                 break;
             case "/setname":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to change name.", "setname");
                 break;
             case "/setdescription":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to change description.", "setdescription");
                 break;
             case "/setabouttext":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to change the about section.", "setabouttext");
                 break;
-            case "/setuserpic":
-                await ClearStateAsync(fromUserId);
-                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change profile photo.", "setuserpic");
-                break;
             case "/setcommands":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to change the list of commands.", "setcommands");
                 break;
             case "/setinline":
-                await ClearStateAsync(fromUserId);
-                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change inline settings.", "setinline");
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change inline queries status.", "setinline");
+                break;
+            case "/setjoingroups":
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change group membership settings.", "setjoingroups");
+                break;
+            case "/setuserpic":
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change profile photo.", "setuserpic");
+                break;
+            case "/setdescriptionpic":
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change description picture.", "setdescriptionpic");
+                break;
+            case "/setprivacy":
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change group messages settings.", "setprivacy");
+                break;
+            case "/setdomain":
+                await SendBotPickerAsync(input, fromUserId,
+                    "Choose a bot to set or change its linked domain. See Login Widget documentation for details:\n" +
+                    LoginWidgetUrl, "setdomain");
+                break;
+            case "/setprivacypolicy":
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to set a privacy policy URL.", "setprivacypolicy");
+                break;
+            case "/setmenubutton":
+                await SendBotPickerAsync(input, fromUserId, "Choose a bot to change its menu button.", "setmenubutton");
                 break;
             case "/setpublickey":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId, "Choose a bot to change public key.", "setpublickey");
                 break;
             case "/newapp":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId,
                     "Alright, a new web app. Which bot will be offering the web app?", "newapp");
                 break;
             case "/myapps":
-                await ClearStateAsync(fromUserId);
                 await SendMyAppsAsync(input, fromUserId);
                 break;
             case "/listapps":
-                await ClearStateAsync(fromUserId);
                 await SendBotPickerAsync(input, fromUserId,
                     "Please choose a bot to get a list of its web apps.", "listapps");
                 break;
             case "/editapp":
-                await ClearStateAsync(fromUserId);
                 await SetStateAsync(fromUserId, "editapp:link");
                 await SendAsync(input, fromUserId,
                     "Editing web apps. Please send me a web app link (e.g., t.me/bot/app).");
                 break;
             case "/deleteapp":
-                await ClearStateAsync(fromUserId);
                 await SetStateAsync(fromUserId, "deleteapp:link");
                 await SendAsync(input, fromUserId,
                     "To delete a web app, please send me the web app link (e.g., t.me/bot/app)");
                 break;
+            default:
+                // Real BotFather answers any other text with the command list.
+                await SendAsync(input, fromUserId,
+                    cmd.StartsWith('/') ? new BotText("Unrecognized command. Say what?") : HelpText);
+                break;
         }
     }
 
-    public async Task HandleCallbackAsync(IRequestInput input, long fromUserId, int msgId, string data)
+    private async Task CancelAsync(IRequestInput input, long fromUserId)
     {
-        Console.WriteLine($"[BotFather] HandleCallbackAsync called: fromUserId={fromUserId}, msgId={msgId}, data={data}");
-
-        var parts = data.Split(':');
-        if (parts.Length < 2)
+        var state = await GetStateAsync(fromUserId);
+        await ClearStateAsync(fromUserId);
+        if (state == null)
         {
-            Console.WriteLine($"[BotFather] Invalid callback data format: {data}");
+            await SendAsync(input, fromUserId, "No active command to cancel. I wasn't doing anything anyway. Zzzzz...");
             return;
         }
-        var action = parts[0];
-        var username = parts.Length > 1 ? parts[1] : "";
 
-        Console.WriteLine($"[BotFather] Parsed action={action}, username={username}");
+        var flow = state.Split(':')[0];
+        if (flow is "newapp" or "editapp")
+        {
+            await DeleteDraftAsync(fromUserId);
+        }
+
+        var command = flow == "mainapp" ? "setmainapp" : flow;
+        await SendAsync(input, fromUserId,
+            $"The command {command} has been cancelled. Anything else I can do for you?\n\n" +
+            $"Send /help for a list of commands. To learn more about Telegram Bots, see {BotsManualUrl}");
+    }
+
+    private async Task HandleCallbackCoreAsync(IRequestInput input, long fromUserId, int msgId, string data)
+    {
+        var parts = data.Split(':');
+        var action = parts[0];
+        var username = parts.Length > 1 ? parts[1] : string.Empty;
+
+        switch (action)
+        {
+            case "back_to_bots":
+                await ClearStateAsync(fromUserId);
+                await ShowMyBotsAsync(input, fromUserId, msgId, 0);
+                return;
+            case "bots_page":
+                await ShowMyBotsAsync(input, fromUserId, msgId, int.TryParse(username, out var page) ? page : 0);
+                return;
+            case "edit_field":
+                // edit_field:<field>:<username>
+                if (parts.Length > 2)
+                {
+                    await StartFieldEditAsync(input, fromUserId, parts[1], parts[2]);
+                }
+
+                return;
+        }
+
+        var bot = await GetBotAsync(fromUserId, username);
+        if (bot == null)
+        {
+            // Deleted since the menu was sent, or not this user's bot at all.
+            await EditMessageAsync(input, fromUserId, msgId, InvalidBotText, null);
+            return;
+        }
 
         switch (action)
         {
             case "bot_select":
-                await SendBotMenuAsync(input, fromUserId, msgId, username);
+                await ClearStateAsync(fromUserId);
+                await EditMessageAsync(input, fromUserId, msgId, BotMenuText(bot), BotMenuMarkup(username));
                 break;
             case "api_token":
-                await SendTokenAsync(input, fromUserId, msgId, username);
-                break;
-            case "edit_bot":
-                await SendEditBotAsync(input, fromUserId, msgId, username);
-                break;
-            case "bot_settings":
-                await SendBotSettingsAsync(input, fromUserId, msgId, username);
-                break;
-            case "transfer_ownership":
                 await EditMessageAsync(input, fromUserId, msgId,
-                    "You can transfer bot ownership to another Telegram user.",
+                    new BotText($"Here is the token for bot {BotName(bot)} @{username}:\n\n").Code(BotToken(bot)),
                     InlineRows(
-                        InlineRow(Btn("Choose recipient", $"soon:{username}"), Btn("« Back to Bot", $"bot_select:{username}"))
-                    ));
-                break;
-            case "delete_confirm":
-                var bot2 = await GetBotAsync(fromUserId, username);
-                if (bot2 == null) return;
-                await EditMessageAsync(input, fromUserId, msgId,
-                    $"You are about to delete your bot *{Esc(bot2["Name"].AsString)}* @{username}. Is that correct?",
-                    InlineRows(
-                        InlineRow(Btn("Nope, nevermind", $"bot_select:{username}")),
-                        InlineRow(Btn("Yes, delete the bot", $"delete_do:{username}"))
-                    ));
-                break;
-            case "delete_do":
-                await DoDeleteBotAsync(fromUserId, username);
-                await EditMessageAsync(input, fromUserId, msgId, $"Bot @{username} has been deleted.", null);
+                        InlineRow(Btn("Revoke current token", $"revoke_token:{username}")),
+                        InlineRow(Btn("« Back to Bot", $"bot_select:{username}"))));
                 break;
             case "revoke_token":
-                var newToken = await DoRevokeAsync(fromUserId, username);
+                var newToken = await DoRevokeAsync(bot);
                 await EditMessageAsync(input, fromUserId, msgId,
-                    $"Done! New token for @{username}:\n`{newToken}`",
+                    new BotText($"Token for the bot {BotName(bot)} @{username} has been revoked. New token is:\n\n")
+                        .Code(newToken),
                     InlineRows(InlineRow(Btn("« Back to Bot", $"bot_select:{username}"))));
                 break;
-            case "business_mode":
-                await SendBusinessModeMenuAsync(input, fromUserId, msgId, username);
+            case "edit_bot":
+                await ClearStateAsync(fromUserId);
+                await EditMessageAsync(input, fromUserId, msgId, await EditBotTextAsync(bot), EditBotMarkup(username));
+                break;
+            case "bot_settings":
+                await ClearStateAsync(fromUserId);
+                await EditMessageAsync(input, fromUserId, msgId, $"Settings for @{username}.", SettingsMarkup(username));
+                break;
+            case "delete_confirm":
+                await EditMessageAsync(input, fromUserId, msgId,
+                    new BotText("You are about to delete your bot ").Bold(BotName(bot))
+                        .Append($" @{username}. Is that correct?"),
+                    DeleteConfirmMarkup(username));
+                break;
+            case "delete_do":
+                await DoDeleteBotAsync(bot);
+                await EditMessageAsync(input, fromUserId, msgId, "Done! The bot is gone. /help", null);
                 break;
             case "inline_mode":
-                await SendInlineModeMenuAsync(input, fromUserId, msgId, username);
+                await SendInlineModeMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "inline_enable":
+                await StartFieldEditAsync(input, fromUserId, "inline", username);
+                break;
+            case "inline_disable":
+                await SetInlineAsync(bot, null);
+                await SendInlineModeMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "business_mode":
+                await SendBusinessModeMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "business_enable":
+                await SetBusinessModeAsync(bot, true);
+                await SendBusinessModeMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "business_disable":
+                await SetBusinessModeAsync(bot, false);
+                await SendBusinessModeMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "groups":
+                await SendGroupsMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "groups_on":
+                await SetNoChatsAsync(bot, false);
+                await SendGroupsMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "groups_off":
+                await SetNoChatsAsync(bot, true);
+                await SendGroupsMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "menu_button":
+                await SendMenuButtonMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "menu_configure":
+                await StartFieldEditAsync(input, fromUserId, "menu", username);
+                break;
+            case "menu_reset":
+                await SetMenuButtonAsync(bot, null, null);
+                await SendMenuButtonMenuAsync(input, fromUserId, msgId, bot);
                 break;
             case "configure_mini_app":
                 await SendMainAppMenuAsync(input, fromUserId, msgId, username);
                 break;
+            case "privacy":
+                await SendPrivacyMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "paid_bcast":
+                await SendPaidBroadcastMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "paid_bcast_on":
+                // The requirements are checked again: the screen may be old.
+                if (await GetPaidBroadcastProblemAsync(bot) == null)
+                {
+                    await botBroadcastLimiter.SetPaidBroadcastAsync(BotUserIdOf(bot), true);
+                }
+
+                await SendPaidBroadcastMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "paid_bcast_off":
+                await botBroadcastLimiter.SetPaidBroadcastAsync(BotUserIdOf(bot), false);
+                await SendPaidBroadcastMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "privacy_on":
+                await SetPrivacyModeAsync(bot, true);
+                await SendPrivacyMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "privacy_off":
+                await SetPrivacyModeAsync(bot, false);
+                await SendPrivacyMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "rights":
+                // rights:<username>:<g|b>
+                await SendAdminRightsMenuAsync(input, fromUserId, msgId, bot, parts.Length > 2 ? parts[2] : "g");
+                break;
+            case "rights_toggle":
+                // rights_toggle:<username>:<g|b>:<choice index>
+                if (parts.Length > 3 && int.TryParse(parts[3], out var choice))
+                {
+                    await ToggleAdminRightAsync(bot, parts[2], choice);
+                }
+
+                await SendAdminRightsMenuAsync(input, fromUserId, msgId, bot, parts.Length > 2 ? parts[2] : "g");
+                break;
+            case "domain":
+                await SendDomainMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "domain_set":
+                await StartFieldEditAsync(input, fromUserId, "domain", username);
+                break;
+            case "domain_remove":
+                await SetDomainAsync(bot, null);
+                await SendDomainMenuAsync(input, fromUserId, msgId, bot);
+                break;
+            case "transfer":
+                await EditMessageAsync(input, fromUserId, msgId, "You can transfer bot ownership to another Telegram user.",
+                    InlineRows(
+                        InlineRow(Btn("Choose recipient", $"transfer_pick:{username}")),
+                        InlineRow(Btn("« Back to Bot", $"bot_select:{username}"))));
+                break;
+            case "transfer_pick":
+                await StartFieldEditAsync(input, fromUserId, "transfer", username);
+                break;
+            case "transfer_do":
+                // transfer_do:<username>:<recipient id>; the password was checked by CheckCallbackPasswordAsync.
+                if (parts.Length > 2 && long.TryParse(parts[2], out var recipientId))
+                {
+                    await DoTransferAsync(input, fromUserId, msgId, bot, recipientId);
+                }
+
+                break;
             case "app_select":
                 await SendAppMenuAsync(input, fromUserId, msgId, username, parts.Length > 2 ? parts[2] : string.Empty);
-                break;
-            case "back_to_bots":
-                await ClearStateAsync(fromUserId);
-                await SendMyBotsAsync(input, fromUserId);
-                break;
-            case "inline_enable":
-                await SetBotInlineModeAsync(fromUserId, username, true);
-                await SendInlineModeMenuAsync(input, fromUserId, msgId, username);
-                break;
-            case "inline_disable":
-                await SetBotInlineModeAsync(fromUserId, username, false);
-                await SendInlineModeMenuAsync(input, fromUserId, msgId, username);
-                break;
-            case "business_enable":
-                await EnableBotBusinessModeAsync(input, fromUserId, username);
-                await SendBusinessModeMenuAsync(input, fromUserId, msgId, username);
-                break;
-            case "business_disable":
-                await DisableBotBusinessModeAsync(input, fromUserId, username);
-                await SendBusinessModeMenuAsync(input, fromUserId, msgId, username);
-                break;
-            case "edit_field":
-                var field = parts.Length > 2 ? parts[1] : "";
-                var botUsername = parts.Length > 2 ? parts[2] : "";
-                await HandleEditFieldAsync(input, fromUserId, msgId, field, botUsername);
-                break;
-            case "soon":
-                // no-op, just answer callback
                 break;
         }
     }
@@ -326,155 +525,576 @@ public class BotFatherBotService(
         switch (flow)
         {
             case "newbot":
-                if (step == "name")
-                {
-                    await SetStateAsync(fromUserId, $"newbot:username:{text}");
-                    await SendAsync(input, fromUserId,
-                        $"Good. Now let's choose a username for your bot. It must end in `bot`. Like this, for example: TetrisBot or tetris_bot.");
-                }
-                else if (step == "username")
-                {
-                    var name = extra;
-                    var username = text.TrimStart('@').ToLower();
-                    await ClearStateAsync(fromUserId);
-
-                    // Checked again at creation: bots may have been made in another session meanwhile.
-                    if (await IsAtBotLimitAsync(fromUserId) is { } limitAtCreation)
-                    {
-                        await SendAsync(input, fromUserId, BotLimitText(limitAtCreation));
-                        break;
-                    }
-
-                    var result = await DoCreateBotAsync(input, fromUserId, name, username);
-                    if (result != null) await SendAsync(input, fromUserId, result);
-                }
-                break;
-
-            case "setname":
-                if (step == "input")
-                {
-                    var username2 = extra;
-                    await DoSetNameAsync(fromUserId, username2, text);
-                    await ClearStateAsync(fromUserId);
-                    await SendAsync(input, fromUserId, $"Success! Name for @{username2} changed to *{Esc(text)}*.");
-                }
-                else if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendBotMenuTextAsync);
-                break;
-
-            case "setdescription":
-                if (step == "input")
-                {
-                    await DoSetFieldAsync(fromUserId, extra, "Description", text);
-                    await ClearStateAsync(fromUserId);
-                    await SendAsync(input, fromUserId, $"Success! Description for @{extra} updated.");
-                }
-                else if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendBotMenuTextAsync);
-                break;
-
-            case "setabouttext":
-                if (step == "input")
-                {
-                    await DoSetFieldAsync(fromUserId, extra, "About", text);
-                    await ClearStateAsync(fromUserId);
-                    // Also update DB userreadmodel
-                    await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel")
-                        .UpdateOneAsync(new BsonDocument("UserName", extra), new BsonDocument("$set", new BsonDocument("About", text)));
-                    await SendAsync(input, fromUserId, $"Success! About text for @{extra} updated.");
-                }
-                else if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendBotMenuTextAsync);
-                break;
-            case "token":
-                if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendTokenTextAsync);
-                break;
-            case "revoke":
-                if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendRevokedTokenTextAsync);
-                break;
-            case "deletebot":
-                if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendDeleteConfirmTextAsync);
-                break;
-            case "setuserpic":
-            case "setcommands":
-            case "setinline":
-                if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendBotMenuTextAsync);
-                break;
-
-            case "setpublickey":
-                if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendPublicKeyPromptTextAsync);
-                else if (step == "input")
-                    await HandlePublicKeyInputAsync(input, fromUserId, extra, text);
-                break;
-
+                await HandleNewBotStateAsync(input, fromUserId, step, extra, text);
+                return;
             case "newapp":
                 await HandleNewAppStateAsync(input, fromUserId, step, extra, text, parts);
-                break;
-
-            case "listapps":
-                if (step == "pick")
-                    await HandleBotPickAsync(input, fromUserId, text, SendAppListTextAsync);
-                break;
-
+                return;
             case "editapp":
                 await HandleEditAppStateAsync(input, fromUserId, step, extra, text, parts);
-                break;
-
+                return;
             case "deleteapp":
                 await HandleDeleteAppStateAsync(input, fromUserId, step, extra, text);
-                break;
-
+                return;
             case "mainapp":
                 if (step == "url")
                     await HandleMainAppUrlAsync(input, fromUserId, extra, text);
+                return;
+        }
+
+        if (step == "pick")
+        {
+            var username = text.Trim().TrimStart('@').ToLowerInvariant();
+            var picked = await GetBotAsync(fromUserId, username);
+            if (picked == null)
+            {
+                await SendAsync(input, fromUserId, InvalidBotText);
+                return;
+            }
+
+            await HandleBotPickedAsync(input, fromUserId, flow, picked);
+            return;
+        }
+
+        var bot = await GetBotAsync(fromUserId, extra);
+        if (bot == null)
+        {
+            await ClearStateAsync(fromUserId);
+            await SendAsync(input, fromUserId, InvalidBotText);
+            return;
+        }
+
+        switch (flow)
+        {
+            case "setname":
+                await HandleNameInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setabouttext":
+                await HandleAboutInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setdescription":
+                await HandleDescriptionInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setcommands":
+                await HandleCommandsInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setinline":
+                await HandleInlineInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setjoingroups":
+                await HandleJoinGroupsInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setprivacypolicy":
+                await HandlePrivacyPolicyInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setmenubutton" when step == "url":
+                await HandleMenuButtonUrlInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setmenubutton" when step == "title":
+                await HandleMenuButtonTitleInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setuserpic":
+                // Only a photo upload moves on; HandleMediaAsync deals with that.
+                await SendAsync(input, fromUserId, "Please send a photo.");
+                break;
+            case "setdescriptionpic":
+                if (IsEmpty(text))
+                {
+                    await UpdateBotInfoAsync(BotUserIdOf(bot), Builders<BsonDocument>.Update.Unset("DescriptionMedia"));
+                    await ClearStateAsync(fromUserId);
+                    await SendAsync(input, fromUserId, "Success! Description picture removed. /help");
+                    break;
+                }
+
+                await SendAsync(input, fromUserId, DescriptionPicPrompt);
+                break;
+            case "setprivacy":
+                await HandlePrivacyInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setdomain":
+                await HandleDomainInputAsync(input, fromUserId, bot, text);
+                break;
+            case "settransferrecepient":
+                await HandleTransferRecipientAsync(input, fromUserId, bot, text, null);
+                break;
+            case "deletebot":
+                await HandleDeleteInputAsync(input, fromUserId, bot, text);
+                break;
+            case "setpublickey":
+                await HandlePublicKeyInputAsync(input, fromUserId, bot, text);
                 break;
         }
     }
 
-    private async Task HandleBotPickAsync(IRequestInput input, long fromUserId, string text, Func<IRequestInput, long, string, BsonDocument, Task> handler)
+    /// <summary>The bot was picked from the reply keyboard of a typed command.</summary>
+    private async Task HandleBotPickedAsync(IRequestInput input, long fromUserId, string flow, BsonDocument bot)
     {
-        var username = text.Trim().TrimStart('@').ToLowerInvariant();
+        var username = BotUsername(bot);
+        switch (flow)
+        {
+            case "token":
+                await ClearStateAsync(fromUserId);
+                await SendAsync(input, fromUserId, TokenText("You can use this token to access HTTP API:\n", BotToken(bot)));
+                break;
+            case "revoke":
+                await ClearStateAsync(fromUserId);
+                await SendAsync(input, fromUserId, TokenText(
+                    "Your token was replaced with a new one. You can use this token to access HTTP API:\n",
+                    await DoRevokeAsync(bot)));
+                break;
+            case "deletebot":
+                await SetStateAsync(fromUserId, $"deletebot:confirm:{username}");
+                await SendAsync(input, fromUserId,
+                    $"OK, you selected @{username}. Are you sure?\n\n" +
+                    $"Send '{DeleteConfirmation}' to confirm you really want to delete this bot.");
+                break;
+            case "setname":
+            case "setabouttext":
+            case "setdescription":
+            case "setcommands":
+            case "setinline":
+            case "setprivacypolicy":
+            case "setmenubutton":
+                await StartFieldEditAsync(input, fromUserId, flow switch
+                {
+                    "setname" => "name",
+                    "setabouttext" => "about",
+                    "setdescription" => "desc",
+                    "setcommands" => "comm",
+                    "setinline" => "inline",
+                    "setprivacypolicy" => "privpol",
+                    _ => "menu"
+                }, username);
+                break;
+            case "setuserpic":
+            case "setdescriptionpic":
+            case "setdomain":
+                await StartFieldEditAsync(input, fromUserId, flow switch
+                {
+                    "setuserpic" => "pic",
+                    "setdescriptionpic" => "descpic",
+                    _ => "domain"
+                }, username);
+                break;
+            case "setprivacy":
+                await SetStateAsync(fromUserId, $"setprivacy:input:{username}");
+                await SendAsync(input, fromUserId,
+                    "'Enable' - your bot will only receive messages that either start with the '/' symbol or mention " +
+                    "the bot by username.\n'Disable' - your bot will receive all messages that people send to groups.\n" +
+                    $"Current status is: {(await IsPrivacyModeAsync(bot) ? "ENABLED" : "DISABLED")}",
+                    ReplyKeyboard([["Enable", "Disable"]]));
+                break;
+            case "setjoingroups":
+                await SetStateAsync(fromUserId, $"setjoingroups:input:{username}");
+                var status = await IsNoChatsAsync(bot) ? "DISABLED" : "ENABLED";
+                await SendAsync(input, fromUserId,
+                    "'Enable' - bot can be added to groups.\n" +
+                    "'Disable' - block group invitations, the bot can't be added to groups.\n" +
+                    $"Current status is: {status}",
+                    ReplyKeyboard([["Enable", "Disable"]]));
+                break;
+            case "setpublickey":
+                await SetStateAsync(fromUserId, $"setpublickey:input:{username}");
+                await SendAsync(input, fromUserId, PublicKeyPromptText);
+                break;
+            case "listapps":
+                await SendAppListTextAsync(input, fromUserId, username, bot);
+                break;
+            case "newapp":
+                await HandleNewAppStateAsync(input, fromUserId, "pick", string.Empty, username, []);
+                break;
+        }
+    }
+
+    /// <summary>
+    /// Starts asking for a new value of one of the bot's fields. Reached from both a typed command and
+    /// an "Edit ..." button; the prompt always comes as a new message, as real BotFather sends it.
+    /// </summary>
+    private async Task StartFieldEditAsync(IRequestInput input, long fromUserId, string field, string username)
+    {
         var bot = await GetBotAsync(fromUserId, username);
         if (bot == null)
         {
-            await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.", new TReplyKeyboardHide());
+            await SendAsync(input, fromUserId, InvalidBotText);
             return;
         }
 
-        await handler(input, fromUserId, username, bot);
-    }
-
-    private async Task HandleEditFieldAsync(IRequestInput input, long fromUserId, int msgId, string field, string username)
-    {
         switch (field)
         {
             case "name":
                 await SetStateAsync(fromUserId, $"setname:input:{username}");
-                await EditMessageAsync(input, fromUserId, msgId,
-                    $"OK. Send me the new name for @{username}.",
-                    InlineRows(InlineRow(Btn("« Cancel", $"edit_bot:{username}"))));
+                await SendAsync(input, fromUserId, NamePrompt);
                 break;
             case "about":
                 await SetStateAsync(fromUserId, $"setabouttext:input:{username}");
-                await EditMessageAsync(input, fromUserId, msgId,
-                    $"OK. Send me the new about text for @{username}.",
-                    InlineRows(InlineRow(Btn("« Cancel", $"edit_bot:{username}"))));
+                await SendAsync(input, fromUserId, AboutPrompt);
                 break;
             case "desc":
                 await SetStateAsync(fromUserId, $"setdescription:input:{username}");
-                await EditMessageAsync(input, fromUserId, msgId,
-                    $"OK. Send me the new description for @{username}.",
-                    InlineRows(InlineRow(Btn("« Cancel", $"edit_bot:{username}"))));
+                await SendAsync(input, fromUserId, DescriptionPrompt);
+                break;
+            case "comm":
+                await SetStateAsync(fromUserId, $"setcommands:input:{username}");
+                await SendAsync(input, fromUserId, CommandsPrompt);
+                break;
+            case "privpol":
+                await SetStateAsync(fromUserId, $"setprivacypolicy:input:{username}");
+                await SendAsync(input, fromUserId, PrivacyPolicyPrompt);
+                break;
+            case "inline":
+                await SetStateAsync(fromUserId, $"setinline:input:{username}");
+                await SendAsync(input, fromUserId,
+                    "This will enable inline queries for your bot. https://core.telegram.org/bots/inline. " +
+                    "Use /empty to disable.\n\n" +
+                    "To enable inline mode, please send me the placeholder message for queries to your bot. " +
+                    $"People will see this placeholder whenever they type @{username} in the message field – in " +
+                    "any chat. Tell them what they can get from your bot (e.g., Search GIFs...).");
+                break;
+            case "menu":
+                await SetStateAsync(fromUserId, $"setmenubutton:url:{username}");
+                await SendAsync(input, fromUserId, MenuButtonUrlPrompt);
+                break;
+            case "pic":
+                await SetStateAsync(fromUserId, $"setuserpic:input:{username}");
+                await SendAsync(input, fromUserId, UserpicPrompt);
+                break;
+            case "descpic":
+                await SetStateAsync(fromUserId, $"setdescriptionpic:input:{username}");
+                await SendAsync(input, fromUserId, DescriptionPicPrompt);
+                break;
+            case "domain":
+                await SetStateAsync(fromUserId, $"setdomain:input:{username}");
+                await SendAsync(input, fromUserId, DomainPrompt);
+                break;
+            case "transfer":
+                await SetStateAsync(fromUserId, $"settransferrecepient:input:{username}");
+                await SendAsync(input, fromUserId, "Please share the new owner's contact or their username.");
                 break;
         }
     }
 
-    // --- Bot menu screens ---
+    // --- /newbot ---
+
+    private async Task HandleNewBotStateAsync(IRequestInput input, long fromUserId, string step, string extra, string text)
+    {
+        if (step == "name")
+        {
+            if (text.Length is 0 or > MaxNameLength)
+            {
+                await SendAsync(input, fromUserId, "Sorry, this name is invalid. Please try something different.");
+                return;
+            }
+
+            // The name may contain ':' itself, so it waits in its own key rather than in the state string.
+            await redis.GetDatabase().StringSetAsync(StateValueKey(fromUserId), text, TimeSpan.FromSeconds(300));
+            await SetStateAsync(fromUserId, "newbot:username");
+            await SendAsync(input, fromUserId,
+                "Good. Now let's choose a username for your bot. It must end in `bot`. Like this, for example: " +
+                "TetrisBot or tetris_bot.");
+            return;
+        }
+
+        var name = (string?)await redis.GetDatabase().StringGetAsync(StateValueKey(fromUserId));
+        if (string.IsNullOrEmpty(name))
+        {
+            // The pre-key format kept the name in the state itself.
+            name = extra;
+        }
+
+        var username = text.Trim().TrimStart('@');
+        if (!BotUserNameRegex().IsMatch(username))
+        {
+            await SendAsync(input, fromUserId, "Sorry, this username is invalid.");
+            return;
+        }
+
+        if (!username.EndsWith("bot", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendAsync(input, fromUserId,
+                "Sorry, the username must end in 'bot'. E.g. 'Tetris_bot' or 'Tetrisbot'");
+            return;
+        }
+
+        username = username.ToLowerInvariant();
+        var taken = await mongoDatabase.GetCollection<BsonDocument>("eventflow-usernamereadmodel")
+            .Find(new BsonDocument("_id", $"username-{username}")).AnyAsync();
+        if (taken)
+        {
+            await SendAsync(input, fromUserId,
+                "Sorry, this username is already taken. Please try something different.");
+            return;
+        }
+
+        // Checked again at creation: bots may have been made in another session meanwhile.
+        if (await IsAtBotLimitAsync(fromUserId) is { } limitAtCreation)
+        {
+            await ClearStateAsync(fromUserId);
+            await SendAsync(input, fromUserId, BotLimitText(limitAtCreation));
+            return;
+        }
+
+        await ClearStateAsync(fromUserId);
+        var token = await DoCreateBotAsync(fromUserId, name, username);
+        await SendAsync(input, fromUserId,
+            new BotText($"Done! Congratulations on your new bot. You will find it at t.me/{username}. You can now add a " +
+                        "description, about section and profile picture for your bot, see /help for a list of commands.\n\n" +
+                        "Use this token to access the HTTP API:\n")
+                .Code(token)
+                .Append("\nKeep your token secure and store it safely, it can be used by anyone to control your bot.\n\n" +
+                        $"For a description of the Bot API, see this page: {BotApiUrl}"));
+    }
+
+    // --- Field inputs ---
+
+    private async Task HandleNameInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        if (text.Length is 0 or > MaxNameLength)
+        {
+            await SendAsync(input, fromUserId, "Sorry, this name is invalid. Please try something different.");
+            return;
+        }
+
+        var botUserId = BotUserIdOf(bot);
+        await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
+            new BsonDocument("BotUserId", botUserId), new BsonDocument("$set", new BsonDocument("Name", text)));
+        await UpdateBotUserAsync(botUserId, Builders<BsonDocument>.Update.Set("FirstName", text));
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! Name updated. /help");
+    }
+
+    private async Task HandleAboutInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        var about = IsEmpty(text) ? string.Empty : text;
+        if (about.Length > MaxAboutLength)
+        {
+            await SendAsync(input, fromUserId,
+                $"Sorry, the about info you provided is invalid. It must not exceed {MaxAboutLength} characters.");
+            return;
+        }
+
+        // userFull.about comes from the user read model.
+        await UpdateBotUserAsync(BotUserIdOf(bot), Builders<BsonDocument>.Update.Set("About", about));
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! About section updated. /help");
+    }
+
+    private async Task HandleDescriptionInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        var description = IsEmpty(text) ? null : text;
+        if (description?.Length > MaxDescriptionLength)
+        {
+            await SendAsync(input, fromUserId,
+                $"Sorry, the description you provided is invalid. It must not exceed {MaxDescriptionLength} characters.");
+            return;
+        }
+
+        // botInfo.description is what getFullUser serves, from the document bots.setBotInfo writes.
+        await UpdateBotInfoAsync(BotUserIdOf(bot), description == null
+            ? Builders<BsonDocument>.Update.Unset("Description")
+            : Builders<BsonDocument>.Update.Set("Description", description));
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! Description updated. /help");
+    }
+
+    private async Task HandleCommandsInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        var commands = new BsonArray();
+        if (!IsEmpty(text))
+        {
+            foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                var separator = line.IndexOf(" - ", StringComparison.Ordinal);
+                var command = separator > 0 ? line[..separator].Trim().TrimStart('/').ToLowerInvariant() : string.Empty;
+                var description = separator > 0 ? line[(separator + 3)..].Trim() : string.Empty;
+                if (!BotCommandNameRegex().IsMatch(command) || description.Length is 0 or > 256 ||
+                    commands.Count >= MaxCommandCount)
+                {
+                    await SendAsync(input, fromUserId,
+                        "Sorry, the list of commands is invalid. Please use this format:\n\n" +
+                        "command1 - Description\ncommand2 - Another description");
+                    return;
+                }
+
+                commands.Add(new BsonDocument { ["Command"] = command, ["Description"] = description });
+            }
+        }
+
+        var botUserId = BotUserIdOf(bot);
+
+        // The default-scope document bots.setBotCommands writes and getFullUser reads.
+        await mongoDatabase.GetCollection<BsonDocument>("bot_commands").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotId", botUserId) &
+            Builders<BsonDocument>.Filter.Eq("ScopeType", nameof(TBotCommandScopeDefault)) &
+            Builders<BsonDocument>.Filter.Eq("PeerId", BsonNull.Value) &
+            Builders<BsonDocument>.Filter.Eq("LangCode", ""),
+            Builders<BsonDocument>.Update
+                .Set("BotId", botUserId)
+                .Set("ScopeType", nameof(TBotCommandScopeDefault))
+                .Set("PeerId", BsonNull.Value)
+                .Set("LangCode", "")
+                .Set("Commands", commands)
+                .Set("UpdatedAt", DateTime.UtcNow),
+            new UpdateOptions { IsUpsert = true });
+        await BumpBotInfoVersionAsync(botUserId);
+
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! Command list updated. /help");
+    }
+
+    private async Task HandleInlineInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        if (!IsEmpty(text) && text.Length > MaxInlinePlaceholderLength)
+        {
+            await SendAsync(input, fromUserId,
+                $"Sorry, the placeholder is too long. It must not exceed {MaxInlinePlaceholderLength} characters.");
+            return;
+        }
+
+        await SetInlineAsync(bot, IsEmpty(text) ? null : text);
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! Inline settings updated. /help");
+    }
+
+    private async Task HandleJoinGroupsInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        bool noChats;
+        if (text.Equals("Enable", StringComparison.OrdinalIgnoreCase))
+        {
+            noChats = false;
+        }
+        else if (text.Equals("Disable", StringComparison.OrdinalIgnoreCase))
+        {
+            noChats = true;
+        }
+        else
+        {
+            await SendAsync(input, fromUserId, "Please choose 'Enable' or 'Disable'.",
+                ReplyKeyboard([["Enable", "Disable"]]));
+            return;
+        }
+
+        await SetNoChatsAsync(bot, noChats);
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, $"Success! The new status is: {(noChats ? "DISABLED" : "ENABLED")}. /help");
+    }
+
+    private async Task HandlePrivacyPolicyInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        string? url = null;
+        if (!IsEmpty(text))
+        {
+            if (!Uri.TryCreate(text.Trim(), UriKind.Absolute, out var uri) ||
+                (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp))
+            {
+                await SendAsync(input, fromUserId, "Please send me a valid URL or use /empty to remove the current one.");
+                return;
+            }
+
+            url = uri.ToString();
+        }
+
+        await UpdateBotInfoAsync(BotUserIdOf(bot), url == null
+            ? Builders<BsonDocument>.Update.Unset("PrivacyPolicyUrl")
+            : Builders<BsonDocument>.Update.Set("PrivacyPolicyUrl", url));
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! Privacy Policy updated. /help");
+    }
+
+    private async Task HandleMenuButtonUrlInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        if (IsEmpty(text))
+        {
+            await SetMenuButtonAsync(bot, null, null);
+            await ClearStateAsync(fromUserId);
+            await SendAsync(input, fromUserId, "Success! Menu button updated. /help");
+            return;
+        }
+
+        // The same rule bots.setBotMenuButton applies: clients open it directly.
+        if (!IsHttpsUrl(text) || text.Trim().Length > 1024)
+        {
+            await SendAsync(input, fromUserId, "Please send me a valid URL. https is required.");
+            return;
+        }
+
+        await redis.GetDatabase().StringSetAsync(StateValueKey(fromUserId), text.Trim(), TimeSpan.FromSeconds(300));
+        await SetStateAsync(fromUserId, $"setmenubutton:title:{BotUsername(bot)}");
+        await SendAsync(input, fromUserId, "OK. Now send me the title for the menu button.");
+    }
+
+    private async Task HandleMenuButtonTitleInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        var url = (string?)await redis.GetDatabase().StringGetAsync(StateValueKey(fromUserId));
+        if (string.IsNullOrEmpty(url))
+        {
+            await SetStateAsync(fromUserId, $"setmenubutton:url:{BotUsername(bot)}");
+            await SendAsync(input, fromUserId, MenuButtonUrlPrompt);
+            return;
+        }
+
+        if (text.Length is 0 or > MaxMenuButtonTextLength)
+        {
+            await SendAsync(input, fromUserId,
+                $"Sorry, the title is invalid. It must be 1-{MaxMenuButtonTextLength} characters long.");
+            return;
+        }
+
+        await SetMenuButtonAsync(bot, text, url);
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! Menu button updated. /help");
+    }
+
+    private async Task HandleDeleteInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        if (!text.Equals(DeleteConfirmation, StringComparison.Ordinal))
+        {
+            await SendAsync(input, fromUserId,
+                $"Please enter the confirmation text exactly like this:\n{DeleteConfirmation}\n\nType /cancel to cancel the operation.");
+            return;
+        }
+
+        await DoDeleteBotAsync(bot);
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Done! The bot is gone. /help");
+    }
+
+    /// <summary>
+    /// Stores the bot's Telegram Passport public key. The key is what
+    /// <c>account.getAuthorizationForm</c> / <c>account.acceptAuthorization</c> check the caller's
+    /// <c>public_key</c> against, and it is also the key the user's client encrypts the credentials to.
+    /// See https://corefork.telegram.org/api/passport
+    /// </summary>
+    private async Task HandlePublicKeyInputAsync(IRequestInput input, long fromUserId, BsonDocument bot, string text)
+    {
+        var botUserId = BotUserIdOf(bot);
+
+        if (IsEmpty(text))
+        {
+            await passportBotResolver.SetPublicKeyAsync(botUserId, null);
+            await ClearStateAsync(fromUserId);
+            await SendAsync(input, fromUserId, "Success! Public key updated. /help");
+            return;
+        }
+
+        switch (PassportPublicKey.TryNormalize(text, out var normalized))
+        {
+            case PassportPublicKeyStatus.PrivateKey:
+                // The state is kept: the owner still has to send a public key, and they now have to
+                // rotate the compromised pair first.
+                await SendAsync(input, fromUserId, PublicKeyIsPrivateText);
+                return;
+
+            case PassportPublicKeyStatus.Invalid:
+                await SendAsync(input, fromUserId, PublicKeyInvalidText);
+                return;
+        }
+
+        await passportBotResolver.SetPublicKeyAsync(botUserId, normalized);
+        await ClearStateAsync(fromUserId);
+        await SendAsync(input, fromUserId, "Success! Public key updated. /help");
+    }
+
+    // --- Screens ---
 
     private async Task SendMyBotsAsync(IRequestInput input, long fromUserId)
     {
@@ -485,112 +1105,181 @@ public class BotFatherBotService(
             return;
         }
 
-        var rows = bots.Select(b =>
-            InlineRow(Btn($"@{b["Username"].AsString} — {b["Name"].AsString}", $"bot_select:{b["Username"].AsString}"))
-        ).ToList();
-
-        await SendAsync(input, fromUserId, "Choose a bot from the list below:", InlineRows(rows.ToArray()));
+        await SendAsync(input, fromUserId, "Choose a bot from the list below:", MyBotsMarkup(bots, 0));
     }
 
-    private async Task SendBotMenuAsync(IRequestInput input, long fromUserId, int msgId, string username)
+    private async Task ShowMyBotsAsync(IRequestInput input, long fromUserId, int msgId, int offset)
     {
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null) return;
-        var name = bot["Name"].AsString;
+        var bots = await GetUserBotsAsync(fromUserId);
+        if (bots.Count == 0)
+        {
+            await EditMessageAsync(input, fromUserId, msgId, "You have no bots yet. Use /newbot to create one.", null);
+            return;
+        }
 
+        await EditMessageAsync(input, fromUserId, msgId, "Choose a bot from the list below:", MyBotsMarkup(bots, offset));
+    }
+
+    /// <summary>Two bots per row, six per page, with « and » between pages — the way real BotFather pages.</summary>
+    private static TReplyInlineMarkup MyBotsMarkup(List<BsonDocument> bots, int offset)
+    {
+        offset = Math.Clamp(offset, 0, Math.Max(0, (bots.Count - 1) / BotsPerPage * BotsPerPage));
+        var rows = bots.Skip(offset).Take(BotsPerPage)
+            .Select(b => Btn($"@{BotUsername(b)}", $"bot_select:{BotUsername(b)}"))
+            .Chunk(2)
+            .Select(InlineRow)
+            .ToList();
+
+        var navigation = new List<TKeyboardButtonCallback>();
+        if (offset > 0)
+        {
+            navigation.Add(Btn("«", $"bots_page:{offset - BotsPerPage}"));
+        }
+
+        if (offset + BotsPerPage < bots.Count)
+        {
+            navigation.Add(Btn("»", $"bots_page:{offset + BotsPerPage}"));
+        }
+
+        if (navigation.Count > 0)
+        {
+            rows.Add(InlineRow(navigation.ToArray()));
+        }
+
+        return InlineRows(rows.ToArray());
+    }
+
+    private static BotText BotMenuText(BsonDocument bot) =>
+        new($"Here it is: {BotName(bot)} @{BotUsername(bot)}.\nWhat do you want to do with the bot?");
+
+    private static TReplyInlineMarkup BotMenuMarkup(string username) => InlineRows(
+        InlineRow(Btn("API Token", $"api_token:{username}"), Btn("Edit Bot", $"edit_bot:{username}")),
+        InlineRow(Btn("Bot Settings", $"bot_settings:{username}")),
+        InlineRow(Btn("Transfer Ownership", $"transfer:{username}"), Btn("Delete Bot", $"delete_confirm:{username}")),
+        InlineRow(Btn("« Back to Bot List", "back_to_bots")));
+
+    private async Task<BotText> EditBotTextAsync(BsonDocument bot)
+    {
+        var botUserId = BotUserIdOf(bot);
+        var user = await GetBotUserAsync(botUserId);
+        var info = await GetBotInfoAsync(botUserId);
+        var commands = await GetBotCommandCountAsync(botUserId);
+
+        var about = GetString(user, "About");
+        var description = GetString(info, "Description");
+        var privacyPolicy = GetString(info, "PrivacyPolicyUrl");
+        var hasPhoto = user != null && user.TryGetValue("ProfilePhotoId", out var photoId) && !photoId.IsBsonNull;
+        var hasDescriptionPicture = info != null && info.Contains("DescriptionMedia");
+
+        return new BotText($"Edit @{BotUsername(bot)} info.\n\n")
+            .Bold("Name").Append($": {BotName(bot)}\n")
+            .Bold("About").Append($": {(about.Length > 0 ? about : "🚫")}\n")
+            .Bold("Description").Append($": {(description.Length > 0 ? description : "🚫")}\n")
+            .Bold("Description picture").Append(hasDescriptionPicture ? ": ✅ has a description picture\n" : ": 🚫 no description picture\n")
+            .Bold("Botpic").Append(hasPhoto ? ": ✅ has a botpic\n" : ": 🚫 no botpic\n")
+            .Bold("Commands").Append(commands > 0 ? $": {commands} commands\n" : ": no commands yet\n")
+            .Bold("Privacy Policy").Append($": {(privacyPolicy.Length > 0 ? privacyPolicy : "🚫")}");
+    }
+
+    private static TReplyInlineMarkup EditBotMarkup(string username) => InlineRows(
+        InlineRow(Btn("Edit Name", $"edit_field:name:{username}"), Btn("Edit About", $"edit_field:about:{username}")),
+        InlineRow(Btn("Edit Description", $"edit_field:desc:{username}"), Btn("Edit Description Picture", $"edit_field:descpic:{username}")),
+        InlineRow(Btn("Edit Botpic", $"edit_field:pic:{username}"), Btn("Edit Commands", $"edit_field:comm:{username}")),
+        InlineRow(Btn("Edit Privacy Policy", $"edit_field:privpol:{username}"), Btn("« Back to Bot", $"bot_select:{username}")));
+
+    private static TReplyInlineMarkup SettingsMarkup(string username) => InlineRows(
+        InlineRow(Btn("Inline Mode", $"inline_mode:{username}")),
+        InlineRow(Btn("Secretary Mode", $"business_mode:{username}")),
+        InlineRow(Btn("Allow Groups?", $"groups:{username}"), Btn("Group Privacy", $"privacy:{username}")),
+        InlineRow(Btn("Group Admin Rights", $"rights:{username}:g"), Btn("Channel Admin Rights", $"rights:{username}:b")),
+        InlineRow(Btn("Domain", $"domain:{username}")),
+        InlineRow(Btn("Menu Button", $"menu_button:{username}")),
+        InlineRow(Btn("Configure Mini App", $"configure_mini_app:{username}")),
+        InlineRow(Btn("Paid Broadcast", $"paid_bcast:{username}")),
+        InlineRow(Btn("« Back to Bot", $"bot_select:{username}")));
+
+    /// <summary>The three answers are shuffled, as real BotFather does, so that deleting takes a look.</summary>
+    private static TReplyInlineMarkup DeleteConfirmMarkup(string username)
+    {
+        var answers = new[]
+        {
+            Btn("Yes, delete the bot", $"delete_do:{username}"),
+            Btn("No", $"bot_select:{username}"),
+            Btn("Nope, nevermind", $"bot_select:{username}")
+        };
+        Random.Shared.Shuffle(answers);
+
+        return InlineRows(answers.Select(p => InlineRow(p))
+            .Append(InlineRow(Btn("« Back to Bot", $"bot_select:{username}")))
+            .ToArray());
+    }
+
+    private static TReplyInlineMarkup BackToSettings(string username, params TKeyboardButtonCallback[] actions) =>
+        InlineRows(actions.Select(p => InlineRow(p))
+            .Append(InlineRow(Btn("« Back to Settings", $"bot_settings:{username}")))
+            .ToArray());
+
+    /// <summary>
+    /// Inline mode is <c>InlineEnabled</c> on the bot's state document, which messages.getInlineBotResults
+    /// checks, plus <c>user.bot_inline_placeholder</c>, without which clients never send an inline query.
+    /// </summary>
+    private async Task SendInlineModeMenuAsync(IRequestInput input, long fromUserId, int msgId, BsonDocument bot)
+    {
+        var username = BotUsername(bot);
+        var enabled = await IsInlineEnabledAsync(bot);
         await EditMessageAsync(input, fromUserId, msgId,
-            $"Here it is: *{Esc(name)}* @{username}.\nWhat do you want to do with the bot?",
-            InlineRows(
-                InlineRow(Btn("API Token", $"api_token:{username}"), Btn("Edit Bot", $"edit_bot:{username}")),
-                InlineRow(Btn("Bot Settings", $"bot_settings:{username}")),
-                InlineRow(Btn("Transfer Ownership", $"transfer_ownership:{username}"), Btn("Delete Bot", $"delete_confirm:{username}"))
-            ));
+            new BotText().Link("Inline mode", "https://core.telegram.org/bots/inline").Append(" is currently ")
+                .Bold(enabled ? "enabled" : "disabled").Append($" for {BotName(bot)} @{username}."),
+            BackToSettings(username, enabled
+                ? Btn("Turn off", $"inline_disable:{username}")
+                : Btn("Turn on", $"inline_enable:{username}")));
     }
 
-    private async Task SendTokenAsync(IRequestInput input, long fromUserId, int msgId, string username)
+    private async Task SendBusinessModeMenuAsync(IRequestInput input, long fromUserId, int msgId, BsonDocument bot)
     {
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null) return;
-        var name = bot["Name"].AsString;
-        var token = bot["Token"].AsString;
-
+        var username = BotUsername(bot);
+        var user = await GetBotUserAsync(BotUserIdOf(bot));
+        var enabled = user != null && user.TryGetValue("BotBusiness", out var value) && value.IsBoolean && value.AsBoolean;
         await EditMessageAsync(input, fromUserId, msgId,
-            $"Here is the token for bot *{Esc(name)}* @{username}:\n\n`{token}`",
-            InlineRows(
-                InlineRow(Btn("Revoke current token", $"revoke_token:{username}"), Btn("« Back to Bot", $"bot_select:{username}"))
-            ));
+            new BotText().Link("Secretary mode", "https://core.telegram.org/bots/features#secretary-bots")
+                .Append(" is currently ").Bold(enabled ? "enabled" : "disabled")
+                .Append($" for {BotName(bot)} @{username}."),
+            BackToSettings(username, enabled
+                ? Btn("Turn off", $"business_disable:{username}")
+                : Btn("Turn on", $"business_enable:{username}")));
     }
 
-    private async Task SendTokenTextAsync(IRequestInput input, long fromUserId, string username, BsonDocument bot)
+    private async Task SendGroupsMenuAsync(IRequestInput input, long fromUserId, int msgId, BsonDocument bot)
     {
-        await ClearStateAsync(fromUserId);
-        var name = bot["Name"].AsString;
-        var token = bot["Token"].AsString;
-        await SendAsync(input, fromUserId, $"Here is the token for bot *{Esc(name)}* @{username}:\n\n`{token}`", new TReplyKeyboardHide());
-    }
-
-    private async Task SendRevokedTokenTextAsync(IRequestInput input, long fromUserId, string username, BsonDocument bot)
-    {
-        await ClearStateAsync(fromUserId);
-        var newToken = await DoRevokeAsync(fromUserId, username);
-        await SendAsync(input, fromUserId, $"Done! New token for @{username}:\n`{newToken}`", new TReplyKeyboardHide());
-    }
-
-    private async Task SendDeleteConfirmTextAsync(IRequestInput input, long fromUserId, string username, BsonDocument bot)
-    {
-        await ClearStateAsync(fromUserId);
-        await SendAsync(input, fromUserId,
-            $"You are about to delete your bot *{Esc(bot["Name"].AsString)}* @{username}. Is that correct?",
-            InlineRows(
-                InlineRow(Btn("Nope, nevermind", $"bot_select:{username}")),
-                InlineRow(Btn("Yes, delete the bot", $"delete_do:{username}"))
-            ));
-    }
-
-    private async Task SendBotMenuTextAsync(IRequestInput input, long fromUserId, string username, BsonDocument bot)
-    {
-        await ClearStateAsync(fromUserId);
-        await SendAsync(input, fromUserId,
-            $"Here it is: *{Esc(bot["Name"].AsString)}* @{username}.\nWhat do you want to do with the bot?",
-            InlineRows(
-                InlineRow(Btn("API Token", $"api_token:{username}"), Btn("Edit Bot", $"edit_bot:{username}")),
-                InlineRow(Btn("Bot Settings", $"bot_settings:{username}")),
-                InlineRow(Btn("Transfer Ownership", $"transfer_ownership:{username}"), Btn("Delete Bot", $"delete_confirm:{username}"))
-            ));
-    }
-
-    private async Task SendEditBotAsync(IRequestInput input, long fromUserId, int msgId, string username)
-    {
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null) return;
-        var name = bot["Name"].AsString;
-        var about = bot.Contains("About") && !bot["About"].IsBsonNull ? bot["About"].AsString : "🚫";
-        var desc = bot.Contains("Description") && !bot["Description"].IsBsonNull ? bot["Description"].AsString : "🚫";
-
+        var username = BotUsername(bot);
+        var name = BotName(bot);
+        var noChats = await IsNoChatsAsync(bot);
         await EditMessageAsync(input, fromUserId, msgId,
-            $"Edit @{username} info.\n\nName: {Esc(name)}\nAbout: {Esc(about)}\nDescription: {Esc(desc)}\nDescription picture: 🚫 no description picture\nBotpic: 🚫 no botpic\nCommands: no commands yet\nPrivacy Policy: 🚫",
-            InlineRows(
-                InlineRow(Btn("Edit Name", $"edit_field:name:{username}"), Btn("Edit About", $"edit_field:about:{username}")),
-                InlineRow(Btn("Edit Description", $"edit_field:desc:{username}")),
-                InlineRow(Btn("Edit Description picture", $"soon:{username}"), Btn("Edit Botpic", $"soon:{username}")),
-                InlineRow(Btn("Edit Commands", $"soon:{username}"), Btn("Edit Privacy Policy", $"soon:{username}")),
-                InlineRow(Btn("« Back to Bot", $"bot_select:{username}"))
-            ));
+            new BotText("Groups are currently ").Bold(noChats ? "disabled" : "enabled")
+                .Append($" for bot {name} @{username}\n\n")
+                .Append(noChats
+                    ? $"Enabling groups will allow users to add {name} to groups."
+                    : $"Disabling groups will forbid users to add {name} to groups."),
+            BackToSettings(username, noChats
+                ? Btn("Turn groups on", $"groups_on:{username}")
+                : Btn("Turn groups off", $"groups_off:{username}")));
     }
 
-    private async Task SendBotSettingsAsync(IRequestInput input, long fromUserId, int msgId, string username)
+    private async Task SendMenuButtonMenuAsync(IRequestInput input, long fromUserId, int msgId, BsonDocument bot)
     {
-        await EditMessageAsync(input, fromUserId, msgId,
-            $"Settings for @{username}.",
-            InlineRows(
-                InlineRow(Btn("Inline Mode", $"inline_mode:{username}"), Btn("Business Mode", $"business_mode:{username}")),
-                InlineRow(Btn("Allow Groups?", $"soon:{username}"), Btn("Group Privacy", $"soon:{username}")),
-                InlineRow(Btn("Group Admin Rights", $"soon:{username}"), Btn("Channel Admin Rights", $"soon:{username}")),
-                InlineRow(Btn("Payments", $"soon:{username}"), Btn("Domain", $"soon:{username}")),
-                InlineRow(Btn("Menu Button", $"soon:{username}"), Btn("Configure Mini App", $"configure_mini_app:{username}")),
-                InlineRow(Btn("Paid Broadcast", $"soon:{username}")),
-                InlineRow(Btn("« Back to Bot", $"bot_select:{username}"))
-            ));
+        var username = BotUsername(bot);
+        var button = await GetMenuButtonAsync(BotUserIdOf(bot));
+        var isWebApp = GetString(button, "Type") == nameof(TBotMenuButton);
+
+        var text = isWebApp
+            ? $"Customized menu button is currently enabled for {BotName(bot)} @{username}.\n\n" +
+              $"Title: {GetString(button, "Text")}\nURL: {GetString(button, "Url")}"
+            : $"Customized menu button is currently disabled for {BotName(bot)} @{username}.";
+        var actions = isWebApp
+            ? new[] { Btn("Configure menu button", $"menu_configure:{username}"), Btn("Disable menu button", $"menu_reset:{username}") }
+            : [Btn("Configure menu button", $"menu_configure:{username}")];
+
+        await EditMessageAsync(input, fromUserId, msgId, text, BackToSettings(username, actions));
     }
 
     private async Task SendBotPickerAsync(IRequestInput input, long fromUserId, string prompt, string action)
@@ -602,41 +1291,111 @@ public class BotFatherBotService(
             return;
         }
 
-        // Reply keyboard (bottom keyboard)
-        var replyButtons = bots.Select(b =>
-            new TVector<IKeyboardButton>(new List<IKeyboardButton>
-            {
-                new TKeyboardButton { Text = $"@{b["Username"].AsString}" }
-            })
-        ).ToList();
-
-        var markup = new TReplyKeyboardMarkup
-        {
-            Rows = new TVector<IKeyboardButtonRow>(
-                replyButtons.Select(r => (IKeyboardButtonRow)new TKeyboardButtonRow { Buttons = r }).ToList()
-            ),
-            SingleUse = true,
-            Selective = false,
-            Resize = true
-        };
-
-        // Set state to handle the selection
         await SetStateAsync(fromUserId, $"{action}:pick");
-        await SendAsync(input, fromUserId, prompt, replyMarkup: markup);
+        await SendAsync(input, fromUserId, prompt,
+            ReplyKeyboard(bots.Select(b => $"@{BotUsername(b)}").Chunk(2).Select(p => p.ToArray()).ToArray()));
+    }
+
+    private static BotText TokenText(string intro, string token) =>
+        new BotText(intro).Code(token).Append($"\n\nFor a description of the Bot API, see this page: {BotApiUrl}");
+
+    private static string BotLimitText(int limit) =>
+        $"Sorry, you can't add more than {limit} bots. To create a new bot, delete one of your bots.";
+
+    // --- Bot settings writers ---
+    //
+    // BotFather bots have no aggregate behind them (DoCreateBotAsync makes their read model directly),
+    // so these write the same documents the bot's creation did and drop the cached read model.
+
+    private async Task UpdateBotUserAsync(long botUserId, UpdateDefinition<BsonDocument> update)
+    {
+        await mongoDatabase.GetCollection<BsonDocument>(UserCollection)
+            .UpdateOneAsync(Builders<BsonDocument>.Filter.Eq("UserId", botUserId), update);
+        userReadModelCacheHelper.RemoveById(botUserId);
+    }
+
+    /// <summary>A changed <c>user.bot_info_version</c> is what makes clients drop their cached bot info.</summary>
+    private async Task BumpBotInfoVersionAsync(long botUserId)
+    {
+        var user = await GetBotUserAsync(botUserId);
+        var version = user != null && user.TryGetValue("BotInfoVersion", out var value) && value.IsNumeric
+            ? value.ToInt32()
+            : 1;
+        await UpdateBotUserAsync(botUserId, Builders<BsonDocument>.Update.Set("BotInfoVersion", version + 1));
+    }
+
+    private async Task UpdateBotInfoAsync(long botUserId, UpdateDefinition<BsonDocument> update)
+    {
+        await mongoDatabase.GetCollection<BsonDocument>("bot_info").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotId", botUserId) & Builders<BsonDocument>.Filter.Eq("LangCode", ""),
+            Builders<BsonDocument>.Update.Combine(update,
+                Builders<BsonDocument>.Update
+                    .Set("BotId", botUserId)
+                    .Set("LangCode", "")
+                    .Set("UpdatedAt", DateTime.UtcNow)),
+            new UpdateOptions { IsUpsert = true });
+        await BumpBotInfoVersionAsync(botUserId);
+    }
+
+    private async Task SetInlineAsync(BsonDocument bot, string? placeholder)
+    {
+        var botUserId = BotUserIdOf(bot);
+        await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
+            new BsonDocument("BotUserId", botUserId),
+            new BsonDocument("$set", new BsonDocument("InlineEnabled", placeholder != null)));
+        await UpdateBotUserAsync(botUserId, placeholder == null
+            ? Builders<BsonDocument>.Update.Unset("BotInlinePlaceholder")
+            : Builders<BsonDocument>.Update.Set("BotInlinePlaceholder", placeholder));
+    }
+
+    private async Task SetNoChatsAsync(BsonDocument bot, bool noChats)
+        => await UpdateBotUserAsync(BotUserIdOf(bot), Builders<BsonDocument>.Update.Set("BotNochats", noChats));
+
+    private async Task SetBusinessModeAsync(BsonDocument bot, bool enabled)
+    {
+        var botUserId = BotUserIdOf(bot);
+        await UpdateBotUserAsync(botUserId, enabled
+            ? Builders<BsonDocument>.Update.Set("BotBusiness", true)
+            : Builders<BsonDocument>.Update.Unset("BotBusiness"));
+
+        if (enabled)
+        {
+            return;
+        }
+
+        // Disconnect every account that had this bot connected, and tell the bot.
+        foreach (var connection in await businessConnectionStore.GetByBotAsync(botUserId))
+        {
+            await businessConnectionStore.DeleteAsync(connection.UserId);
+            await businessConnectionStore.ClearPausedAsync(connection.UserId);
+            await businessBotNotifier.NotifyConnectionAsync(connection, true);
+        }
+    }
+
+    /// <summary>The all-users document bots.setBotMenuButton writes; no url means the default button.</summary>
+    private async Task SetMenuButtonAsync(BsonDocument bot, string? text, string? url)
+    {
+        var botUserId = BotUserIdOf(bot);
+        var button = url == null
+            ? new BsonDocument { ["Type"] = nameof(TBotMenuButtonDefault) }
+            : new BsonDocument { ["Type"] = nameof(TBotMenuButton), ["Text"] = text, ["Url"] = url };
+
+        await mongoDatabase.GetCollection<BsonDocument>("bot_menu_buttons").UpdateOneAsync(
+            Builders<BsonDocument>.Filter.Eq("BotId", botUserId) & Builders<BsonDocument>.Filter.Eq("UserId", BsonNull.Value),
+            Builders<BsonDocument>.Update
+                .Set("BotId", botUserId)
+                .Set("UserId", BsonNull.Value)
+                .Set("Button", button)
+                .Set("UpdatedAt", DateTime.UtcNow),
+            new UpdateOptions { IsUpsert = true });
+        await BumpBotInfoVersionAsync(botUserId);
     }
 
     // --- DB helpers ---
 
-    private async Task<string?> DoCreateBotAsync(IRequestInput input, long fromUserId, string name, string username)
+    /// <summary>Creates the bot and returns its token.</summary>
+    private async Task<string> DoCreateBotAsync(long fromUserId, string name, string username)
     {
-        if (!username.EndsWith("bot"))
-            return "Sorry, username must end in `bot`. Like mybot_bot or MyBot.";
-
-        var existing = await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel")
-            .Find(new BsonDocument("UserName", username)).FirstOrDefaultAsync();
-        if (existing != null)
-            return "Sorry, this username is already taken. Please choose a different username.";
-
         var newUserId = await GetNextUserIdAsync();
         var accessHash = Random.Shared.NextInt64();
         var token = $"{newUserId}:{GenerateToken()}";
@@ -660,7 +1419,7 @@ public class BotFatherBotService(
 
         // Create bot user in read model
         var now = DateTime.UtcNow;
-        var userCollection = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
+        var userCollection = mongoDatabase.GetCollection<BsonDocument>(UserCollection);
         await userCollection.InsertOneAsync(new BsonDocument
         {
             { "_id", $"user-{newUserId}" },
@@ -680,6 +1439,8 @@ public class BotFatherBotService(
             { "BotInfoVersion", 1 },
             { "BotChatHistory", false },
             { "BotNochats", false },
+            // "By default, all bots added to groups run in Privacy Mode."
+            { "BotPrivacyMode", true },
             { "BotBusiness", false },
             { "Color", new BsonDocument { { "Color", 0 }, { "BackgroundEmojiId", BsonNull.Value } } },
             { "CreationTime", now },
@@ -737,116 +1498,87 @@ public class BotFatherBotService(
             { "IsActive", true }
         });
 
-        var text = $"Done! Congratulations on your new bot. You will find it at t.me/{username}.\n\n" +
-                   $"Use this token to access the HTTP API:\n{token}\n\n" +
-                   $"Keep your token secure and store it safely, it can be used by anyone to control your bot.";
-
-        // Build entities: URL for t.me link, Code for token
-        var urlText = $"t.me/{username}";
-        var urlOffset = text.IndexOf(urlText, StringComparison.Ordinal);
-        var tokenOffset = text.IndexOf(token, StringComparison.Ordinal);
-
-        await SendAsync(input, fromUserId, text, entities: new TVector<IMessageEntity>(new List<IMessageEntity>
-        {
-            new TMessageEntityUrl { Offset = urlOffset, Length = urlText.Length },
-            new TMessageEntityCode { Offset = tokenOffset, Length = token.Length }
-        }));
-        return null!;
+        return token;
     }
 
-    private async Task<string> DoRevokeAsync(long fromUserId, string username)
+    private async Task<string> DoRevokeAsync(BsonDocument bot)
     {
-        var col = mongoDatabase.GetCollection<BsonDocument>(BotCollection);
-        var bot = await col.Find(new BsonDocument { { "OwnerId", fromUserId }, { "Username", username } }).FirstOrDefaultAsync();
-        if (bot == null) return "not found";
-        var newToken = $"{bot["BotUserId"].AsInt64}:{GenerateToken()}";
-        await col.UpdateOneAsync(
-            new BsonDocument { { "OwnerId", fromUserId }, { "Username", username } },
+        var botUserId = BotUserIdOf(bot);
+        var newToken = $"{botUserId}:{GenerateToken()}";
+        await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
+            new BsonDocument("BotUserId", botUserId),
             new BsonDocument("$set", new BsonDocument("Token", newToken)));
         return newToken;
     }
 
-    private async Task DoDeleteBotAsync(long fromUserId, string username)
+    /// <summary>Deletes the bot and releases its username, as real BotFather does.</summary>
+    private async Task DoDeleteBotAsync(BsonDocument bot)
     {
+        var botUserId = BotUserIdOf(bot);
         await mongoDatabase.GetCollection<BsonDocument>(BotCollection)
-            .DeleteOneAsync(new BsonDocument { { "OwnerId", fromUserId }, { "Username", username } });
-        await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel")
-            .UpdateOneAsync(new BsonDocument("UserName", username), new BsonDocument("$set", new BsonDocument("IsDeleted", true)));
-    }
-
-    private async Task DoSetNameAsync(long fromUserId, string username, string name)
-    {
-        await mongoDatabase.GetCollection<BsonDocument>(BotCollection)
-            .UpdateOneAsync(new BsonDocument { { "OwnerId", fromUserId }, { "Username", username } },
-                new BsonDocument("$set", new BsonDocument("Name", name)));
-        await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel")
-            .UpdateOneAsync(new BsonDocument("UserName", username), new BsonDocument("$set", new BsonDocument("FirstName", name)));
-    }
-
-    /// <summary>Bot picked for /setpublickey; asks for the PEM.</summary>
-    private async Task SendPublicKeyPromptTextAsync(IRequestInput input,
-        long fromUserId,
-        string username,
-        BsonDocument bot)
-    {
-        await SetStateAsync(fromUserId, $"setpublickey:input:{username}");
-        await SendAsync(input, fromUserId, PublicKeyPromptText, new TReplyKeyboardHide());
-    }
-
-    /// <summary>
-    /// Stores the bot's Telegram Passport public key. The key is what
-    /// <c>account.getAuthorizationForm</c> / <c>account.acceptAuthorization</c> check the caller's
-    /// <c>public_key</c> against, and it is also the key the user's client encrypts the credentials to.
-    /// See https://corefork.telegram.org/api/passport
-    /// </summary>
-    private async Task HandlePublicKeyInputAsync(IRequestInput input, long fromUserId, string username, string text)
-    {
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null)
-        {
-            await ClearStateAsync(fromUserId);
-            await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.");
-            return;
-        }
-
-        var botUserId = bot["BotUserId"].AsInt64;
-
-        if (text.Trim().Equals("/empty", StringComparison.OrdinalIgnoreCase))
-        {
-            await passportBotResolver.SetPublicKeyAsync(botUserId, null);
-            await ClearStateAsync(fromUserId);
-            await SendAsync(input, fromUserId, "Success! Public key updated. /help");
-            return;
-        }
-
-        switch (PassportPublicKey.TryNormalize(text, out var normalized))
-        {
-            case PassportPublicKeyStatus.PrivateKey:
-                // The state is kept: the owner still has to send a public key, and they now have to
-                // rotate the compromised pair first.
-                await SendAsync(input, fromUserId, PublicKeyIsPrivateText);
-                return;
-
-            case PassportPublicKeyStatus.Invalid:
-                await SendAsync(input, fromUserId, PublicKeyInvalidText);
-                return;
-        }
-
-        await passportBotResolver.SetPublicKeyAsync(botUserId, normalized);
-        await ClearStateAsync(fromUserId);
-        await SendAsync(input, fromUserId, "Success! Public key updated. /help");
-    }
-
-    private async Task DoSetFieldAsync(long fromUserId, string username, string field, string value)
-    {
-        await mongoDatabase.GetCollection<BsonDocument>(BotCollection)
-            .UpdateOneAsync(new BsonDocument { { "OwnerId", fromUserId }, { "Username", username } },
-                new BsonDocument("$set", new BsonDocument(field, value)));
+            .DeleteOneAsync(new BsonDocument("BotUserId", botUserId));
+        await mongoDatabase.GetCollection<BsonDocument>("bot-owners")
+            .DeleteManyAsync(new BsonDocument("BotId", botUserId));
+        await mongoDatabase.GetCollection<BsonDocument>("eventflow-usernamereadmodel")
+            .DeleteOneAsync(Builders<BsonDocument>.Filter.Eq("_id", $"username-{BotUsername(bot)}") &
+                            Builders<BsonDocument>.Filter.Eq("PeerId", botUserId));
+        await UpdateBotUserAsync(botUserId, Builders<BsonDocument>.Update.Set("IsDeleted", true));
     }
 
     private async Task<BsonDocument?> GetBotAsync(long fromUserId, string username)
-        => await mongoDatabase.GetCollection<BsonDocument>(BotCollection)
-            .Find(new BsonDocument { { "OwnerId", fromUserId }, { "Username", username } }).FirstOrDefaultAsync();
+    {
+        if (string.IsNullOrEmpty(username))
+        {
+            return null;
+        }
+
+        return await mongoDatabase.GetCollection<BsonDocument>(BotCollection)
+            .Find(new BsonDocument { { "OwnerId", fromUserId }, { "Username", username.ToLowerInvariant() } })
+            .FirstOrDefaultAsync();
+    }
+
+    private async Task<BsonDocument?> GetBotUserAsync(long botUserId)
+        => await mongoDatabase.GetCollection<BsonDocument>(UserCollection)
+            .Find(Builders<BsonDocument>.Filter.Eq("UserId", botUserId)).FirstOrDefaultAsync();
+
+    private async Task<BsonDocument?> GetBotInfoAsync(long botUserId)
+        => await mongoDatabase.GetCollection<BsonDocument>("bot_info")
+            .Find(Builders<BsonDocument>.Filter.Eq("BotId", botUserId) & Builders<BsonDocument>.Filter.Eq("LangCode", ""))
+            .FirstOrDefaultAsync();
+
+    private async Task<int> GetBotCommandCountAsync(long botUserId)
+    {
+        var doc = await mongoDatabase.GetCollection<BsonDocument>("bot_commands")
+            .Find(Builders<BsonDocument>.Filter.Eq("BotId", botUserId) &
+                  Builders<BsonDocument>.Filter.Eq("ScopeType", nameof(TBotCommandScopeDefault)) &
+                  Builders<BsonDocument>.Filter.Eq("PeerId", BsonNull.Value) &
+                  Builders<BsonDocument>.Filter.Eq("LangCode", ""))
+            .FirstOrDefaultAsync();
+
+        return doc != null && doc.TryGetValue("Commands", out var commands) && commands.IsBsonArray
+            ? commands.AsBsonArray.Count
+            : 0;
+    }
+
+    private async Task<BsonDocument?> GetMenuButtonAsync(long botUserId)
+    {
+        var doc = await mongoDatabase.GetCollection<BsonDocument>("bot_menu_buttons")
+            .Find(Builders<BsonDocument>.Filter.Eq("BotId", botUserId) & Builders<BsonDocument>.Filter.Eq("UserId", BsonNull.Value))
+            .FirstOrDefaultAsync();
+
+        return doc != null && doc.TryGetValue("Button", out var button) && button.IsBsonDocument
+            ? button.AsBsonDocument
+            : null;
+    }
+
+    private async Task<bool> IsNoChatsAsync(BsonDocument bot)
+    {
+        var user = await GetBotUserAsync(BotUserIdOf(bot));
+        return user != null && user.TryGetValue("BotNochats", out var value) && value.IsBoolean && value.AsBoolean;
+    }
+
+    private static Task<bool> IsInlineEnabledAsync(BsonDocument bot)
+        => Task.FromResult(bot.TryGetValue("InlineEnabled", out var value) && value.IsBoolean && value.AsBoolean);
 
     /// <summary>
     /// The account's bots_create_limit_default / _premium when it already owns that many bots, else null.
@@ -859,14 +1591,12 @@ public class BotFatherBotService(
         return bots.Count >= limit ? limit : null;
     }
 
-    private static string BotLimitText(int limit) =>
-        $"That I cannot do.\n\nYou come to me asking for more than {limit} bots. But you don't ask with respect. " +
-        "You don't offer friendship. You don't even think to call me Botfather.\n\n" +
-        "Delete one of your bots with /deletebot to create a new one.";
-
+    /// <summary>Newest first.</summary>
     private async Task<List<BsonDocument>> GetUserBotsAsync(long fromUserId)
         => await mongoDatabase.GetCollection<BsonDocument>(BotCollection)
-            .Find(new BsonDocument("OwnerId", fromUserId)).ToListAsync();
+            .Find(new BsonDocument("OwnerId", fromUserId))
+            .Sort(Builders<BsonDocument>.Sort.Descending("BotUserId"))
+            .ToListAsync();
 
     /// <summary>
     /// The id for the next bot a user creates: one past the highest bot id in use.
@@ -888,7 +1618,7 @@ public class BotFatherBotService(
                 }
             }
         };
-        var last = await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel")
+        var last = await mongoDatabase.GetCollection<BsonDocument>(UserCollection)
             .Find(filter).Sort(new BsonDocument("UserId", -1)).Limit(1).FirstOrDefaultAsync();
         var next = Math.Max(last?["UserId"].AsInt64 + 1 ?? MyTelegramConsts.BotUserInitId + 1,
             MyTelegramConsts.BotUserInitId + 1);
@@ -909,78 +1639,82 @@ public class BotFatherBotService(
         return Convert.ToBase64String(bytes).Replace("+", "-").Replace("/", "_").Replace("=", "");
     }
 
+    private static long BotUserIdOf(BsonDocument bot) => bot["BotUserId"].ToInt64();
+
+    private static string BotUsername(BsonDocument bot) => GetString(bot, "Username");
+
+    private static string BotName(BsonDocument bot) => GetString(bot, "Name");
+
+    private static string BotToken(BsonDocument bot) => GetString(bot, "Token");
+
     // --- Messaging helpers ---
 
-    private async Task SendAsync(IRequestInput input, long toUserId, string text,
-        IReplyMarkup? replyMarkup = null, TVector<IMessageEntity>? entities = null)
+    private static RequestInfo BotRequest(IRequestInput input) => RequestInfo.Empty with
     {
-        Console.WriteLine($"[BotFather.SendAsync] toUserId={toUserId}, text={text}, hasReplyMarkup={replyMarkup != null}");
-        if (replyMarkup != null)
-        {
-            Console.WriteLine($"[BotFather.SendAsync] ReplyMarkup type: {replyMarkup.GetType().Name}");
-            if (replyMarkup is TReplyInlineMarkup inlineMarkup)
-            {
-                Console.WriteLine($"[BotFather.SendAsync] Inline markup rows count: {inlineMarkup.Rows?.Count ?? 0}");
-                if (inlineMarkup.Rows != null)
-                {
-                    foreach (var row in inlineMarkup.Rows)
-                    {
-                        if (row is TKeyboardButtonRow btnRow)
-                        {
-                            Console.WriteLine($"[BotFather.SendAsync] Row buttons count: {btnRow.Buttons?.Count ?? 0}");
-                            if (btnRow.Buttons != null)
-                            {
-                                foreach (var btn in btnRow.Buttons)
-                                {
-                                    Console.WriteLine($"[BotFather.SendAsync] Button type: {btn.GetType().Name}");
-                                    if (btn is TKeyboardButtonCallback callbackBtn)
-                                    {
-                                        Console.WriteLine($"[BotFather.SendAsync] Callback button text: {callbackBtn.Text}, data length: {callbackBtn.Data?.Length ?? 0}");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        UserId = BotUserId,
+        Layer = input.Layer,
+        Date = DateTime.UtcNow.ToTimestamp(),
+        RequestId = Guid.NewGuid()
+    };
 
-        var botReq = RequestInfo.Empty with
-        {
-            UserId = BotUserId, Layer = input.Layer,
-            Date = DateTime.UtcNow.ToTimestamp(), RequestId = Guid.NewGuid()
-        };
-        var toPeer = new Peer(PeerType.User, toUserId);
-        var sendInput = new SendMessageInput(botReq, BotUserId, toPeer, text,
-            Random.Shared.NextInt64(), entities, null, false, replyMarkup: replyMarkup);
+    private Task SendAsync(IRequestInput input, long toUserId, string text) =>
+        SendAsync(input, toUserId, new BotText(text));
+
+    private Task SendAsync(IRequestInput input, long toUserId, string text, IReplyMarkup? replyMarkup) =>
+        SendAsync(input, toUserId, new BotText(text), replyMarkup);
+
+    /// <summary>
+    /// Sends a new message. Without other markup it removes the reply keyboard a bot picker left behind,
+    /// as every one of real BotFather's answers does.
+    /// </summary>
+    private async Task SendAsync(IRequestInput input, long toUserId, BotText text, IReplyMarkup? replyMarkup = null)
+    {
+        // Each send needs its own RequestId: one request is one send saga.
+        var sendInput = new SendMessageInput(BotRequest(input), BotUserId, new Peer(PeerType.User, toUserId), text.Text,
+            Random.Shared.NextInt64(), text.Entities(), null, false,
+            replyMarkup: replyMarkup ?? new TReplyKeyboardHide());
         await messageAppService.SendMessageAsync([sendInput]);
     }
 
-    private async Task EditMessageAsync(IRequestInput input, long toUserId, int msgId, string text,
+    private Task EditMessageAsync(IRequestInput input, long toUserId, int msgId, string text, IReplyMarkup? replyMarkup) =>
+        EditMessageAsync(input, toUserId, msgId, new BotText(text), replyMarkup);
+
+    /// <summary>
+    /// Edits the menu message whose button was pressed. <paramref name="msgId"/> is the id in the user's
+    /// box; BotFather's copy of a private message has its own id, which the user's copy records as
+    /// SenderMessageId. Only when that copy cannot be found is the menu sent anew.
+    /// </summary>
+    private async Task EditMessageAsync(IRequestInput input, long toUserId, int msgId, BotText text,
         IReplyMarkup? replyMarkup)
     {
-        var botReq = RequestInfo.Empty with
-        {
-            UserId = BotUserId, Layer = input.Layer,
-            Date = DateTime.UtcNow.ToTimestamp(), RequestId = Guid.NewGuid()
-        };
-
-        // Find the outbox message id for the bot
-        var messageReadModel = await queryProcessor.ProcessAsync(
-            new GetMessageByIdQuery(MessageId.Create(BotUserId, msgId).Value));
-
-        if (messageReadModel != null)
-        {
-            var command = new EditOutboxMessageCommand(
-                MessageId.Create(BotUserId, msgId, false),
-                botReq, msgId, text, DateTime.UtcNow.ToTimestamp(),
-                (TVector<IMessageEntity>?)null, null, replyMarkup, false, null, null, null);
-            await commandBus.PublishAsync(command);
-        }
-        else
+        var userCopy = await queryProcessor.ProcessAsync(new GetMessageByIdQuery(MessageId.Create(toUserId, msgId).Value));
+        if (userCopy == null || userCopy.SenderPeerId != BotUserId || userCopy.SenderMessageId <= 0)
         {
             await SendAsync(input, toUserId, text, replyMarkup);
+            return;
         }
+
+        var botMessageId = userCopy.SenderMessageId;
+        var message = text.Text;
+        byte[]? encryptedData = null;
+        byte[]? inboxEncryptedData = null;
+        var encryption = serverOptions.CurrentValue.EncryptionConfig;
+        if (encryption is { Enabled: true, MessageKeys.Count: > 0 })
+        {
+            // Stored the way EditMessageHandler stores an edited text: encrypted per owner, never in clear.
+            var keyConfig = encryption.MessageKeys[0];
+            var key = Encoding.UTF8.GetBytes(keyConfig.Key);
+            encryptedData = dataEncryptionHelper.Encrypt(keyConfig.Id, key, BotUserId, text.Text);
+            inboxEncryptedData = dataEncryptionHelper.Encrypt(keyConfig.Id, key, toUserId, text.Text);
+            message = string.Empty;
+        }
+
+        // Commands are deduplicated per aggregate by ReqMsgId; the message was created with 0, so an edit
+        // carrying 0 too would be dropped as a repeat of its creation.
+        var request = BotRequest(input) with { ReqMsgId = Random.Shared.NextInt64(1, long.MaxValue) };
+        await commandBus.PublishAsync(new EditOutboxMessageCommand(MessageId.Create(BotUserId, botMessageId), request,
+            botMessageId, message, DateTime.UtcNow.ToTimestamp(), text.Entities(), null, replyMarkup, false,
+            messageAppService.GetHashtags(text.Text), encryptedData, inboxEncryptedData));
     }
 
     // --- Markup builders ---
@@ -994,944 +1728,54 @@ public class BotFatherBotService(
     private static TKeyboardButtonCallback Btn(string text, string data)
         => new() { Text = text, Data = data };
 
+    /// <summary>A resized, reusable reply keyboard, like the bot pickers of real BotFather.</summary>
+    private static TReplyKeyboardMarkup ReplyKeyboard(string[][] rows) => new()
+    {
+        Rows = new TVector<IKeyboardButtonRow>(rows.Select(r => (IKeyboardButtonRow)new TKeyboardButtonRow
+        {
+            Buttons = new TVector<IKeyboardButton>(r.Select(t => (IKeyboardButton)new TKeyboardButton { Text = t }).ToList())
+        }).ToList()),
+        Resize = true
+    };
+
     // --- Text helpers ---
 
-    private static string Esc(string s) => s;
-
-    private static List<IMessageEntity> BoldEntities(string text)
+    private static BotText BuildHelpText()
     {
-        var entities = new List<IMessageEntity>();
-        var boldSections = new[] { "Managing bots", "Edit Bots", "Bot Settings" };
-        foreach (var section in boldSections)
-        {
-            var idx = text.IndexOf(section, StringComparison.Ordinal);
-            if (idx >= 0)
-                entities.Add(new TMessageEntityBold { Offset = idx, Length = section.Length });
-        }
-        // Add bot command entities for each /command
-        var offset = 0;
-        foreach (var line in text.Split('\n'))
-        {
-            var cmdIdx = line.IndexOf('/');
-            if (cmdIdx >= 0)
-            {
-                var cmdEnd = line.IndexOf(' ', cmdIdx);
-                var cmdLen = cmdEnd >= 0 ? cmdEnd - cmdIdx : line.Length - cmdIdx;
-                entities.Add(new TMessageEntityBotCommand { Offset = offset + cmdIdx, Length = cmdLen });
-            }
-            offset += line.Length + 1;
-        }
-        return entities;
+        var text = new BotText("I can help you create and manage Xiegram bots. If you're new to the Bot API, please see the ")
+            .Link("manual", BotsManualUrl)
+            .Append(".\n\nYou can control me by sending these commands:\n\n")
+            .Append("/newbot - create a new bot\n/mybots - edit your bots\n\n")
+            .Bold("Edit Bots").Append("\n")
+            .Append("/setname - change a bot's name\n" +
+                    "/setdescription - change bot description\n" +
+                    "/setabouttext - change bot about info\n" +
+                    "/setuserpic - change bot profile photo\n" +
+                    "/setdescriptionpic - change the description picture\n" +
+                    "/setcommands - change the list of commands\n" +
+                    "/setprivacypolicy - change the privacy policy\n" +
+                    "/deletebot - delete a bot\n\n")
+            .Bold("Bot Settings").Append("\n")
+            .Append("/token - get authorization token\n/revoke - revoke bot access token\n/setinline - toggle ")
+            .Link("inline mode", "https://core.telegram.org/bots/inline")
+            .Append("\n/setjoingroups - can your bot be added to groups?\n/setprivacy - toggle ")
+            .Link("privacy mode", "https://core.telegram.org/bots/features#privacy-mode")
+            .Append(" in groups\n/setdomain - link website's domain to the bot\n" +
+                    "/setmenubutton - change the menu button\n" +
+                    "/setpublickey - set the public key for Telegram Passport\n\n")
+            .Bold("Web Apps").Append("\n")
+            .Append("/myapps - edit your ").Link("web apps", "https://core.telegram.org/bots/webapps")
+            .Append("\n/newapp - create a new ").Link("web app", "https://core.telegram.org/bots/webapps")
+            .Append("\n/listapps - get a list of your web apps\n" +
+                    "/editapp - edit a web app\n" +
+                    "/deleteapp - delete an existing web app");
+
+        return text;
     }
 
-    /// <summary>
-    /// Inline mode screen. The InlineEnabled flag on the bot's state document is what
-    /// messages.getInlineBotResults checks before forwarding queries to the bot.
-    /// </summary>
-    private async Task SendInlineModeMenuAsync(IRequestInput input, long fromUserId, int msgId, string username)
-    {
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null) return;
-
-        var isEnabled = bot.TryGetValue("InlineEnabled", out var enabledValue) && enabledValue.IsBoolean &&
-                        enabledValue.AsBoolean;
-        var status = isEnabled ? "✅ Enabled" : "❌ Disabled";
-
-        await EditMessageAsync(input, fromUserId, msgId,
-            $"Inline Mode for @{username}\n\nStatus: {status}\n\n" +
-            "When enabled, users can call this bot from any chat by typing " +
-            $"@{username} followed by a query.\n\n" +
-            "The bot must answer each query with messages.setInlineBotResults.",
-            InlineRows(
-                InlineRow(
-                    isEnabled
-                        ? Btn("❌ Turn off Inline Mode", $"inline_disable:{username}")
-                        : Btn("✅ Turn on Inline Mode", $"inline_enable:{username}")
-                ),
-                InlineRow(Btn("« Back to Settings", $"bot_settings:{username}"))
-            ));
-    }
-
-    private async Task SetBotInlineModeAsync(long ownerId, string username, bool enabled)
-    {
-        var bot = await GetBotAsync(ownerId, username);
-        if (bot == null) return;
-
-        await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
-            new BsonDocument("BotUserId", bot["BotUserId"].AsInt64),
-            new BsonDocument("$set", new BsonDocument("InlineEnabled", enabled)));
-    }
-
-    private async Task SendBusinessModeMenuAsync(IRequestInput input, long fromUserId, int msgId, string username)
-    {
-        // Check if business mode is enabled for the BOT (not the user)
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null) return;
-
-        var botUserId = bot["BotUserId"].AsInt64;
-        var userCollection = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var filter = new BsonDocument("UserId", botUserId);
-        var botUser = await userCollection.Find(filter).FirstOrDefaultAsync();
-
-        var isEnabled = botUser != null && botUser.Contains("BotBusiness") && botUser["BotBusiness"].AsBoolean;
-        var status = isEnabled ? "✅ Enabled" : "❌ Disabled";
-
-        await EditMessageAsync(input, fromUserId, msgId,
-            $"Business Mode for @{username}\n\nStatus: {status}\n\n" +
-            "When enabled, this bot can:\n" +
-            "• Connect to Telegram Business accounts\n" +
-            "• Receive business messages\n" +
-            "• Send messages on behalf of business users\n" +
-            "• Access business chat history\n\n" +
-            "Note: Users must have Telegram Business subscription to connect bots.",
-            InlineRows(
-                InlineRow(
-                    isEnabled
-                        ? Btn("❌ Disable Business Mode", $"business_disable:{username}")
-                        : Btn("✅ Enable Business Mode", $"business_enable:{username}")
-                ),
-                InlineRow(Btn("« Back to Settings", $"bot_settings:{username}"))
-            ));
-    }
-
-    private async Task EnableBotBusinessModeAsync(IRequestInput input, long ownerId, string username)
-    {
-        var bot = await GetBotAsync(ownerId, username);
-        if (bot == null) return;
-
-        var botUserId = bot["BotUserId"].AsInt64;
-
-        // Set BotBusiness flag for the bot user
-        var userCollection = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var filter = new BsonDocument("UserId", botUserId);
-        var update = new BsonDocument("$set", new BsonDocument
-        {
-            { "BotBusiness", true }
-        });
-
-        await userCollection.UpdateOneAsync(filter, update);
-        // user.bot_business is served from the cached read model.
-        userReadModelCacheHelper.RemoveById(botUserId);
-    }
-
-    private async Task DisableBotBusinessModeAsync(IRequestInput input, long ownerId, string username)
-    {
-        var bot = await GetBotAsync(ownerId, username);
-        if (bot == null) return;
-
-        var botUserId = bot["BotUserId"].AsInt64;
-
-        // Remove BotBusiness flag from the bot user
-        var userCollection = mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel");
-        var filter = new BsonDocument("UserId", botUserId);
-        var update = new BsonDocument("$unset", new BsonDocument
-        {
-            { "BotBusiness", "" }
-        });
-
-        await userCollection.UpdateOneAsync(filter, update);
-        userReadModelCacheHelper.RemoveById(botUserId);
-
-        // Disconnect every account that had this bot connected, and tell the bot.
-        foreach (var connection in await businessConnectionStore.GetByBotAsync(botUserId))
-        {
-            await businessConnectionStore.DeleteAsync(connection.UserId);
-            await businessConnectionStore.ClearPausedAsync(connection.UserId);
-            await businessBotNotifier.NotifyConnectionAsync(connection, true);
-        }
-    }
-
-    // --- Web apps (mini apps) ---
-    //
-    // A mini app is an ordinary HTTPS page hosted by the bot's developer, so the URL can only come
-    // from the bot's owner. These flows are what let them set it; the server never invents one.
-    // See https://corefork.telegram.org/api/bots/webapps .
-
-    private const string AppCollection = "bot_apps";
-
-    /// <summary>Short name rules from BotFather: 3-30 chars, a-zA-Z0-9_.</summary>
-    private static readonly Regex AppShortNameRegex = new("^[a-zA-Z0-9_]{3,30}$", RegexOptions.Compiled);
-
-    private async Task HandleNewAppStateAsync(IRequestInput input, long fromUserId, string step, string extra,
-        string text, string[] stateParts)
-    {
-        switch (step)
-        {
-            case "pick":
-            {
-                var username = text.Trim().TrimStart('@').ToLowerInvariant();
-                var bot = await GetBotAsync(fromUserId, username);
-                if (bot == null)
-                {
-                    await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.",
-                        new TReplyKeyboardHide());
-                    return;
-                }
-
-                await SaveDraftAsync(fromUserId, new BsonDocument
-                {
-                    ["_id"] = DraftId(fromUserId),
-                    ["user_id"] = fromUserId,
-                    ["username"] = username
-                });
-
-                await SetStateAsync(fromUserId, "newapp:title");
-                await SendAsync(input, fromUserId,
-                    $"Creating a new web app for @{username}. Please enter a title for the web app.",
-                    new TReplyKeyboardHide());
-                break;
-            }
-
-            case "title":
-                await UpdateDraftAsync(fromUserId, "title", text);
-                await SetStateAsync(fromUserId, "newapp:description");
-                await SendAsync(input, fromUserId, "Please enter a short description of the web app.");
-                break;
-
-            case "description":
-                await UpdateDraftAsync(fromUserId, "description", text);
-                await SetStateAsync(fromUserId, "newapp:photo");
-                await SendAsync(input, fromUserId, $"Please upload a photo, {RequiredPhotoWidth}x{RequiredPhotoHeight} pixels.");
-                break;
-
-            case "photo":
-                // Only a photo upload advances this step; HandleMediaAsync deals with that.
-                await SendAsync(input, fromUserId,
-                    $"Please upload a photo, {RequiredPhotoWidth}x{RequiredPhotoHeight} pixels.");
-                break;
-
-            case "gif":
-                if (IsEmpty(text))
-                {
-                    await SetStateAsync(fromUserId, "newapp:url");
-                    await SendAsync(input, fromUserId,
-                        "No problem, you can always add a GIF later using the /editapp command. " +
-                        "Now please send me the Web App URL that will be opened when users follow a web app direct link.");
-                    return;
-                }
-
-                await SendAsync(input, fromUserId, "Now upload a demo GIF or send /empty to skip this step.");
-                break;
-
-            case "url":
-            {
-                if (!IsHttpsUrl(text))
-                {
-                    await SendAsync(input, fromUserId, "Please send me a valid URL. https is required.");
-                    return;
-                }
-
-                await UpdateDraftAsync(fromUserId, "url", text.Trim());
-                await SetStateAsync(fromUserId, "newapp:shortname");
-
-                var draft = await GetDraftAsync(fromUserId);
-                await SendAsync(input, fromUserId,
-                    "Good! Now please choose a short name for your web app: 3-30 characters, a-zA-Z0-9_. " +
-                    $"This short name will be used in URLs like t.me/{GetString(draft, "username")}/myapp and serve " +
-                    "as a unique identifier for your web app.");
-                break;
-            }
-
-            case "shortname":
-            {
-                var shortName = text.Trim();
-                if (!AppShortNameRegex.IsMatch(shortName))
-                {
-                    await SendAsync(input, fromUserId,
-                        "Sorry, this short name is invalid. It must be 3-30 characters long and contain only a-zA-Z0-9_.");
-                    return;
-                }
-
-                var draft = await GetDraftAsync(fromUserId);
-                var username = GetString(draft, "username");
-
-                var bot = await GetBotAsync(fromUserId, username);
-                if (bot == null)
-                {
-                    await ClearStateAsync(fromUserId);
-                    await DeleteDraftAsync(fromUserId);
-                    await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.");
-                    return;
-                }
-
-                var botUserId = bot["BotUserId"].AsInt64;
-                if (await GetAppAsync(botUserId, shortName) != null)
-                {
-                    await SendAsync(input, fromUserId,
-                        "Sorry, this short name is already taken. Please choose a different one.");
-                    return;
-                }
-
-                await CreateAppAsync(botUserId, shortName, draft!);
-                await ClearStateAsync(fromUserId);
-                await DeleteDraftAsync(fromUserId);
-                await SendAsync(input, fromUserId,
-                    $"You can now use {shortName} as the short_name parameter value in Bot API. " +
-                    $"Your web app link is t.me/{username}/{shortName}. Open it to start developing your web app!");
-                break;
-            }
-        }
-    }
-
-    private async Task HandleEditAppStateAsync(IRequestInput input, long fromUserId, string step, string extra,
-        string text, string[] stateParts)
-    {
-        switch (step)
-        {
-            case "link":
-            {
-                var app = await ResolveAppLinkAsync(fromUserId, text);
-                if (app == null)
-                {
-                    await SendAsync(input, fromUserId, "Invalid web app link.");
-                    return;
-                }
-
-                await SetStateAsync(fromUserId, $"editapp:title:{app.Value.Username}:{app.Value.ShortName}");
-                await SendAsync(input, fromUserId,
-                    $"Ok. Please enter the new title. Current title: {GetString(app.Value.Document, "title")}. " +
-                    "Use /skip to leave the title as is.");
-                break;
-            }
-
-            case "title":
-            {
-                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
-                if (!IsSkip(text))
-                {
-                    await UpdateAppFieldAsync(fromUserId, extra, shortName, "title", text);
-                    await MarkEditChangedAsync(fromUserId);
-                }
-
-                await SetStateAsync(fromUserId, $"editapp:description:{extra}:{shortName}");
-                var app = await ResolveAppAsync(fromUserId, extra, shortName);
-                await SendAsync(input, fromUserId,
-                    $"Please enter the new description. Current description: {GetString(app, "description")}. " +
-                    "Use /skip to leave the description as is.");
-                break;
-            }
-
-            case "description":
-            {
-                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
-                if (!IsSkip(text))
-                {
-                    await UpdateAppFieldAsync(fromUserId, extra, shortName, "description", text);
-                    await MarkEditChangedAsync(fromUserId);
-                }
-
-                await SetStateAsync(fromUserId, $"editapp:photo:{extra}:{shortName}");
-                await SendAsync(input, fromUserId, "Please send a new photo. Use /skip to leave the photo as is.");
-                break;
-            }
-
-            case "photo":
-            {
-                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
-
-                // A photo upload is handled by HandleMediaAsync; only /skip moves on from text.
-                if (!IsSkip(text))
-                {
-                    await SendAsync(input, fromUserId, "Please send a new photo. Use /skip to leave the photo as is.");
-                    return;
-                }
-
-                await SetStateAsync(fromUserId, $"editapp:gif:{extra}:{shortName}");
-                await SendAsync(input, fromUserId,
-                    "Please send a new GIF. Use /skip to leave the GIF as is or /empty to remove the current GIF.");
-                break;
-            }
-
-            case "gif":
-            {
-                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
-
-                if (IsEmpty(text))
-                {
-                    await UpdateAppMediaAsync(fromUserId, extra, shortName, "gif", null);
-                    await MarkEditChangedAsync(fromUserId);
-                }
-                else if (!IsSkip(text))
-                {
-                    await SendAsync(input, fromUserId,
-                        "Please send a new GIF. Use /skip to leave the GIF as is or /empty to remove the current GIF.");
-                    return;
-                }
-
-                await SetStateAsync(fromUserId, $"editapp:url:{extra}:{shortName}");
-                await SendAsync(input, fromUserId,
-                    "Please send a new web app URL. Use /skip to leave the URL as is.");
-                break;
-            }
-
-            case "url":
-            {
-                var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
-
-                if (IsSkip(text))
-                {
-                    var changed = await ConsumeEditChangedAsync(fromUserId);
-                    await ClearStateAsync(fromUserId);
-                    await SendAsync(input, fromUserId, changed ? "Success!" : "No changes were made.");
-                    return;
-                }
-
-                if (!IsHttpsUrl(text))
-                {
-                    await SendAsync(input, fromUserId, "Please send me a valid URL. https is required.");
-                    return;
-                }
-
-                await UpdateAppFieldAsync(fromUserId, extra, shortName, "url", text);
-                await ConsumeEditChangedAsync(fromUserId);
-                await ClearStateAsync(fromUserId);
-                await SendAsync(input, fromUserId, "Success!");
-                break;
-            }
-        }
-    }
-
-    private async Task HandleDeleteAppStateAsync(IRequestInput input, long fromUserId, string step, string extra,
-        string text)
-    {
-        switch (step)
-        {
-            case "link":
-            {
-                var app = await ResolveAppLinkAsync(fromUserId, text);
-                if (app == null)
-                {
-                    await SendAsync(input, fromUserId, "Invalid web app link.");
-                    return;
-                }
-
-                await SetStateAsync(fromUserId, $"deleteapp:confirm:{app.Value.Username}:{app.Value.ShortName}");
-                await SendAsync(input, fromUserId,
-                    $"Ok, deleting {app.Value.ShortName} ({GetString(app.Value.Document, "title")} " +
-                    $"(t.me/{app.Value.Username}/{app.Value.ShortName})). " +
-                    "Please type 'Yes, I am totally sure.' to proceed.");
-                break;
-            }
-
-            case "confirm":
-            {
-                if (!text.Trim().Equals("Yes, I am totally sure.", StringComparison.Ordinal))
-                {
-                    await SendAsync(input, fromUserId,
-                        "Please type 'Yes, I am totally sure.' to proceed, or /cancel to abort.");
-                    return;
-                }
-
-                // State is deleteapp:confirm:<username>:<shortName>.
-                var parts = (await GetStateAsync(fromUserId))?.Split(':') ?? [];
-                var username = parts.Length > 2 ? parts[2] : extra;
-                var shortName = parts.Length > 3 ? parts[3] : string.Empty;
-
-                var bot = await GetBotAsync(fromUserId, username);
-                await ClearStateAsync(fromUserId);
-
-                if (bot == null)
-                {
-                    await SendAsync(input, fromUserId, "Invalid web app link.");
-                    return;
-                }
-
-                await mongoDatabase.GetCollection<BsonDocument>(AppCollection).DeleteOneAsync(
-                    Builders<BsonDocument>.Filter.And(
-                        Builders<BsonDocument>.Filter.Eq("bot_id", bot["BotUserId"].AsInt64),
-                        Builders<BsonDocument>.Filter.Eq("short_name", shortName)));
-
-                await SendAsync(input, fromUserId, "Success");
-                break;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Sets or clears the bot's main mini app URL - the one behind the profile's "Open App" button,
-    /// used by messages.requestMainWebView.
-    /// </summary>
-    private async Task HandleMainAppUrlAsync(IRequestInput input, long fromUserId, string username, string text)
-    {
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null)
-        {
-            await ClearStateAsync(fromUserId);
-            await SendAsync(input, fromUserId, $"I couldn't find a bot @{username} owned by you.");
-            return;
-        }
-
-        var botUserId = bot["BotUserId"].AsInt64;
-
-        if (text.Trim().Equals("/empty", StringComparison.OrdinalIgnoreCase))
-        {
-            await ClearStateAsync(fromUserId);
-            await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
-                new BsonDocument("BotUserId", botUserId),
-                new BsonDocument("$unset", new BsonDocument("MainAppUrl", "")));
-            await SetBotHasMainAppAsync(botUserId, false);
-            await SendAsync(input, fromUserId, "Success! Mini App disabled for this bot.");
-            return;
-        }
-
-        if (!IsHttpsUrl(text))
-        {
-            await SendAsync(input, fromUserId, "Please send me a valid URL. https is required.");
-            return;
-        }
-
-        await ClearStateAsync(fromUserId);
-        await mongoDatabase.GetCollection<BsonDocument>(BotCollection).UpdateOneAsync(
-            new BsonDocument("BotUserId", botUserId),
-            new BsonDocument("$set", new BsonDocument("MainAppUrl", text.Trim())));
-
-        // BotHasMainApp on the user read model is what makes clients show the "Open App" button.
-        await SetBotHasMainAppAsync(botUserId, true);
-
-        await SendAsync(input, fromUserId, "Success! Mini App settings updated.",
-            InlineRows(
-                InlineRow(Btn("« Back to Bot", $"bot_select:{username}")),
-                InlineRow(Btn("« Back to Bot List", "back_to_bots"))
-            ));
-    }
-
-    private async Task SendMainAppMenuAsync(IRequestInput input, long fromUserId, int msgId, string username)
-    {
-        var bot = await GetBotAsync(fromUserId, username);
-        if (bot == null) return;
-
-        var currentUrl = bot.TryGetValue("MainAppUrl", out var urlValue) && urlValue.IsString
-            ? urlValue.AsString
-            : null;
-
-        var status = string.IsNullOrEmpty(currentUrl)
-            ? $"Mini App is currently disabled for @{username}."
-            : $"Mini App URL for @{username}: {currentUrl}";
-
-        await SetStateAsync(fromUserId, $"mainapp:url:{username}");
-        await EditMessageAsync(input, fromUserId, msgId,
-            $"{status}\n\nSend me the Mini App URL that will be opened by tapping the 'Open App' button.\n\n" +
-            "Use /empty to disable Mini App for this bot.",
-            InlineRows(InlineRow(Btn("« Back to Settings", $"bot_settings:{username}"))));
-    }
-
-    /// <summary>Lists every web app the user owns, one inline button per app.</summary>
-    private async Task SendMyAppsAsync(IRequestInput input, long fromUserId)
-    {
-        var bots = await GetUserBotsAsync(fromUserId);
-        if (bots.Count == 0)
-        {
-            await SendAsync(input, fromUserId, "You have no bots yet. Use /newbot to create one.");
-            return;
-        }
-
-        var rows = new List<TKeyboardButtonRow>();
-        foreach (var bot in bots)
-        {
-            var username = bot["Username"].AsString;
-            foreach (var app in await GetBotAppsAsync(bot["BotUserId"].AsInt64))
-            {
-                var shortName = GetString(app, "short_name");
-                rows.Add(InlineRow(Btn($"{GetString(app, "title")} @{username}",
-                    $"app_select:{username}:{shortName}")));
-            }
-        }
-
-        if (rows.Count == 0)
-        {
-            await SendAsync(input, fromUserId,
-                "You currently have no web apps. Use /newapp command to create a first web app.");
-            return;
-        }
-
-        await SendAsync(input, fromUserId, "Choose a web app:", InlineRows(rows.ToArray()));
-    }
-
-    private async Task SendAppListTextAsync(IRequestInput input, long fromUserId, string username, BsonDocument bot)
-    {
-        await ClearStateAsync(fromUserId);
-
-        var apps = await GetBotAppsAsync(bot["BotUserId"].AsInt64);
-        if (apps.Count == 0)
-        {
-            await SendAsync(input, fromUserId,
-                $"@{username} has no web apps. Use /newapp command to create one.", new TReplyKeyboardHide());
-            return;
-        }
-
-        var lines = apps.Select(a =>
-            $"• {GetString(a, "title")} - t.me/{username}/{GetString(a, "short_name")}\n  {GetString(a, "url")}");
-
-        await SendAsync(input, fromUserId,
-            $"Web apps of @{username}:\n\n{string.Join("\n", lines)}", new TReplyKeyboardHide());
-    }
-
-    private async Task SendAppMenuAsync(IRequestInput input, long fromUserId, int msgId, string username,
-        string shortName)
-    {
-        var app = await ResolveAppAsync(fromUserId, username, shortName);
-        if (app == null)
-        {
-            await EditMessageAsync(input, fromUserId, msgId, "Invalid web app link.", null);
-            return;
-        }
-
-        await EditMessageAsync(input, fromUserId, msgId,
-            $"Web app {GetString(app, "title")} (t.me/{username}/{shortName})\n\n" +
-            $"Description: {GetString(app, "description")}\n" +
-            $"URL: {GetString(app, "url")}",
-            InlineRows(InlineRow(Btn("« Back to Bot List", "back_to_bots"))));
-    }
-
-    // --- Web app DB helpers ---
-
-    private async Task CreateAppAsync(long botId, string shortName, BsonDocument draft)
-    {
-        var document = new BsonDocument
-        {
-            ["bot_id"] = botId,
-            ["app_id"] = await GetNextAppIdAsync(),
-            ["access_hash"] = Random.Shared.NextInt64(),
-            ["short_name"] = shortName,
-            ["title"] = GetString(draft, "title"),
-            ["description"] = GetString(draft, "description"),
-            ["url"] = GetString(draft, "url"),
-            ["hash"] = Random.Shared.NextInt64(),
-            ["request_write_access"] = false,
-            ["has_settings"] = false,
-            ["inactive"] = false,
-            ["created_at"] = DateTime.UtcNow.ToTimestamp()
-        };
-
-        // Photo is mandatory in the flow, the demo GIF is optional.
-        if (draft.TryGetValue("photo", out var photo) && photo.BsonType == BsonType.Binary)
-        {
-            document["photo"] = photo;
-        }
-
-        if (draft.TryGetValue("gif", out var gif) && gif.BsonType == BsonType.Binary)
-        {
-            document["gif"] = gif;
-        }
-
-        await mongoDatabase.GetCollection<BsonDocument>(AppCollection).InsertOneAsync(document);
-    }
-
-    private async Task<long> GetNextAppIdAsync()
-    {
-        var result = await mongoDatabase.GetCollection<BsonDocument>("counters").FindOneAndUpdateAsync(
-            Builders<BsonDocument>.Filter.Eq("_id", "bot_app_id"),
-            Builders<BsonDocument>.Update.Inc("seq", 1),
-            new FindOneAndUpdateOptions<BsonDocument> { IsUpsert = true, ReturnDocument = ReturnDocument.After });
-
-        return result["seq"].ToInt64();
-    }
-
-    private async Task<BsonDocument?> GetAppAsync(long botId, string shortName)
-    {
-        return await mongoDatabase.GetCollection<BsonDocument>(AppCollection)
-            .Find(Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("bot_id", botId),
-                Builders<BsonDocument>.Filter.Eq("short_name", shortName)))
-            .FirstOrDefaultAsync();
-    }
-
-    private async Task<List<BsonDocument>> GetBotAppsAsync(long botId)
-    {
-        return await mongoDatabase.GetCollection<BsonDocument>(AppCollection)
-            .Find(Builders<BsonDocument>.Filter.Eq("bot_id", botId))
-            .Sort(Builders<BsonDocument>.Sort.Ascending("created_at"))
-            .ToListAsync();
-    }
-
-    private async Task<BsonDocument?> ResolveAppAsync(long ownerId, string username, string shortName)
-    {
-        var bot = await GetBotAsync(ownerId, username);
-        return bot == null ? null : await GetAppAsync(bot["BotUserId"].AsInt64, shortName);
-    }
-
-    /// <summary>
-    /// Parses a web app link (t.me/bot/app, https://t.me/bot/app, @bot/app) and verifies the caller
-    /// owns the bot behind it.
-    /// </summary>
-    private async Task<(string Username, string ShortName, BsonDocument Document)?> ResolveAppLinkAsync(
-        long ownerId, string link)
-    {
-        var value = link.Trim();
-        foreach (var prefix in new[] { "https://", "http://" })
-        {
-            if (value.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                value = value[prefix.Length..];
-            }
-        }
-
-        foreach (var host in new[] { "t.me/", "telegram.me/" })
-        {
-            if (value.StartsWith(host, StringComparison.OrdinalIgnoreCase))
-            {
-                value = value[host.Length..];
-            }
-        }
-
-        var segments = value.TrimStart('@').Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (segments.Length != 2)
-        {
-            return null;
-        }
-
-        var username = segments[0].ToLowerInvariant();
-        var shortName = segments[1];
-
-        var bot = await GetBotAsync(ownerId, username);
-        if (bot == null)
-        {
-            return null;
-        }
-
-        var app = await GetAppAsync(bot["BotUserId"].AsInt64, shortName);
-        return app == null ? null : (username, shortName, app);
-    }
-
-    private async Task UpdateAppFieldAsync(long ownerId, string username, string shortName, string field, string value)
-    {
-        var bot = await GetBotAsync(ownerId, username);
-        if (bot == null) return;
-
-        await mongoDatabase.GetCollection<BsonDocument>(AppCollection).UpdateOneAsync(
-            Builders<BsonDocument>.Filter.And(
-                Builders<BsonDocument>.Filter.Eq("bot_id", bot["BotUserId"].AsInt64),
-                Builders<BsonDocument>.Filter.Eq("short_name", shortName)),
-            Builders<BsonDocument>.Update
-                .Set(field, value.Trim())
-                // Bump the hash so clients refetch via messages.getBotApp.
-                .Set("hash", Random.Shared.NextInt64()));
-    }
-
-    private async Task SetBotHasMainAppAsync(long botUserId, bool hasMainApp)
-    {
-        await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel").UpdateOneAsync(
-            new BsonDocument("UserId", botUserId),
-            new BsonDocument("$set", new BsonDocument("BotHasMainApp", hasMainApp)));
-    }
-
-    private static bool IsSkip(string text) =>
-        text.Trim().Equals("/skip", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsEmpty(string text) =>
-        text.Trim().Equals("/empty", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsHttpsUrl(string text) =>
-        Uri.TryCreate(text.Trim(), UriKind.Absolute, out var uri) && uri.Scheme == Uri.UriSchemeHttps;
-
-    private static string GetString(BsonDocument? doc, string name)
-    {
-        return doc != null && doc.TryGetValue(name, out var value) && value.IsString ? value.AsString : string.Empty;
-    }
-
-    // --- Media uploads ---
-
-    /// <summary>Web app preview photos must be exactly this size, as upstream BotFather requires.</summary>
-    private const int RequiredPhotoWidth = BotAppMediaValidator.RequiredPhotoWidth;
-
-    private const int RequiredPhotoHeight = BotAppMediaValidator.RequiredPhotoHeight;
-
-    private const string DraftCollection = "botfather-app-drafts";
-
-    /// <summary>
-    /// Handles a photo or GIF sent to BotFather. Which step is waiting for it is decided by the FSM
-    /// state, so an upload arriving out of turn is politely ignored rather than mis-filed.
-    /// </summary>
-    public async Task HandleMediaAsync(IRequestInput input, long fromUserId, IMessageMedia? media)
-    {
-        if (media == null)
-        {
-            return;
-        }
-
-        var state = await GetStateAsync(fromUserId);
-        if (state == null)
-        {
-            return;
-        }
-
-        var parts = state.Split(':');
-        var flow = parts[0];
-        var step = parts.Length > 1 ? parts[1] : string.Empty;
-
-        switch (flow)
-        {
-            case "newapp" when step == "photo":
-                await HandleNewAppPhotoAsync(input, fromUserId, media);
-                break;
-
-            case "newapp" when step == "gif":
-                await HandleNewAppGifAsync(input, fromUserId, media);
-                break;
-
-            case "editapp" when step == "photo":
-                await HandleEditAppPhotoAsync(input, fromUserId, media, parts);
-                break;
-
-            case "editapp" when step == "gif":
-                await HandleEditAppGifAsync(input, fromUserId, media, parts);
-                break;
-        }
-    }
-
-    private async Task HandleNewAppPhotoAsync(IRequestInput input, long fromUserId, IMessageMedia media)
-    {
-        if (media is not TMessageMediaPhoto)
-        {
-            await SendAsync(input, fromUserId,
-                $"Please upload a photo, {RequiredPhotoWidth}x{RequiredPhotoHeight} pixels.");
-            return;
-        }
-
-        if (!BotAppMediaValidator.IsValidPreviewPhoto(media))
-        {
-            await SendAsync(input, fromUserId,
-                $"Sorry, the image dimensions are invalid. Must be {RequiredPhotoWidth}x{RequiredPhotoHeight}.");
-            return;
-        }
-
-        await UpdateDraftAsync(fromUserId, "photo", media.ToBytes());
-        await SetStateAsync(fromUserId, "newapp:gif");
-        await SendAsync(input, fromUserId, "Now upload a demo GIF or send /empty to skip this step.");
-    }
-
-    private async Task HandleNewAppGifAsync(IRequestInput input, long fromUserId, IMessageMedia media)
-    {
-        if (!BotAppMediaValidator.IsAnimation(media))
-        {
-            await SendAsync(input, fromUserId, "Please upload a GIF or send /empty to skip this step.");
-            return;
-        }
-
-        await UpdateDraftAsync(fromUserId, "gif", media.ToBytes());
-        await SetStateAsync(fromUserId, "newapp:url");
-        await SendAsync(input, fromUserId,
-            "Now please send me the Web App URL that will be opened when users follow a web app direct link.");
-    }
-
-    private async Task HandleEditAppPhotoAsync(IRequestInput input, long fromUserId, IMessageMedia media,
-        string[] stateParts)
-    {
-        var username = stateParts.Length > 2 ? stateParts[2] : string.Empty;
-        var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
-
-        if (media is not TMessageMediaPhoto)
-        {
-            await SendAsync(input, fromUserId, "Please send a new photo. Use /skip to leave the photo as is.");
-            return;
-        }
-
-        if (!BotAppMediaValidator.IsValidPreviewPhoto(media))
-        {
-            await SendAsync(input, fromUserId,
-                $"Sorry, the image dimensions are invalid. Must be {RequiredPhotoWidth}x{RequiredPhotoHeight}.");
-            return;
-        }
-
-        await UpdateAppMediaAsync(fromUserId, username, shortName, "photo", media.ToBytes());
-        await MarkEditChangedAsync(fromUserId);
-
-        await SetStateAsync(fromUserId, $"editapp:gif:{username}:{shortName}");
-        await SendAsync(input, fromUserId,
-            "Please send a new GIF. Use /skip to leave the GIF as is or /empty to remove the current GIF.");
-    }
-
-    private async Task HandleEditAppGifAsync(IRequestInput input, long fromUserId, IMessageMedia media,
-        string[] stateParts)
-    {
-        var username = stateParts.Length > 2 ? stateParts[2] : string.Empty;
-        var shortName = stateParts.Length > 3 ? stateParts[3] : string.Empty;
-
-        if (!BotAppMediaValidator.IsAnimation(media))
-        {
-            await SendAsync(input, fromUserId,
-                "Please send a new GIF. Use /skip to leave the GIF as is or /empty to remove the current GIF.");
-            return;
-        }
-
-        await UpdateAppMediaAsync(fromUserId, username, shortName, "gif", media.ToBytes());
-        await MarkEditChangedAsync(fromUserId);
-
-        await SetStateAsync(fromUserId, $"editapp:url:{username}:{shortName}");
-        await SendAsync(input, fromUserId, "Please send a new web app URL. Use /skip to leave the URL as is.");
-    }
-
-    // --- Web app draft helpers ---
-    //
-    // A /newapp run spans several messages and now carries binary media, so the draft lives in
-    // Mongo rather than being packed into the ':'-delimited FSM state string.
-
-    private static string DraftId(long userId) => $"botfather-app-draft-{userId}";
-
-    private async Task SaveDraftAsync(long userId, BsonDocument draft)
-    {
-        await mongoDatabase.GetCollection<BsonDocument>(DraftCollection).ReplaceOneAsync(
-            Builders<BsonDocument>.Filter.Eq("_id", DraftId(userId)),
-            draft,
-            new ReplaceOptions { IsUpsert = true });
-    }
-
-    private async Task UpdateDraftAsync(long userId, string field, BsonValue value)
-    {
-        await mongoDatabase.GetCollection<BsonDocument>(DraftCollection).UpdateOneAsync(
-            Builders<BsonDocument>.Filter.Eq("_id", DraftId(userId)),
-            Builders<BsonDocument>.Update.Set(field, value).SetOnInsert("user_id", userId),
-            new UpdateOptions { IsUpsert = true });
-    }
-
-    private async Task<BsonDocument?> GetDraftAsync(long userId)
-    {
-        return await mongoDatabase.GetCollection<BsonDocument>(DraftCollection)
-            .Find(Builders<BsonDocument>.Filter.Eq("_id", DraftId(userId)))
-            .FirstOrDefaultAsync();
-    }
-
-    private async Task DeleteDraftAsync(long userId)
-    {
-        await mongoDatabase.GetCollection<BsonDocument>(DraftCollection)
-            .DeleteOneAsync(Builders<BsonDocument>.Filter.Eq("_id", DraftId(userId)));
-    }
-
-    /// <summary>
-    /// Records that an /editapp run has changed something, so the final step can honestly say
-    /// "Success!" versus "No changes were made."
-    /// </summary>
-    private async Task MarkEditChangedAsync(long userId)
-    {
-        await UpdateDraftAsync(userId, "edit_changed", true);
-    }
-
-    private async Task<bool> ConsumeEditChangedAsync(long userId)
-    {
-        var draft = await GetDraftAsync(userId);
-        await DeleteDraftAsync(userId);
-
-        return draft != null && draft.TryGetValue("edit_changed", out var value) && value.IsBoolean &&
-               value.AsBoolean;
-    }
-
-    /// <summary>Sets or clears a media field on a stored web app.</summary>
-    private async Task UpdateAppMediaAsync(long ownerId, string username, string shortName, string field,
-        byte[]? bytes)
-    {
-        var bot = await GetBotAsync(ownerId, username);
-        if (bot == null) return;
-
-        var filter = Builders<BsonDocument>.Filter.And(
-            Builders<BsonDocument>.Filter.Eq("bot_id", bot["BotUserId"].AsInt64),
-            Builders<BsonDocument>.Filter.Eq("short_name", shortName));
-
-        var update = bytes == null
-            ? Builders<BsonDocument>.Update.Unset(field)
-            : Builders<BsonDocument>.Update.Set(field, bytes);
-
-        // Bump the hash so clients refetch via messages.getBotApp.
-        await mongoDatabase.GetCollection<BsonDocument>(AppCollection).UpdateOneAsync(
-            filter, update.Set("hash", Random.Shared.NextInt64()));
-    }
+    [GeneratedRegex("^[a-zA-Z][a-zA-Z0-9_]{4,31}$")]
+    private static partial Regex BotUserNameRegex();
+
+    [GeneratedRegex("^[a-z0-9_]{1,32}$")]
+    private static partial Regex BotCommandNameRegex();
 }

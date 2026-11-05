@@ -1618,6 +1618,56 @@ See https://corefork.telegram.org/api/wallpapers
 
 ---
 
+## BotFather
+
+`BotFatherBotService` (+ `.WebApps.cs`, `.Settings.cs`) answers @BotFather in-process; texts, keyboards and entities were
+measured against real BotFather with Telethon on 2026-11-02. Only commands the server can carry out are
+offered; Payments has no button (no "soon" stubs).
+
+- **Where each field lives** (BotFather bots are read-model-only, see the memory note): name →
+  `botfather-bot-state.Name` + user `FirstName`; about → user `About`; description and privacy policy →
+  `bot_info` (`LangCode ""`); commands → `bot_commands` default scope; menu button → `bot_menu_buttons`
+  (`UserId: null`). These are the documents `bots.set*` write and `users.getFullUser` reads. Every bot-info
+  change bumps `BotInfoVersion` so clients drop their cached `botInfo`, and drops the cached user read model.
+- **Inline mode needs `user.bot_inline_placeholder`**: clients never send an inline query to a bot without
+  one. `/setinline` stores it on the user read model (`BotInlinePlaceholder`) and sets
+  `botfather-bot-state.InlineEnabled`, which `getInlineBotResults` checks.
+- **`user.bot_nochats`** (`/setjoingroups`, "Allow Groups?") is `BotNochats` on the user read model; BotFather
+  itself is always nochats. `addChatUser`/`inviteToChannel` refuse such bots in groups with
+  `BOT_GROUPS_BLOCKED`, `createChat` leaves them out.
+- **Editing a menu in place**: `getBotCallbackAnswer` carries the message id from the *user's* box. BotFather's
+  own copy has a different id, found as the user copy's `SenderMessageId`; the edit command also needs a
+  non-zero `ReqMsgId` (0 is dropped as a repeat of the message's creation) and the encrypted bodies when message encryption is on.
+- **Botpic** (`/setuserpic`) points the bot's `ProfilePhotoId` at the photo the owner sent (a message photo is
+  a stored photo already). **Description picture** (`/setdescriptionpic`) is the sent `messageMedia` bytes in
+  `bot_info.DescriptionMedia`: a 640x360 photo or a 320x180/640x360/960x540 animation.
+- **Group privacy** (`/setprivacy`) is `BotPrivacyMode` on the user read model, served as `bot_chat_history`
+  (its negation). New bots get it on, as on prod; bots made before it existed have it off. `BotGroupPrivacyFilter`
+  drops such bots from the push of a group message (`excludeUserIds`) and from their `getChannelDifference`
+  unless the message starts with `/`, mentions or replies to the bot, is a service message, or the bot is admin.
+- **Default admin rights** live in `bot_default_admin_rights` (`Type` group/broadcast) via `BotDefaultAdminRights`,
+  shared with `bots.set*DefaultAdminRights`; `getFullUser` serves `bot_group_admin_rights`/`bot_broadcast_admin_rights`.
+- **Domain** (`/setdomain`) is `botfather-bot-state.Domain`. Bots' `inputKeyboardButtonUrlAuth` is converted to
+  `keyboardButtonUrlAuth` on send/edit (`UrlAuthService`, side data in `bot-url-auth-buttons`);
+  `requestUrlAuth`/`acceptUrlAuth` answer only for a button whose URL host is that domain (or a subdomain) and sign
+  the URL like the legacy Login Widget: `hash = hex(HMAC-SHA256(sorted key=value lines, SHA256(bot token)))`.
+  Bare links (`url` only) get `urlAuthResultDefault`: the server advertises no `url_auth_domains`.
+- **Transfer ownership** asks for a recipient (username or shared contact) who has a dialog with the bot and a
+  free bot slot, then a `requires_password` button; `getBotCallbackAnswer` checks the SRP password first
+  (`PASSWORD_MISSING`, `PASSWORD_TOO_FRESH_%d` within 7 days of setting it, `PASSWORD_HASH_INVALID`).
+- **Paid broadcast**: `BotBroadcastLimiter` holds every bot to 30 messages per second (Redis window per bot,
+  `FLOOD_WAIT_1` past it) in sendMessage/sendMedia/sendMultiMedia/forwardMessages. With
+  `botfather-bot-state.PaidBroadcast` and `allow_paid_floodskip` the cap is 1000/s and each message over 30 costs
+  0.1 Star; the ledger keeps whole Stars, so a Star is debited per ten (`floodskip_number` on the row, the remainder
+  in `bot-broadcast-billed:{bot}`), `BALANCE_TOO_LOW` when it cannot be paid. Enabling needs MAU ≥ 10000 (what prod's
+  screen showed; MAU = distinct senders to the bot in 30 days, also stored as `BotActiveUsers`) and ≥ 100000 Stars
+  (Bot FAQ).
+- `/cancel` names the flow (`The command setname has been cancelled...`); any other unknown command answers
+  `Unrecognized command. Say what?`, plain text without a flow answers with the help text.
+- The seeder writes BotFather's own description and "/" menu (`UpdateBotFatherProfileAsync`). Its about text
+  goes through `UpdateAboutCommand`, so installs whose BotFather predates the seeder (no aggregate) keep the
+  old one.
+
 ## Telegram Business
 
 Spec: https://core.telegram.org/api/business, https://core.telegram.org/api/bots/connected-business-bots. Client
