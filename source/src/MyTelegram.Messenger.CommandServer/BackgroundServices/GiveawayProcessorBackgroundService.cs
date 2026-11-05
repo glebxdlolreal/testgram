@@ -527,8 +527,10 @@ public class GiveawayProcessorBackgroundService : BackgroundService
                 for (int i = 0; i < claimedCount; i++)
                 {
                     // Each Premium subscription gives 4 boosts to the channel
-                    // These boosts are tied to the giveaway and last for the subscription duration
-                    var boostId = $"giveaway-boost-{channelId}-{msgId}-{i}";
+                    // These boosts are tied to the giveaway and last for the subscription duration.
+                    // Keyed by the giveaway, not its message id: most giveaways carry MsgId 0, so a
+                    // channel's second one collided with the first one's boosts.
+                    var boostId = $"{giveaway["_id"].AsString}-boost-{i}";
                     var expiresAt = DateTime.UtcNow.AddMonths(months);
 
                     boostDocs.Add(new BsonDocument
@@ -547,7 +549,11 @@ public class GiveawayProcessorBackgroundService : BackgroundService
 
                 if (boostDocs.Count > 0)
                 {
-                    await boostCol.InsertManyAsync(boostDocs, cancellationToken: cancellationToken);
+                    // Upserts, so a completion retried after a partial run cannot fail here.
+                    await boostCol.BulkWriteAsync(
+                        boostDocs.Select(d => new ReplaceOneModel<BsonDocument>(
+                            Builders<BsonDocument>.Filter.Eq("_id", d["_id"]), d) { IsUpsert = true }),
+                        cancellationToken: cancellationToken);
                     _logger.LogInformation("Added {Count} boosts (4 per claimed winner) to channel {ChannelId} from giveaway",
                         boostDocs.Count, channelId);
                 }
