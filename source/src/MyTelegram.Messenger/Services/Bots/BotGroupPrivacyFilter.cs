@@ -23,9 +23,6 @@ public class BotGroupPrivacyFilter(
     IQueryProcessor queryProcessor,
     IUserAppService userAppService) : IBotGroupPrivacyFilter, ITransientDependency
 {
-    /// <summary>More bots than this in one group is not a case worth a second page.</summary>
-    private const int MaxBots = 200;
-
     public async Task<List<long>> GetExcludedBotIdsAsync(IChannelReadModel channel, MessageItem item,
         IReadOnlyCollection<long>? mentionedUserIds)
     {
@@ -42,8 +39,7 @@ public class BotGroupPrivacyFilter(
             return [];
         }
 
-        var bots = await queryProcessor.ProcessAsync(
-            new GetChannelMembersByChannelIdQuery(channel.ChannelId, [], 0, MaxBots, OnlyBots: true));
+        var bots = await queryProcessor.ProcessAsync(new GetBotMembersByChannelIdQuery(channel.ChannelId));
         var admins = channel.AdminList.Select(p => p.UserId).Append(channel.CreatorId).ToHashSet();
 
         // Bot admins always receive all messages.

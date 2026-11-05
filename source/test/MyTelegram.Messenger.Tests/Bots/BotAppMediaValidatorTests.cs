@@ -83,6 +83,26 @@ public class BotAppMediaValidatorTests
     }
 
     [Fact]
+    public void A_640x360_upload_as_the_server_stores_it_is_accepted()
+    {
+        // Measured: the server keeps a 640x360 upload as 320x180 + 800x450, never 640x360 itself.
+        BotAppMediaValidator.IsValidPreviewPhoto(PhotoWithSizes((320, 180), (800, 450))).ShouldBeTrue();
+    }
+
+    [Fact]
+    public void A_larger_16_by_9_upload_is_rejected()
+    {
+        // 1280x720 gets the 1280 step of the ladder too.
+        BotAppMediaValidator.IsValidPreviewPhoto(PhotoWithSizes((320, 180), (800, 450), (1280, 720))).ShouldBeFalse();
+    }
+
+    [Fact]
+    public void A_4_by_3_upload_is_rejected()
+    {
+        BotAppMediaValidator.IsValidPreviewPhoto(PhotoWithSizes((320, 240), (800, 600))).ShouldBeFalse();
+    }
+
+    [Fact]
     public void Transposed_dimensions_are_rejected()
     {
         // 360x640 is portrait, not the landscape banner the profile page expects.

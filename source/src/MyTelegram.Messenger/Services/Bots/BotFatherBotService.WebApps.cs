@@ -574,9 +574,7 @@ public partial class BotFatherBotService
 
     private async Task SetBotHasMainAppAsync(long botUserId, bool hasMainApp)
     {
-        await mongoDatabase.GetCollection<BsonDocument>("eventflow-userreadmodel").UpdateOneAsync(
-            new BsonDocument("UserId", botUserId),
-            new BsonDocument("$set", new BsonDocument("BotHasMainApp", hasMainApp)));
+        await UpdateBotUserAsync(botUserId, Builders<BsonDocument>.Update.Set("BotHasMainApp", hasMainApp));
     }
 
     private static bool IsSkip(string text) =>

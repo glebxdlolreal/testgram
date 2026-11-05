@@ -25,6 +25,7 @@ public static class MyTelegramMessengerQueryServerExtensions
         services.AddSubscription<UploadDataReceivedEvent, MessengerEventHandler>();
 
         services.AddSubscription<UserIsOnlineEvent, UserIsOnlineEventHandler>();
+        services.AddSubscription<MyTelegram.Messenger.Services.Bots.BotUserChangedEvent, MyTelegram.Messenger.Services.Bots.BotUserChangedEventHandler>();
 
         services.AddSubscription<DomainEventMessage, DistributedDomainEventHandler>();
         services.AddSubscription<DuplicateCommandEvent, DuplicateOperationExceptionHandler>();

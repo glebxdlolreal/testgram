@@ -37,7 +37,8 @@ public class BotBroadcastLimiter(
     IMongoDatabase mongoDatabase,
     IPeerHelper peerHelper,
     IUserAppService userAppService,
-    IReadModelCacheHelper<IUserReadModel> userReadModelCacheHelper) : IBotBroadcastLimiter, ITransientDependency
+    IReadModelCacheHelper<IUserReadModel> userReadModelCacheHelper,
+    IEventBus eventBus) : IBotBroadcastLimiter, ITransientDependency
 {
     public const int FreeMessagesPerSecond = 30;
     public const int PaidMessagesPerSecond = 1000;
@@ -139,6 +140,7 @@ public class BotBroadcastLimiter(
             Builders<BsonDocument>.Filter.Eq("UserId", botUserId),
             Builders<BsonDocument>.Update.Set("BotActiveUsers", count));
         userReadModelCacheHelper.RemoveById(botUserId);
+        await eventBus.PublishAsync(new BotUserChangedEvent(botUserId));
 
         return count;
     }

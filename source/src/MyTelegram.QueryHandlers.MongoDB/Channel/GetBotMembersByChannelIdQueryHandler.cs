@@ -7,7 +7,11 @@ public class GetBotMembersByChannelIdQueryHandler(IQueryOnlyReadModelStore<Chann
     public async Task<IReadOnlyCollection<IChannelMemberReadModel>> ExecuteQueryAsync(GetBotMembersByChannelIdQuery query,
         CancellationToken cancellationToken)
     {
-        return await store.FindAsync(p => p.ChannelId == query.ChannelId && p.IsBot && !p.Left && !p.Kicked,
+        // inviteToChannel did not mark bots for a long time, so members already in carry IsBot = false;
+        // bot accounts are recognised by their id block as well.
+        return await store.FindAsync(p => p.ChannelId == query.ChannelId && !p.Left && !p.Kicked &&
+                                          (p.IsBot || (p.UserId >= MyTelegramConsts.BotUserInitId &&
+                                                       p.UserId <= MyTelegramConsts.ChatIdInitId)),
             cancellationToken: cancellationToken);
     }
 }

@@ -30,23 +30,30 @@ public static class BotAppMediaValidator
             return false;
         }
 
-        foreach (var size in photo.Sizes)
-        {
-            var (width, height) = size switch
+        var sizes = photo.Sizes.Select(size => size switch
             {
-                TPhotoSize s => (s.W, s.H),
-                TPhotoSizeProgressive s => (s.W, s.H),
-                _ => (0, 0)
-            };
+                TPhotoSize s => (W: s.W, H: s.H),
+                TPhotoSizeProgressive s => (W: s.W, H: s.H),
+                _ => (W: 0, H: 0)
+            })
+            .Where(p => p.W > 0 && p.H > 0)
+            .ToList();
 
-            if (width == RequiredPhotoWidth && height == RequiredPhotoHeight)
-            {
-                return true;
-            }
+        if (sizes.Any(p => p.W == RequiredPhotoWidth && p.H == RequiredPhotoHeight))
+        {
+            return true;
         }
 
-        return false;
+        // The server rescales every upload to a fixed ladder (320, 800, 1280, 2560 on the long side), so a
+        // 640x360 upload arrives as 320x180 + 800x450 only: a 16:9 photo whose largest size is 800x450 was
+        // uploaded between 321 and 799 pixels wide, a larger one also gets 1280x720 (measured 2026-11-05).
+        return sizes.Count > 0 &&
+               sizes.All(p => Math.Abs(p.W * RequiredPhotoHeight - p.H * RequiredPhotoWidth) <= RequiredPhotoWidth) &&
+               sizes.Max(p => p.W) == ServerLadderWidth;
     }
+
+    /// <summary>The second step of the server's photo size ladder.</summary>
+    private const int ServerLadderWidth = 800;
 
     /// <summary>
     /// True when the media is an animation. A GIF reaches the server as a document carrying

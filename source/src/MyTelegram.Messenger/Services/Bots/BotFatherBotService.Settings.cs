@@ -451,13 +451,11 @@ public partial class BotFatherBotService
             return null;
         }
 
-        var row = await mongoDatabase.GetCollection<BsonDocument>("eventflow-usernamereadmodel")
-            .Find(Builders<BsonDocument>.Filter.Eq("_id", $"username-{name.ToLowerInvariant()}"))
-            .FirstOrDefaultAsync();
+        // Usernames made through the aggregate have a derived _id; only BotFather's own rows are
+        // "username-<name>", so this goes through the same query contacts.resolveUsername uses.
+        var row = await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(name.ToLowerInvariant()));
 
-        return row != null && row.TryGetValue("PeerType", out var type) && type.ToInt32() == (int)PeerType.User
-            ? row["PeerId"].ToInt64()
-            : null;
+        return row is { PeerType: PeerType.User } ? row.PeerId : null;
     }
 
     private static string DisplayName(BsonDocument? user)

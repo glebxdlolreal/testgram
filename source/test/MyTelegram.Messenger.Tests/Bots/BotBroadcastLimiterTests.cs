@@ -7,6 +7,7 @@ using MyTelegram.Messenger.Services.Interfaces;
 using MyTelegram.Messenger.Tests.Stats;
 using MyTelegram.ReadModel.Interfaces;
 using MyTelegram.Services.Services;
+using MyTelegram.EventBus;
 using StackExchange.Redis;
 
 namespace MyTelegram.Messenger.Tests.Bots;
@@ -138,6 +139,6 @@ public class BotBroadcastLimiterTests
             .ReturnsAsync((long id) => Mock.Of<IUserReadModel>(u => u.UserId == id && u.Bot));
 
         return new BotBroadcastLimiter(redis.Object, database ?? new Mock<IMongoDatabase>().Object,
-            peerHelper.Object, users.Object, Mock.Of<IReadModelCacheHelper<IUserReadModel>>());
+            peerHelper.Object, users.Object, Mock.Of<IReadModelCacheHelper<IUserReadModel>>(), Mock.Of<IEventBus>());
     }
 }

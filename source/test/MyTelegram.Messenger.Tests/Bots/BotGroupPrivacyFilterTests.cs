@@ -75,7 +75,7 @@ public class BotGroupPrivacyFilterTests
         };
 
         var queryProcessor = new Mock<IQueryProcessor>();
-        queryProcessor.Setup(p => p.ProcessAsync(It.IsAny<GetChannelMembersByChannelIdQuery>(), It.IsAny<CancellationToken>()))
+        queryProcessor.Setup(p => p.ProcessAsync(It.IsAny<GetBotMembersByChannelIdQuery>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(members);
         queryProcessor.Setup(p => p.ProcessAsync(It.IsAny<GetMessageByIdQuery>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(replyToSender == null ? null : Mock.Of<IMessageReadModel>(m => m.SenderPeerId == replyToSender.Value));

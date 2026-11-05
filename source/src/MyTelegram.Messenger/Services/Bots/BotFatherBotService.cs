@@ -47,6 +47,7 @@ public partial class BotFatherBotService(
     IOptionsMonitor<MyTelegramMessengerServerOptions> serverOptions,
     MyTelegram.Messenger.Services.TwoFactor.ITwoFactorService twoFactorService,
     IBotBroadcastLimiter botBroadcastLimiter,
+    IEventBus eventBus,
     ILogger<BotFatherBotService> logger) : IBotFatherBotService, ISingletonDependency
 {
     public const long BotUserId = MyTelegramConsts.BotFatherUserId;
@@ -816,9 +817,9 @@ public partial class BotFatherBotService(
         }
 
         username = username.ToLowerInvariant();
-        var taken = await mongoDatabase.GetCollection<BsonDocument>("eventflow-usernamereadmodel")
-            .Find(new BsonDocument("_id", $"username-{username}")).AnyAsync();
-        if (taken)
+        // Usernames made through the aggregate have a derived _id, so the name is looked up the way
+        // contacts.resolveUsername looks it up.
+        if (await queryProcessor.ProcessAsync(new GetUserNameByNameQuery(username)) != null)
         {
             await SendAsync(input, fromUserId,
                 "Sorry, this username is already taken. Please try something different.");
@@ -1312,6 +1313,7 @@ public partial class BotFatherBotService(
         await mongoDatabase.GetCollection<BsonDocument>(UserCollection)
             .UpdateOneAsync(Builders<BsonDocument>.Filter.Eq("UserId", botUserId), update);
         userReadModelCacheHelper.RemoveById(botUserId);
+        await eventBus.PublishAsync(new BotUserChangedEvent(botUserId));
     }
 
     /// <summary>A changed <c>user.bot_info_version</c> is what makes clients drop their cached bot info.</summary>

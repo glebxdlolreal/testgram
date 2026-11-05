@@ -103,6 +103,10 @@ internal sealed class InviteToChannelHandler(ICommandBus commandBus, IPeerHelper
                 inviterUserId = MyTelegramConsts.GroupAnonymousBotUserId;
             }
 
+            // Members are marked as bots here, the way addChatUser and createChat mark them; group privacy
+            // mode and the bot member queries rely on it.
+            botUserIds.AddRange(userIds.Where(peerHelper.IsBotUser));
+
             var command = new StartInviteToChannelCommand(TempId.New, input.ToRequestInfo(), channelId, channelReadModel.Broadcast, channelReadModel.HasLink, inviterUserId, channelReadModel.TopMessageId, channelReadModel.TopMessageId, userIds, botUserIds, ChatJoinType.InvitedByAdmin, privacyRestrictedUserIdList);
             await commandBus.PublishAsync(command);
 
