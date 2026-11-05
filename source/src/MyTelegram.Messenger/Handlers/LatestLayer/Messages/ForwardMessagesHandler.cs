@@ -238,6 +238,10 @@ public sealed class ForwardMessagesHandler(ICommandBus commandBus, IPeerHelper p
 
         var fromNames = await BuildAnonymousFromNamesAsync(input.UserId, messagesToCheck);
 
+        // Bots: the broadcast limit, and the paid messages over it (allow_paid_floodskip). Checked before
+        // the paths split: the saga path returns without reaching the code below.
+        await botBroadcastLimiter.CheckAsync(input.UserId, obj.Id.Count, obj.AllowPaidFloodskip);
+
         // The forward saga has no notion of a schedule queue, so a scheduled forward is built here and
         // handed to the same path a scheduled sendMessage takes.
         // See https://corefork.telegram.org/api/scheduled-messages
@@ -342,8 +346,6 @@ public sealed class ForwardMessagesHandler(ICommandBus commandBus, IPeerHelper p
             return null!;
         }
 
-        // Bots: the broadcast limit, and the paid messages over it (allow_paid_floodskip).
-        await botBroadcastLimiter.CheckAsync(input.UserId, inputs.Count, obj.AllowPaidFloodskip);
         await messageAppService.SendMessageAsync(inputs);
         await RecordForwardUsageAsync(input, toPeer);
 
